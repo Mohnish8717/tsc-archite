@@ -217,6 +217,23 @@ class PersonaCache:
             self._lists.clear(),
         )
 
+    async def get(self, key: str) -> Optional[Any]:
+        """Generic get that searches all internal caches."""
+        for cache in [self._internal, self._external, self._lists]:
+            res = await cache.get(key)
+            if res is not None:
+                return res
+        return None
+
+    async def set(self, key: str, value: Any) -> None:
+        """Generic set that chooses internal cache based on key."""
+        if "external" in key:
+            await self._external.set(key, value)
+        elif "list" in key or ":" in key:
+            await self._lists.set(key, value)
+        else:
+            await self._internal.set(key, value)
+
     async def get_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         internal_stats = await self._internal.get_stats()

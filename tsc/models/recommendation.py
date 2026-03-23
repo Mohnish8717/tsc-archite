@@ -96,5 +96,10 @@ class FinalRecommendation(BaseModel):
     # Summary
     summary_for_leadership: str = ""
 
+    @property
+    def executive_summary(self) -> str:
+        """Alias for summary_for_leadership."""
+        return self.summary_for_leadership
+
     # Metadata
     metadata: EvaluationMetadata = Field(default_factory=EvaluationMetadata)

@@ -39,7 +39,7 @@ class Feature(Base):
     __tablename__ = "features"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", on_delete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     target_audience: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -64,7 +64,7 @@ class InternalPersona(Base):
     __tablename__ = "internal_personas"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", on_delete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
@@ -106,7 +106,7 @@ class FeaturePersonaPrediction(Base):
     __tablename__ = "feature_persona_predictions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    feature_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("features.id", on_delete="CASCADE"), nullable=False)
+    feature_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("features.id", ondelete="CASCADE"), nullable=False)
     persona_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     persona_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 'INTERNAL' or 'EXTERNAL'
     predicted_stance: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -128,8 +128,8 @@ class SimulationRun(Base):
     __tablename__ = "simulation_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    feature_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("features.id", on_delete="CASCADE"), nullable=False)
-    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", on_delete="CASCADE"), nullable=False)
+    feature_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("features.id", ondelete="CASCADE"), nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
     approval_rate: Mapped[float] = mapped_column(Float, nullable=False)
     sentiment_score: Mapped[float] = mapped_column(Float, nullable=False)
     risk_assessment: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

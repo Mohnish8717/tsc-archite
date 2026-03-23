@@ -170,18 +170,31 @@ class RefinementEngine:
         refined_feature = self._apply_refinement(feature, refinement_response)
         logger.info("✓ Applied refinement to feature")
 
-        # Step 7: Re-run gates with refined feature
+        # Step 7: Re-run ONLY failed gates with refined feature (selective re-evaluation)
         try:
             executor = GateExecutor(self._llm)
-            refined_summary = await executor.process(
-                refined_feature, company, graph, bundle, personas
-            )
-
-            logger.info(
-                "✓ Re-ran gates with refined feature (score: %.2f → %.2f)",
-                gates_summary.overall_score,
-                refined_summary.overall_score,
-            )
+            try:
+                refined_summary = await executor.process_failed_only(
+                    refined_feature, company, graph, bundle, personas,
+                    previous_summary=gates_summary,
+                )
+                logger.info(
+                    "✓ Selectively re-ran %d failed gates (score: %.2f → %.2f)",
+                    len(gates_summary.failed_gates),
+                    gates_summary.overall_score,
+                    refined_summary.overall_score,
+                )
+            except (AttributeError, TypeError):
+                # Fallback to full re-run if process_failed_only not available
+                logger.info("Falling back to full gate re-evaluation")
+                refined_summary = await executor.process(
+                    refined_feature, company, graph, bundle, personas
+                )
+                logger.info(
+                    "✓ Re-ran all gates with refined feature (score: %.2f → %.2f)",
+                    gates_summary.overall_score,
+                    refined_summary.overall_score,
+                )
         except Exception as e:
             logger.warning("Failed to re-run gates: %s", e)
             self._refinement_attempts[feature_key] = attempts + 1
@@ -481,7 +494,7 @@ Do not include markdown formatting, only valid JSON.
         lines = [
             f"Company: {company.company_name}",
             f"Team Size: {company.team_size} people",
-            f"Budget: ${company.budget:,}" if company.budget else "Budget: Not specified",
+            f"Budget: {company.budget}" if company.budget else "Budget: Not specified",
             f"Current Priorities: {', '.join(company.current_priorities)}",
             f"Tech Stack: {', '.join(company.tech_stack)}",
         ]
@@ -548,8 +561,10 @@ Do not include markdown formatting, only valid JSON.
         analysis = refinement.get("analysis", "")
         if not analysis or len(analysis) < 50:
             issues.append("Analysis too short (< 50 chars)")
-        if len(analysis) > 500:
-            issues.append("Analysis too long (> 500 chars)")
+        if len(analysis) > 2000:
+            # PA-4 fix: truncate instead of rejecting
+            refinement["analysis"] = analysis[:2000] + "..."
+            logger.info("Truncated analysis from %d to 2000 chars", len(analysis))
 
         # Validate suggestions
         suggestions = refinement.get("suggestions", [])
@@ -572,8 +587,10 @@ Do not include markdown formatting, only valid JSON.
         scope = refinement.get("revised_scope", "")
         if not scope or len(scope) < 30:
             issues.append("Revised scope too short (< 30 chars)")
-        if len(scope) > 500:
-            issues.append(f"Revised scope too long (> 500 chars): {len(scope)}")
+        if len(scope) > 2000:
+            # PA-4 fix: truncate instead of rejecting
+            refinement["revised_scope"] = scope[:2000] + "..."
+            logger.info("Truncated revised_scope from %d to 2000 chars", len(scope))
 
         # Validate effort estimate
         effort = refinement.get("revised_effort_weeks", {})

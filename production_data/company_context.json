@@ -1,0 +1,14 @@
+{
+  "company_name": "GlobalStream Innovations",
+  "team_size": 450,
+  "budget": "$2.5M",
+  "tech_stack": ["Next.js", "Swift", "Kotlin", "Go", "Python", "C++", "AWS", "Akamai CDN", "PostgreSQL", "Redis"],
+  "current_priorities": ["Reduce churn in tier-2 markets", "Optimize CDN egress costs", "Improve session duration"],
+  "competitors": ["Netflix", "Disney+", "Amazon Prime Video"],
+  "constraints": ["GDRP Compliance", "CCPA Compliance", "COPPA Compliance", "Fixed deadline 2026-12-31"],
+  "stakeholders": [
+    {"name": "Edward S.", "role": "Executive"},
+    {"name": "Alice M.", "role": "Power User Representative"},
+    {"name": "Diana R.", "role": "Privacy Lead"}
+  ]
+}

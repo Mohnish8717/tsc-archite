@@ -1,0 +1,6 @@
+ticket_id,summary,priority,tags
+TKT-101,Battery drain reported on iPhone 15 Pro during long sessions,HIGH,performance,mobile
+TKT-102,Bitrate switching logic causes 2-second freeze on rural networks,CRITICAL,playback,latency
+TKT-103,Support for latest AV1 codec is missing on some Android devices,MEDIUM,codec,compatibility
+TKT-104,Users complaining about 'overly sharpened' faces in beta builds,LOW,ui,rendering
+TKT-105,Privacy policy doesn't explicitly cover biometric eye-tracking yet,HIGH,legal,privacy

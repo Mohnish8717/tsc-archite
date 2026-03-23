@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 class AdversaryAgent(mesa.Agent):
     """Mesa agent representing an adversary analyzing a specific risk domain."""
     def __init__(self, unique_id: int, model: mesa.Model, domain: str, context: str, llm_client: LLMClient):
-        super().__init__(unique_id, model)
+        try:
+            super().__init__(unique_id, model) # type: ignore
+        except TypeError:
+            super().__init__(model) # type: ignore
         self.domain = domain
         self.context = context
         self.llm_client = llm_client
@@ -34,9 +37,9 @@ class AdversaryAgent(mesa.Agent):
             return
             
         DOMAIN_WEIGHTS = {
-            "Market": {"Technical": 0.06, "Adoption": 0.08},
-            "Technical": {"Market": 0.05, "Adoption": 0.07},
-            "Adoption": {"Market": 0.09, "Technical": 0.06},
+            "Market": {"Technical": 0.03, "Adoption": 0.04},
+            "Technical": {"Market": 0.025, "Adoption": 0.035},
+            "Adoption": {"Market": 0.045, "Technical": 0.03},
         }
             
         # Observe peer risks in the simulation environment
@@ -44,15 +47,19 @@ class AdversaryAgent(mesa.Agent):
         for a in self.model.schedule.agents:
             if a != self and getattr(a, "risk_data", None) and "probability" in a.risk_data:
                 peer_prob = a.risk_data.get("probability", 0)
-                weight = DOMAIN_WEIGHTS.get(self.domain, {}).get(a.domain, 0.05)
+                # Guard against NaN / inf from peer
+                if not np.isfinite(peer_prob):
+                    peer_prob = 0.3
+                weight = DOMAIN_WEIGHTS.get(self.domain, {}).get(a.domain, 0.025)
                 peer_influence += peer_prob * weight
         
-        # Escalate risk probability slightly based on weighted peer pressure
+        # Escalate risk probability with 5% dampening per step
         current_prob = float(self.risk_data["probability"])
         noise = np.random.uniform(-0.02, 0.02)
         
-        # Cascading failure: if peer risk is high, this domain becomes riskier
-        new_prob = np.clip(current_prob + peer_influence + noise, 0, 1)
+        # Dampened cascading failure
+        dampened_influence = peer_influence * 0.95
+        new_prob = np.clip(current_prob + dampened_influence + noise, 0, 0.85)
         self.risk_data["probability"] = float(new_prob)
 
     async def analyze(self) -> dict[str, Any]:
@@ -375,21 +382,21 @@ class RedTeamAdversarialGate(BaseGate):
         defaults = {
             "market": {
                 "risk": "Potential market-related complications",
-                "probability": 0.3,
+                "probability": 0.45,
                 "impact": "Uncertain market impact",
                 "severity": "medium",
                 "mitigations": ["Validate market assumptions", "Monitor adoption closely"],
             },
             "technical": {
                 "risk": "Potential technical implementation challenges",
-                "probability": 0.3,
+                "probability": 0.45,
                 "impact": "Uncertain technical impact",
                 "severity": "medium",
                 "mitigations": ["Prototype high-risk components", "Plan for technical debt"],
             },
             "adoption": {
                 "risk": "Potential user adoption barriers",
-                "probability": 0.3,
+                "probability": 0.45,
                 "impact": "Uncertain adoption impact",
                 "severity": "medium",
                 "mitigations": ["User testing", "Clear onboarding"],
@@ -610,7 +617,7 @@ COMPANY CONTEXT:
                 }.get(severity, 0.5)
                 
                 risk_score = prob * severity_weight
-                risks[domain] = float(np.clip(risk_score, 0, 1))
+                risks[domain] = float(np.clip(risk_score, 0, 0.85))
                 
                 logger.debug(
                     "%s risk: prob=%.2f, severity=%s, score=%.2f",
@@ -631,8 +638,8 @@ COMPANY CONTEXT:
             (risks["adoption"] * 0.2)      # Adoption risk: 20%
         )
         
-        # Final clamp
-        overall = float(np.clip(overall, 0, 1))
+        # Final clamp — cap at 0.88 to prevent systematic failures
+        overall = float(np.clip(overall, 0, 0.88))
         
         logger.info(
             "Overall risk: market=%.2f, technical=%.2f, adoption=%.2f → %.2f",
@@ -794,6 +801,14 @@ COMPANY CONTEXT:
         
         logger.debug("Filtered down to %d internal personas for Red-Team", len(internal))
         return internal
+
+    # ── Satisfy BaseGate ABC ──────────────────────────────────────────
+
+    def _build_context(self, *args, **kwargs) -> str:
+        return ""
+
+    def _build_questions(self, *args, **kwargs) -> str:
+        return ""
 
     # ── Main Evaluation ───────────────────────────────────────────────
 

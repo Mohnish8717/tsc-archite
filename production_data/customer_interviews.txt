@@ -1,0 +1,14 @@
+[INTERVIEW 001 - POWER USER - ALICE M.]
+Alice: "I love the app, but honestly, on my commute, the quality drops are jarring. It just blurs everything. If it could at least keep the faces clear while blurring the background when bandwidth is low, I'd stay subscribed. But right now, it feels dated."
+
+[INTERVIEW 002 - TECH SAVVY - BOB K.]
+Bob: "Look, I'm an engineer. I know gaze tracking is hard. If you guys can pull off real-time foveated rendering for video streaming, that's a game changer. But if it kills my battery in 20 minutes, I'm uninstalling it. Privacy is also a huge hurdle – are you doing the processing on-device?"
+
+[INTERVIEW 003 - ROUTINE USER - CHARLIE D.]
+Charlie: "I just want it to work. Sometimes it's too much. All these 'AI' features... just make the movie look good. If this 'ARAC' thing makes it look better without me doing anything, great. But don't ask me for permission every five minutes."
+
+[INTERVIEW 004 - PRIVACY ADVOCATE - DIANA R.]
+Diana: "You want to use my camera to track my eyes while I watch a show? That's a non-starter unless I have 100% guarantee that data never leaves the chip. No cloud processing, no telemetry on my emotions."
+
+[INTERVIEW 005 - EXECUTIVE - EDWARD S.]
+Edward: "Our CDN bill is our biggest variable cost. If we can shave off even 10% of our egress while maintaining 'perceived' 4K quality, it adds millions to our bottom line. We need to ship this before the Q4 earnings call."

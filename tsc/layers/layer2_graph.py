@@ -22,6 +22,7 @@ Optimizations:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import random
 import re
@@ -30,7 +31,12 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from tsc.llm.base import LLMClient
-from tsc.llm.prompts import RELATIONSHIP_SYSTEM, RELATIONSHIP_USER
+from tsc.llm.prompts import (
+    GROUNDED_NER_SYSTEM,
+    GROUNDED_NER_USER,
+    RELATIONSHIP_SYSTEM,
+    RELATIONSHIP_USER,
+)
 from tsc.memory.graph_store import GraphStore
 from tsc.models.chunks import EnrichedChunk, ProblemContextBundle
 from tsc.models.graph import (
@@ -74,20 +80,13 @@ class KnowledgeGraphBuilder:
             raise ValueError("No entities extracted from documents")
         logger.info("✓ Extracted %d entities", len(entities))
 
-        # Step 2.2a: Co-occurrence relationships (CRITICAL FIX #2 — IDs, not names)
-        co_occur_rels = self._extract_cooccurrence_relationships(
+        # Step 2.2: SOTA-3: Extract grounded relationships (Gemini 3 Flash)
+        relationships = await self._extract_grounded_relationships(
             bundle.chunks, entities
         )
-        logger.info("✓ Found %d co-occurrence relationships", len(co_occur_rels))
+        logger.info("✓ Found %d grounded relationships", len(relationships))
 
-        # Step 2.2b: LLM relationships (OPT-2 stratified, OPT-3 batched)
-        llm_rels = await self._extract_relationships_batched(
-            bundle.chunks, entities
-        )
-        logger.info("✓ Found %d LLM relationships", len(llm_rels))
-
-        # Combine all relationships
-        all_rels = co_occur_rels + llm_rels
+        all_rels = relationships
         logger.info("✓ Total before filtering: %d relationships", len(all_rels))
 
         # Step 2.2c: Prune weak relationships (OPT-4)
@@ -150,6 +149,137 @@ class KnowledgeGraphBuilder:
     # CRITICAL FIX #3: Entity Extraction with Validation
     # ═════════════════════════════════════════════════════════════════
 
+    async def _extract_grounded_entities(
+        self, chunks: list[EnrichedChunk]
+    ) -> dict[str, GraphEntity]:
+        """SOTA-2: Precision entity extraction with direct quote grounding.
+        
+        Uses Gemini 3 Flash to extract entities and verify them against the source.
+        Every entity is linked to a source quote and filtered by confidence.
+        """
+        raw: dict[str, dict[str, Any]] = {}  # normalized_name → aggregated data
+        processed_chunks = 0
+        
+        # Process chunks in manageable batches for Gemini 3 Flash
+        batch_size = 5
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            combined_text = "\n\n---\n\n".join(
+                [f"[CHUNK {c.chunk_id}]\n{c.text}" for c in batch]
+            )
+            
+            try:
+                prompt = GROUNDED_NER_USER.render(text=combined_text)
+                
+                response_text = await self._llm.generate(
+                    system_prompt=GROUNDED_NER_SYSTEM,
+                    user_prompt=prompt,
+                    temperature=0.1,
+                )
+                
+                # Clean up JSON response
+                response_text = response_text.strip()
+                if response_text.startswith("```json"):
+                    response_text = response_text[7:-3].strip()
+                elif response_text.startswith("```"):
+                    response_text = response_text[3:-3].strip()
+                
+                extracted_data = json.loads(response_text)
+                
+                if not isinstance(extracted_data, list):
+                    logger.warning("SOTA-2: Expected list from LLM, got %s", type(extracted_data))
+                    continue
+
+                for ent_data in extracted_data:
+                    raw_text = ent_data.get("text", "").strip()
+                    if not raw_text:
+                        continue
+                        
+                    name = self._normalize_entity_name(raw_text)
+                    if not name:
+                        continue
+                        
+                    etype = ent_data.get("type", "UNKNOWN").upper()
+                    if etype not in _VALID_ENTITY_TYPES:
+                        etype = "UNKNOWN"
+                        
+                    if name not in raw:
+                        raw[name] = {
+                            "name": name,
+                            "type": etype,
+                            "full_name": raw_text,
+                            "mentions": 0,
+                            "chunk_ids": set(),
+                            "evidence_quotes": set(),
+                            "confidences": [],
+                            "urgencies": [],
+                            "sentiments": Counter(),
+                        }
+                    
+                    data = raw[name]
+                    data["mentions"] += 1
+                    
+                    # Associate with chunks that contain the evidence quote
+                    quote = ent_data.get("evidence_quote", "").strip()
+                    if quote:
+                        data["evidence_quotes"].add(quote)
+                        found_in_chunk = False
+                        for c in batch:
+                            if quote.lower() in c.text.lower():
+                                data["chunk_ids"].add(c.chunk_id)
+                                data["urgencies"].append(c.urgency)
+                                data["sentiments"][c.sentiment.label.value] += 1
+                                found_in_chunk = True
+                        
+                        if not found_in_chunk:
+                            # Fallback: associate with the first chunk in batch if quote not found
+                            data["chunk_ids"].add(batch[0].chunk_id)
+
+                    data["confidences"].append(ent_data.get("confidence", 0.0))
+                
+                processed_chunks += len(batch)
+                
+            except Exception as e:
+                logger.error("SOTA-2: Grounded NER failed for batch: %s", e, exc_info=True)
+                continue
+
+        # Convert to GraphEntity objects with deterministic IDs (FIX #1)
+        entities: dict[str, GraphEntity] = {}
+        for name, data in raw.items():
+            # FILTER: Must have at least one evidence quote and average confidence > 0.4
+            avg_conf = sum(data["confidences"]) / max(len(data["confidences"]), 1)
+            
+            if not data["evidence_quotes"] or avg_conf < 0.4:
+                logger.debug("SOTA-2: Filtering low-quality entity: %s (conf: %.2f, quotes: %d)", 
+                            name, avg_conf, len(data["evidence_quotes"]))
+                continue
+                
+            entity_id = self._generate_entity_id(data["type"], name)
+            
+            entities[entity_id] = GraphEntity(
+                id=entity_id,
+                name=name,
+                type=data["type"],
+                full_name=data["full_name"],
+                mentions=data["mentions"],
+                raw_mentions=list({data["full_name"]}),
+                chunk_ids=list(data["chunk_ids"]),
+                contexts=list(data["evidence_quotes"]), # Store evidence quotes in contexts
+                confidence=round(avg_conf, 3),
+                average_urgency=round(
+                    sum(data["urgencies"]) / max(len(data["urgencies"]), 1), 1
+                ),
+                sentiment_distribution=dict(data["sentiments"]),
+            )
+
+        logger.info(
+            "SOTA-2: Extracted %d grounded entities (processed %d items)",
+            len(entities),
+            len(raw),
+        )
+
+        return entities
+
     def _extract_entities(
         self, chunks: list[EnrichedChunk]
     ) -> dict[str, GraphEntity]:
@@ -166,10 +296,10 @@ class KnowledgeGraphBuilder:
 
                 name = self._normalize_entity_name(ent.text)
 
-                # Check name validity
-                if not name or len(name) < 2:
+                # PA-6 fix: relax name length validation to preserve initials
+                if not name:
                     logger.debug(
-                        "Skipping invalid entity name: '%s' → '%s'",
+                        "Skipping empty entity name: '%s' → '%s'",
                         ent.text,
                         name,
                     )
@@ -369,6 +499,243 @@ class KnowledgeGraphBuilder:
     # ═════════════════════════════════════════════════════════════════
     # OPT-3: Batched LLM Relationship Extraction (with FIX #2 — IDs)
     # ═════════════════════════════════════════════════════════════════
+
+    async def _extract_grounded_relationships(
+        self,
+        chunks: list[EnrichedChunk],
+        entities: dict[str, GraphEntity],
+    ) -> list[GraphRelationship]:
+        """SOTA-3: Precision relationship extraction with evidence grounding.
+        
+        Uses Gemini 3 Flash to find how entities interact, requiring direct quotes.
+        Refines co-occurrence with semantic proof.
+        """
+        relationships: list[GraphRelationship] = []
+        rel_idx = 0
+        
+        # Build mapping for lookup
+        name_to_id = {e.name: eid for eid, e in entities.items()}
+        
+        # Process in batches of 3 chunks to keep context dense
+        batch_size = 3
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            
+            # Find which entities are in this batch based on SOTA-2 results
+            batch_entity_names = set()
+            for c in batch:
+                for eid, ent in entities.items():
+                    if c.chunk_id in ent.chunk_ids:
+                        batch_entity_names.add(ent.name)
+            
+            if len(batch_entity_names) < 2:
+                continue
+                
+            combined_text = "\n\n---\n\n".join(
+                [f"[CHUNK {c.chunk_id}]\n{c.text}" for c in batch]
+            )
+            
+            try:
+                from tsc.llm.prompts import (
+                    GROUNDED_RELATIONSHIP_SYSTEM,
+                    GROUNDED_RELATIONSHIP_USER,
+                )
+                prompt = GROUNDED_RELATIONSHIP_USER.render(
+                    entities=list(batch_entity_names),
+                    text=combined_text,
+                )
+                
+                response_text = await self._llm.generate(
+                    system_prompt=GROUNDED_RELATIONSHIP_SYSTEM,
+                    user_prompt=prompt,
+                    temperature=0.1,
+                )
+                
+                # Clean up JSON
+                response_text = response_text.strip()
+                if response_text.startswith("```json"):
+                    response_text = response_text[7:-3].strip()
+                elif response_text.startswith("```"):
+                    response_text = response_text[3:-3].strip()
+                
+                batch_rels = json.loads(response_text)
+                
+                if not isinstance(batch_rels, list):
+                    continue
+
+                for br in batch_rels:
+                    src_name = self._normalize_entity_name(br.get("source", ""))
+                    tgt_name = self._normalize_entity_name(br.get("target", ""))
+                    
+                    src_id = name_to_id.get(src_name)
+                    tgt_id = name_to_id.get(tgt_name)
+                    
+                    if not src_id or not tgt_id or src_id == tgt_id:
+                        continue
+                        
+                    quote = br.get("evidence_quote", "").strip()
+                    if not quote:
+                        continue
+                        
+                    # Find which chunks the quote belongs to
+                    evidence_chunk_ids = []
+                    for c in batch:
+                        if quote.lower() in c.text.lower():
+                            evidence_chunk_ids.append(c.chunk_id)
+                    
+                    if not evidence_chunk_ids:
+                        # If quote not found exactly (minor LLM hallucination in spacing), 
+                        # associate with all chunks in batch as they are relevant context
+                        evidence_chunk_ids = [c.chunk_id for c in batch]
+                        
+                    try:
+                        rel_type = RelationshipType(
+                            br.get("type", "MENTIONED_WITH").upper()
+                        )
+                    except ValueError:
+                        rel_type = RelationshipType.MENTIONED_WITH
+                        
+                    relationships.append(
+                        GraphRelationship(
+                            id=f"rel_{rel_idx:04d}",
+                            source_entity=src_id,
+                            target_entity=tgt_id,
+                            relationship_type=rel_type,
+                            confidence=br.get("confidence", 0.7),
+                            weight=br.get("confidence", 0.0),
+                            evidence_chunks=evidence_chunk_ids,
+                            evidence_quality=EvidenceQuality.DIRECT,
+                            evidence_count=1,
+                            strength=self._calculate_relationship_strength(
+                                1, br.get("confidence", 0.7)
+                            ),
+                        )
+                    )
+                    rel_idx += 1
+                    
+            except Exception as e:
+                logger.error("SOTA-3: Grounded Relationship extraction failed: %s", e)
+                continue
+                
+        return relationships
+
+    async def _extract_grounded_relationships(
+        self,
+        chunks: list[EnrichedChunk],
+        entities: dict[str, GraphEntity],
+    ) -> list[GraphRelationship]:
+        """SOTA-3: Precision relationship extraction with evidence grounding.
+        
+        Uses Gemini 3 Flash to find how entities interact, requiring direct quotes.
+        Refines co-occurrence with semantic proof.
+        """
+        relationships: list[GraphRelationship] = []
+        rel_idx = 0
+        
+        # Build mapping for lookup
+        name_to_id = {e.name: eid for eid, e in entities.items()}
+        
+        # Process in batches of 3 chunks to keep context dense
+        batch_size = 3
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            
+            # Find which entities are in this batch based on SOTA-2 results
+            batch_entity_names = set()
+            for c in batch:
+                for eid, ent in entities.items():
+                    if c.chunk_id in ent.chunk_ids:
+                        batch_entity_names.add(ent.name)
+            
+            if len(batch_entity_names) < 2:
+                continue
+                
+            combined_text = "\n\n---\n\n".join(
+                [f"[CHUNK {c.chunk_id}]\n{c.text}" for c in batch]
+            )
+            
+            try:
+                from tsc.llm.prompts import (
+                    GROUNDED_RELATIONSHIP_SYSTEM,
+                    GROUNDED_RELATIONSHIP_USER,
+                )
+                prompt = GROUNDED_RELATIONSHIP_USER.render(
+                    entities=list(batch_entity_names),
+                    text=combined_text,
+                )
+                
+                response_text = await self._llm.generate(
+                    system_prompt=GROUNDED_RELATIONSHIP_SYSTEM,
+                    user_prompt=prompt,
+                    temperature=0.1,
+                )
+                
+                # Clean up JSON
+                response_text = response_text.strip()
+                if response_text.startswith("```json"):
+                    response_text = response_text[7:-3].strip()
+                elif response_text.startswith("```"):
+                    response_text = response_text[3:-3].strip()
+                
+                batch_rels = json.loads(response_text)
+                
+                if not isinstance(batch_rels, list):
+                    continue
+
+                for br in batch_rels:
+                    src_name = self._normalize_entity_name(br.get("source", ""))
+                    tgt_name = self._normalize_entity_name(br.get("target", ""))
+                    
+                    src_id = name_to_id.get(src_name)
+                    tgt_id = name_to_id.get(tgt_name)
+                    
+                    if not src_id or not tgt_id or src_id == tgt_id:
+                        continue
+                        
+                    quote = br.get("evidence_quote", "").strip()
+                    if not quote:
+                        continue
+                        
+                    # Find which chunks the quote belongs to
+                    evidence_chunk_ids = []
+                    for c in batch:
+                        if quote.lower() in c.text.lower():
+                            evidence_chunk_ids.append(c.chunk_id)
+                    
+                    if not evidence_chunk_ids:
+                        # Fallback: associate with all chunks in batch if quote not found exactly
+                        evidence_chunk_ids = [c.chunk_id for c in batch]
+                        
+                    try:
+                        rel_type = RelationshipType(
+                            br.get("type", "MENTIONED_WITH").upper()
+                        )
+                    except ValueError:
+                        rel_type = RelationshipType.MENTIONED_WITH
+                        
+                    relationships.append(
+                        GraphRelationship(
+                            id=f"rel_{rel_idx:04d}",
+                            source_entity=src_id,
+                            target_entity=tgt_id,
+                            relationship_type=rel_type,
+                            confidence=br.get("confidence", 0.7),
+                            weight=br.get("confidence", 0.0),
+                            evidence_chunks=evidence_chunk_ids,
+                            evidence_quality=EvidenceQuality.DIRECT,
+                            evidence_count=1,
+                            strength=self._calculate_relationship_strength(
+                                1, br.get("confidence", 0.7)
+                            ),
+                        )
+                    )
+                    rel_idx += 1
+                    
+            except Exception as e:
+                logger.error("SOTA-3: Grounded Relationship extraction failed: %s", e)
+                continue
+                
+        return relationships
 
     async def _extract_relationships_batched(
         self,
@@ -751,6 +1118,27 @@ class KnowledgeGraphBuilder:
                 "Circular dependencies detected: %d cycles",
                 result["cycle_count"],
             )
+            
+            # PA-5 fix: Dampen edge confidence by 50% for cycle-participating edges
+            cycle_edges: set[tuple[str, str]] = set()
+            for cycle in all_cycles:
+                for i in range(len(cycle) - 1):
+                    cycle_edges.add((cycle[i], cycle[i + 1]))
+            
+            dampened = 0
+            for edge in graph.edges:
+                if (edge.source_entity, edge.target_entity) in cycle_edges:
+                    original = edge.weight
+                    edge.weight = round(original * 0.5, 3)
+                    dampened += 1
+                    logger.debug(
+                        "Dampened cycle edge %s→%s: %.3f → %.3f",
+                        edge.source_entity, edge.target_entity,
+                        original, edge.weight,
+                    )
+            
+            if dampened:
+                logger.info("Dampened %d cycle-participating edges by 50%%", dampened)
         else:
             logger.info("No circular dependencies found")
 

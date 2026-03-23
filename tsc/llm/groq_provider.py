@@ -23,8 +23,8 @@ class GroqClient(OpenAIClient):
         model: str = "llama-3.3-70b-versatile",
         **kwargs: Any,
     ):
-        # Skip OpenAIClient.__init__ to set custom base_url
-        super(OpenAIClient, self).__init__(api_key, model, **kwargs)
+        super().__init__(api_key, model, **kwargs)
+        # Re-initialize with custom base URL
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=self.GROQ_BASE_URL,

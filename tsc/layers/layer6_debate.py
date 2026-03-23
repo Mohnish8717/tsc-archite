@@ -226,58 +226,86 @@ class DebateEngine:
     # ── Verdict Extraction ───────────────────────────────────────────
 
     def _extract_verdict(self, text: str) -> Tuple[str, float]:
-        """Extract verdict with confidence score"""
+        """Extract verdict with confidence score.
+        
+        Priority order (PA-1 fix):
+        1. Explicit approval phrases first
+        2. Conditional approval signals
+        3. Strict rejection phrases (not generic negatives)
+        4. Default: CONDITIONAL_APPROVE
+        """
         if not text:
             return "CONDITIONAL_APPROVE", 0.3
 
         text_lower = text.lower()
 
-        # Check for rejection (strongest signal)
+        # Step 1: Check for REJECT/OPPOSE (highest priority to avoid false positives)
         reject_patterns = [
-            r"\b(reject|reject|dismiss|decline|decline|veto|against|cannot|not|no)\b",
-            r"\b(would not|should not|must not|should decline)\b",
+            r"\b(i reject|we reject|should reject|must reject|should be rejected|recommend rejecting)\b",
+            r"\b(i oppose|strongly oppose|cannot approve|will not approve|totally reject)\b",
+            r"\b(should not proceed|must not proceed|recommend rejection|recommend against)\b",
+            r"\b(veto|dismiss this|decline this proposal|inclined to reject)\b",
+            r"\b(reject|rejecting|opposing)\b",
         ]
 
         for pattern in reject_patterns:
             if re.search(pattern, text_lower):
                 confidence = 0.85
                 logger.debug(
-                    "Extracted verdict: REJECTED (confidence: %.2f)", confidence
+                    "Extracted verdict: REJECT (confidence: %.2f)", confidence
                 )
-                return "REJECTED", confidence
+                return "REJECT", confidence
 
-        # Check for conditional approval
-        conditional_patterns = [
-            r"\b(conditional|depends|if|pending|contingent|only if|provided that)\b",
-            r"\b(need to|must|should.*first|subject to)\b",
-        ]
-
-        conditional_found = False
-        for pattern in conditional_patterns:
-            if re.search(pattern, text_lower):
-                conditional_found = True
-                break
-
-        if conditional_found:
-            confidence = 0.75
-            logger.debug(
-                "Extracted verdict: CONDITIONAL_APPROVE (confidence: %.2f)", confidence
-            )
-            return "CONDITIONAL_APPROVE", confidence
-
-        # Check for strong approval
+        # Step 2: Check for STRONG APPROVAL
         approve_patterns = [
-            r"\b(approve|support|favor|endorse|agree|yes|positive)\b",
-            r"\b(should proceed|we should|let\'s do|i recommend|i support)\b",
+            r"\b(i approve|i endorse|i support|fully approve|fully support)\b",
+            r"\b(should proceed|we should proceed|let's proceed|recommend approval)\b",
+            r"\b(i am in favor|strongly support|enthusiastically support)\b",
         ]
 
         for pattern in approve_patterns:
             if re.search(pattern, text_lower):
-                confidence = 0.80
+                confidence = 0.85
                 logger.debug(
                     "Extracted verdict: APPROVED (confidence: %.2f)", confidence
                 )
                 return "APPROVED", confidence
+
+        # Step 3: Check for CONDITIONAL APPROVAL
+        conditional_patterns = [
+            r"\b(conditional(?:ly)?\s+approv|conditionally support)\b",
+            r"\b(approve.*(?:provided|subject to|contingent|if|only if))\b",
+            r"\b((?:provided that|subject to|contingent on|assuming|as long as).+)\b",
+            r"\b(support.*with\s+(?:conditions|reservations|caveats))\b",
+            r"\b(conditional|depends on|pending|only if)\b",
+            r"\b(need to|must.*first|should.*before)\b",
+        ]
+
+        for pattern in conditional_patterns:
+            if re.search(pattern, text_lower):
+                confidence = 0.75
+                logger.debug(
+                    "Extracted verdict: CONDITIONAL_APPROVE (confidence: %.2f)", confidence
+                )
+                return "CONDITIONAL_APPROVE", confidence
+
+        # Step 4: Check for weak approval signals
+        weak_approve_patterns = [
+            r"\b(approve|support|favor|endorse|agree|positive)\b",
+            r"\b(yes|recommend approval|should do|worth pursuing)\b",
+        ]
+
+        for pattern in weak_approve_patterns:
+            if re.search(pattern, text_lower):
+                confidence = 0.65
+                logger.debug(
+                    "Extracted verdict: APPROVED (confidence: %.2f)", confidence
+                )
+                return "APPROVED", confidence
+                logger.debug(
+                    "Extracted verdict: REJECTED (confidence: %.2f)", confidence
+                )
+                return "REJECTED", confidence
 
         # Default: uncertain/conditional
         logger.debug(
@@ -466,7 +494,9 @@ class DebateEngine:
         if not positions or not gates_summary:
             return 0.5
 
-        gate_score = gates_summary.overall_score / 10.0
+        # PA-7 fix: overall_score is already 0-1 scale, don't divide by 10
+        raw_score = gates_summary.overall_score
+        gate_score = raw_score / 10.0 if raw_score > 2.0 else raw_score
 
         verdicts = [p.verdict for p in positions]
         approval_count = sum(1 for v in verdicts if v == "APPROVED")
@@ -783,12 +813,20 @@ class DebateEngine:
         )
 
     def _get_top_entities(self, graph: KnowledgeGraph) -> list[dict]:
-        """Get top entities from graph"""
+        """Get top entities with urgency scores from graph (SOTA-8)."""
         top_entities = sorted(
             graph.nodes.values(), key=lambda e: e.mentions, reverse=True
-        )[:10]
+        )[:15]
 
-        return [{"name": e.name, "mentions": e.mentions} for e in top_entities]
+        return [
+            {
+                "name": e.name,
+                "type": e.type,
+                "mentions": e.mentions,
+                "average_urgency": e.average_urgency,
+            }
+            for e in top_entities
+        ]
 
     def _build_approvals(
         self, positions: list[DebatePosition]
@@ -979,15 +1017,20 @@ class DebateEngine:
         personas: list[FinalPersona],
         round1: DebateRound,
     ) -> DebateRound:
-        """Round 2: Negotiation"""
+        """Round 2: Adversarial Critique (SOTA-8).
+        
+        Every stakeholder must identify flaws in others' positions using evidence.
+        """
         positions: list[DebatePosition] = []
 
         for persona in personas:
+            # Multi-stakeholder adversarial critique
             others = [
                 p for p in round1.positions if p.stakeholder_name != persona.name
             ]
 
             system = self._build_system_prompt(persona)
+            # Use the person's specific psychological profile to drive the critique
             prompt = DEBATE_ROUND2_USER.render(
                 name=persona.name,
                 role=persona.role,
@@ -995,7 +1038,7 @@ class DebateEngine:
             )
 
             statement = await self._get_stakeholder_statement(
-                persona, prompt, system, "Negotiation"
+                persona, prompt, system, "Adversarial Critique"
             )
 
             verdict, confidence = self._extract_verdict(statement)
@@ -1014,59 +1057,91 @@ class DebateEngine:
 
         return DebateRound(
             round_number=2,
-            round_name="Negotiation",
+            round_name="Adversarial Critique",
             positions=positions,
         )
 
-    async def _round3_consensus(
+    async def _round3_rebuttal(
+        self,
+        feature: FeatureProposal,
+        personas: list[FinalPersona],
+        round1: DebateRound,
+        round2: DebateRound,
+    ) -> DebateRound:
+        """Round 3: Rebuttal (SOTA-8). Everyone defends their position."""
+        positions: list[DebatePosition] = []
+
+        all_previous = round1.positions + round2.positions
+
+        for persona in personas:
+            system = self._build_system_prompt(persona)
+            prompt = DEBATE_ROUND3_USER.render(
+                name=persona.name,
+                role=persona.role,
+                all_positions=all_previous,
+            )
+
+            statement = await self._get_stakeholder_statement(
+                persona, prompt, system, "Final Rebuttal"
+            )
+
+            verdict, confidence = self._extract_verdict(statement)
+
+            positions.append(
+                DebatePosition(
+                    stakeholder_name=persona.name,
+                    role=persona.role,
+                    statement=statement,
+                    verdict=verdict,
+                    confidence=confidence,
+                    key_concerns=self._extract_concerns(statement),
+                    conditions=self._extract_conditions(statement),
+                )
+            )
+
+        return DebateRound(
+            round_number=3,
+            round_name="Final Rebuttal",
+            positions=positions,
+        )
+
+    async def _generate_final_consensus(
         self,
         feature: FeatureProposal,
         company: CompanyContext,
         personas: list[FinalPersona],
         round1: DebateRound,
         round2: DebateRound,
+        round3: DebateRound,
         gates_summary: GatesSummary,
-    ) -> tuple[DebateRound, ConsensusResult]:
-        """Round 3: Consensus"""
+    ) -> ConsensusResult:
+        """Final Synthesis by the Lead Stakeholder (SOTA-8)."""
         leader = personas[0]
-        all_positions = round2.positions or round1.positions
-
+        # Consolidate all debate history for the leader to synthesize
+        history = round1.positions + round2.positions + round3.positions
+        
+        # Use a specialized consensus prompt (reusing ROUND3_USER prompt or similar)
         system = self._build_system_prompt(leader)
+        # We need a synthesis prompt here. I'll use DEBATE_ROUND3_USER as it was already a synthesis prompt.
         prompt = DEBATE_ROUND3_USER.render(
             name=leader.name,
             role=leader.role,
-            all_positions=all_positions,
+            all_positions=round3.positions, # Focus on final stances
         )
 
-        consensus_text = await self._get_stakeholder_statement(
-            leader, prompt, system, "Final Consensus"
+        synthesis_text = await self._get_stakeholder_statement(
+            leader, prompt, system, "Final Consensus Synthesis"
         )
 
-        overall_verdict, ext_conf = self._extract_verdict(consensus_text)
-        approvals = self._build_approvals(all_positions)
-        confidence = self._calculate_confidence(all_positions, gates_summary)
-
-        round3 = DebateRound(
-            round_number=3,
-            round_name="Final Consensus",
-            positions=[
-                DebatePosition(
-                    stakeholder_name=leader.name,
-                    role=leader.role,
-                    statement=consensus_text,
-                    verdict=overall_verdict,
-                    confidence=confidence,
-                )
-            ],
-            synthesis=consensus_text,
-        )
+        overall_verdict, _ = self._extract_verdict(synthesis_text)
+        confidence = self._calculate_confidence(round3.positions, gates_summary)
 
         consensus = ConsensusResult(
             feature_name=feature.title,
             overall_verdict=overall_verdict,
             approval_confidence=confidence,
-            stakeholder_verdicts={p.stakeholder_name: p.verdict for p in all_positions},
-            approvals=approvals,
+            stakeholder_verdicts={p.stakeholder_name: p.verdict for p in round3.positions},
+            approvals=self._build_approvals(round3.positions),
             phase_1=PhaseSpecification(
                 name=f"{feature.title} - Phase 1",
                 timeline=f"{feature.effort_weeks_min or 4} weeks",
@@ -1078,12 +1153,12 @@ class DebateEngine:
                     "quality_gate": "Zero critical incidents",
                 }
             ),
-            mitigations=[c for p in all_positions for c in p.conditions],
+            mitigations=list(set([c for p in round3.positions for c in p.conditions])),
             next_steps=["Engineering kickoff", "Design review", "Development sprint"],
             debate_rounds=[round1, round2, round3],
         )
 
-        return round3, consensus
+        return consensus
 
     # ── Main Process ─────────────────────────────────────────────────
 
@@ -1135,8 +1210,11 @@ class DebateEngine:
         round2 = await self._round2_negotiation(feature, personas, round1)
         logger.info("Round 2 complete: negotiation done")
 
-        round3, consensus = await self._round3_consensus(
-            feature, company, personas, round1, round2, gates_summary
+        round3 = await self._round3_rebuttal(feature, personas, round1, round2)
+        logger.info("Round 3 complete: final rebuttals done")
+
+        consensus = await self._generate_final_consensus(
+            feature, company, personas, round1, round2, round3, gates_summary
         )
 
         # Apply intelligence validations

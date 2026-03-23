@@ -1,0 +1,11 @@
+{
+  "title": "AI-Driven Real-time Adaptive Content (ARAC)",
+  "description": "ARAC uses machine learning to analyze viewer engagement signals to dynamically adjust transcoding profiles and content focal points in real-time.",
+  "target_users": "Premium subscribers on mobile and tablet devices.",
+  "target_user_count": 5000000,
+  "effort_weeks_min": 12,
+  "effort_weeks_max": 24,
+  "affected_domains": ["Transcoding", "Egress", "Client Rendering", "Privacy"],
+  "tech_stack": ["PyTorch", "TensorFlow Lite", "On-device AI", "Metal/Vulkan"],
+  "customer_segments": ["Premium Mobile", "Commuters", "Tech Savvy", "Privacy Conscious"]
+}

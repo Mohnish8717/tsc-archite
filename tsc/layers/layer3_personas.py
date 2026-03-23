@@ -1084,35 +1084,45 @@ class PersonaGenerator:
         context: StakeholderContextBundle,
         company: CompanyContext,
     ) -> str:
-        """Build a prompt that organizes facts by sentiment and requires citations."""
-        # Organize facts
+        """Build a prompt that organizes facts by sentiment and prioritizes direct quotes (SOTA-4)."""
+        # Separate direct quotes from other facts
+        direct_quotes = [
+            f["text"]
+            for f in context.personal_facts
+            if isinstance(f, dict) and f.get("source") == "direct_quote"
+        ]
+
+        # Organize other facts by sentiment
         pos_facts = [
             f["text"]
             for f in context.personal_facts
-            if isinstance(f, dict) and f.get("sentiment") == "POSITIVE"
+            if isinstance(f, dict) and f.get("sentiment") == "POSITIVE" and f.get("source") != "direct_quote"
         ]
         neg_facts = [
             f["text"]
             for f in context.personal_facts
-            if isinstance(f, dict) and f.get("sentiment") == "NEGATIVE"
+            if isinstance(f, dict) and f.get("sentiment") == "NEGATIVE" and f.get("source") != "direct_quote"
         ]
         neut_facts = [
             f["text"] if isinstance(f, dict) else str(f)
             for f in context.personal_facts
-            if not isinstance(f, dict) or f.get("sentiment") not in ["POSITIVE", "NEGATIVE"]
+            if not isinstance(f, dict) or (f.get("sentiment") not in ["POSITIVE", "NEGATIVE"] and f.get("source") != "direct_quote")
         ]
 
-        prompt = f"""Generate a grounded persona for {stakeholder.name}, {stakeholder.role} at {company.name}.
+        prompt = f"""Generate a high-fidelity, grounded persona for {stakeholder.name}, {stakeholder.role} at {company.company_name}.
 
-EVIDENCE DATA:
-Positives/Drivers:
-{chr(10).join(f"- {f}" for f in pos_facts[:15])}
+DIRECT QUOTES FROM {stakeholder.name.upper()} (PRIMARY EVIDENCE):
+{chr(10).join(f"- {f}" for f in direct_quotes[:15])}
+
+OTHER OBSERVATIONAL EVIDENCE:
+Drivers/Positives:
+{chr(10).join(f"- {f}" for f in pos_facts[:10])}
 
 Pain Points/Challenges:
-{chr(10).join(f"- {f}" for f in neg_facts[:15])}
+{chr(10).join(f"- {f}" for f in neg_facts[:10])}
 
-Other Factual Context:
-{chr(10).join(f"- {f}" for f in neut_facts[:20])}
+General Context:
+{chr(10).join(f"- {f}" for f in neut_facts[:15])}
 
 ORGANIZATIONAL CONTEXT:
 {chr(10).join(f"- {c}" for c in context.org_context[:10])}
@@ -1120,11 +1130,12 @@ ORGANIZATIONAL CONTEXT:
 CONSTRAINTS & URGENCY:
 {chr(10).join(f"- {c}" for c in context.constraint_context[:10])}
 
-INSTRUCTIONS:
-1. Identify the core personality traits supported by these specific facts.
-2. For each trait, provide a citation in the format [Fact: brief snippet].
-3. Determine the likely MBTI type ONLY if supported by evidence.
-4. Predict their stance on new features based on their documented pain points.
+STRICT INSTRUCTIONS:
+1. YOUR PRIMARY GOAL is to reflect {stakeholder.name}'s actual voice and concerns based on the DIRECT QUOTES.
+2. EVERY trait, motivation, or frustration you attribute to them MUST be supported by at least one quote or fact.
+3. CITATION FORMAT: End every paragraph or list item with [Source: quote snippet or fact snippet].
+4. DO NOT FABRICATE personality traits that are not evidenced.
+5. If evidence is conflicting, highlight the internal tension.
 """
         return prompt
 
@@ -1163,6 +1174,7 @@ INSTRUCTIONS:
     ) -> FinalPersona:
         """Core profile generation with fallback."""
         profile_text: str = ""
+        grounding_score: float = 0.0
 
         try:
             # Use grounded prompt builder
@@ -1173,9 +1185,8 @@ INSTRUCTIONS:
             profile_text = await self._llm.generate(
                 system_prompt=PERSONA_SYSTEM_GROUNDED,
                 user_prompt=user_prompt,
-                model="gpt-4o",  # Use a strong model for complex grounding
                 temperature=0.2,
-                max_tokens=4000
+                max_tokens=1500,
             )
 
             # Validate grounding quality
@@ -1578,13 +1589,16 @@ INSTRUCTIONS:
         self, personas: list[FinalPersona]
     ) -> dict[str, Any]:
         """Generate diagnostic report for current run."""
-        confidences = [p.confidence_score for p in personas]
+        confidences = [p.profile_confidence for p in personas]
         mbti_types = [p.psychological_profile.mbti for p in personas]
         word_counts = [p.profile_word_count for p in personas]
 
-        avg_evidence = sum(
-            len(p.evidence_sources) for p in personas
-        ) / len(personas)
+        if len(personas) == 0:
+            avg_evidence = 0.0
+        else:
+            avg_evidence = sum(
+                len(p.evidence_sources) for p in personas
+            ) / len(personas)
 
         stance_distribution: dict[str, int] = {}
         for p in personas:
@@ -1618,5 +1632,5 @@ INSTRUCTIONS:
                 "max": int(max(word_counts) if word_counts else 0),
             },
             "predicted_stances": stance_distribution,
-            "cache_size": len(self._persona_cache),
+            "cache_size": 0,
         }

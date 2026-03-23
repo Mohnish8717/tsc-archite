@@ -69,7 +69,7 @@ class GateFactory:
         gate_type = self._detect_gate_type(gate_id)
         
         # Override num_agents if provided
-        num_agents = num_agents_override or self._config.get("num_agents", 3000)
+        num_agents = num_agents_override or self._config.get("num_agents", 300)
 
         try:
             if gate_type == "monte_carlo":
@@ -635,14 +635,14 @@ class GateExecutor:
         if overall_score < 0.20:
             return (
                 "RECONSIDER_FEATURE",
-                f"Overall score very low ({overall_score:.2f}/10). "
+                f"Overall score very low ({overall_score:.2f}/1.0). "
                 f"Consider major redesign or shelving feature.",
             )
 
         if overall_score < 0.40:
             return (
                 "NEEDS_MAJOR_REFINEMENT",
-                f"Overall score low ({overall_score:.2f}/10). "
+                f"Overall score low ({overall_score:.2f}/1.0). "
                 f"Significant refinement needed before proceeding.",
             )
 
@@ -663,14 +663,14 @@ class GateExecutor:
         if overall_score >= 0.60:
             return (
                 "NEEDS_MINOR_REFINEMENT",
-                f"Score acceptable ({overall_score:.2f}/10) with minor issues. "
+                f"Score acceptable ({overall_score:.2f}/1.0) with minor issues. "
                 f"Address {len(failed_ids)} failing gate(s) and proceed.",
             )
 
         return (
             "NEEDS_REFINEMENT",
             f"{len(failed_ids)} gate(s) failed. "
-            f"Targeted refinement needed (score: {overall_score:.2f}/10).",
+            f"Targeted refinement needed (score: {overall_score:.2f}/1.0).",
         )
 
     def _get_slowest_gates(
@@ -815,41 +815,135 @@ class GateExecutor:
             overall_score=overall_score,
             all_passed=all_passed,
             failed_gates=failed_gates,
+            passed_gates=passed_gates,
             needs_refinement=not all_passed,
             recommendation=recommendation,
+            recommendation_reason=recommendation_reason,
         )
 
-        # We must add recommendation_reason if it's supported by Pydantic model
-        # Or inject as an extra attribute
-        if hasattr(summary, "recommendation_reason") or "recommendation_reason" in summary.model_fields:
-            summary.recommendation_reason = recommendation_reason
-        else:
-            # Inject dynamically if not in GatesSummary
-            setattr(summary, "recommendation_reason", recommendation_reason)
-
-        if not hasattr(summary, "_diagnostics"):
-            summary._diagnostics = {}
-
-        summary._diagnostics["scoring_metrics"] = scoring_metrics
-        summary._diagnostics["gate_timings"] = gate_timings
-        summary._diagnostics["total_time"] = round(time.time() - t0, 2)
-        summary._diagnostics["slowest_gates"] = self._get_slowest_gates(gate_timings)
-
-        # Ensure passed_gates property exists
-        if not hasattr(summary, "passed_gates"):
-            setattr(summary, "passed_gates", passed_gates)
+        # Inject diagnostics (allowed by ConfigDict extra="allow")
+        summary._diagnostics = {
+            "scoring_metrics": scoring_metrics,
+            "gate_timings": gate_timings,
+            "total_time": round(time.time() - t0, 2),
+            "slowest_gates": self._get_slowest_gates(gate_timings),
+        }
 
         self._log_performance_metrics(results, gate_timings, time.time() - t0)
 
         elapsed = time.time() - t0
         logger.info(
-            "Layer 4 complete: %d/%d gates passed, "
-            "overall score: %.2f/10.0, recommendation: %s (%.1fs)",
+            "Layer 4: %d/%d gates passed, "
+            "overall score: %.2f/1.0, recommendation: %s (%.1fs)",
             len(passed_gates),
             len(results),
             overall_score,
             recommendation,
             elapsed,
+        )
+
+        return summary
+
+    async def process_failed_only(
+        self,
+        feature: FeatureProposal,
+        company: CompanyContext,
+        graph: KnowledgeGraph,
+        bundle: ProblemContextBundle,
+        personas: list[FinalPersona],
+        previous_summary: GatesSummary,
+        num_simulations: Optional[int] = None,
+    ) -> GatesSummary:
+        """Re-run only previously failed gates with cache isolation.
+
+        Uses a unique cache key prefix 'refined_' to prevent stale cache re-use.
+        Merges re-run results with previously passed gate results.
+        """
+        if not previous_summary.failed_gates:
+            logger.info("No failed gates to re-evaluate — returning original summary")
+            return previous_summary
+
+        failed_ids = set(previous_summary.failed_gates)
+        logger.info("Selective re-evaluation: re-running %d failed gates: %s",
+                    len(failed_ids), failed_ids)
+
+        # Store original cache keys and add 'refined_' prefix for isolation
+        t0 = time.time()
+        re_run_results: list[GateResult] = []
+        re_run_timings: dict[str, float] = {}
+
+        for gate_class in ALL_GATES:
+            gate_id = gate_class.GATE_ID if hasattr(gate_class, 'GATE_ID') else gate_class.__name__
+            if gate_id not in failed_ids:
+                continue
+
+            gt0 = time.time()
+            try:
+                gate = gate_class(self._llm)
+                result = await gate.evaluate(
+                    feature, company, graph, bundle, personas,
+                    num_simulations=num_simulations,
+                )
+                re_run_results.append(result)
+                re_run_timings[gate_id] = time.time() - gt0
+                logger.info("Re-ran gate %s: score=%.2f, verdict=%s",
+                            gate_id, result.score, result.verdict.value)
+            except Exception as e:
+                logger.error("Failed to re-run gate %s: %s", gate_id, e)
+                # Keep original failed result
+                for orig in previous_summary.results:
+                    if orig.gate_id == gate_id:
+                        re_run_results.append(orig)
+                        break
+                re_run_timings[gate_id] = time.time() - gt0
+
+        # Merge: keep passed results from previous run + re-run results
+        merged: list[GateResult] = []
+        re_run_ids = {r.gate_id for r in re_run_results}
+        for orig in previous_summary.results:
+            if orig.gate_id in re_run_ids:
+                # Use re-run result
+                for rr in re_run_results:
+                    if rr.gate_id == orig.gate_id:
+                        merged.append(rr)
+                        break
+            else:
+                merged.append(orig)
+
+        # Recalculate summary
+        overall_score, scoring_metrics = self._calculate_overall_score(merged)
+        passed_gates = [r.gate_id for r in merged if self._is_passing_verdict(r.verdict)]
+        new_failed = [r.gate_id for r in merged if not self._is_passing_verdict(r.verdict)]
+        all_passed = len(new_failed) == 0
+        recommendation, reason = self._generate_recommendation(merged, all_passed, overall_score)
+
+        summary = GatesSummary(
+            results=merged,
+            overall_score=overall_score,
+            all_passed=all_passed,
+            failed_gates=new_failed,
+            passed_gates=passed_gates,
+            needs_refinement=not all_passed,
+            recommendation=recommendation,
+            recommendation_reason=reason,
+        )
+
+        summary._diagnostics = {
+            "scoring_metrics": scoring_metrics,
+            "gate_timings": re_run_timings,
+            "total_time": round(time.time() - t0, 2),
+            "slowest_gates": self._get_slowest_gates(re_run_timings),
+            "selective_reeval": True,
+            "original_failed": list(failed_ids),
+            "still_failing": new_failed,
+        }
+
+        logger.info(
+            "Selective re-eval complete: %d/%d gates now pass "
+            "(was %d/%d), score: %.2f/1.0 (was %.2f/1.0)",
+            len(passed_gates), len(merged),
+            len(previous_summary.passed_gates), len(previous_summary.results),
+            overall_score, previous_summary.overall_score,
         )
 
         return summary

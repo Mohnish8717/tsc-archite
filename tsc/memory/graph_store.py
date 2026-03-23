@@ -58,13 +58,16 @@ class GraphStore:
 
             # Collect actual mentions with context (top 10)
             mentions_with_context = []
+            def get_val(v):
+                return v.value if hasattr(v, "value") else str(v)
+
             for chunk in entity_chunks[:10]:
                 mentions_with_context.append(
                     {
                         "text": chunk.text[:300],
-                        "sentiment": chunk.sentiment.label.value,
+                        "sentiment": get_val(chunk.sentiment.label),
                         "urgency": chunk.urgency,
-                        "topic": chunk.topic_category.value,
+                        "topic": get_val(chunk.topic_category),
                         "source": chunk.source_type,
                         "chunk_id": chunk.chunk_id,
                     }
@@ -126,6 +129,23 @@ class GraphStore:
                 }
             )
 
+        # Store speaker quotes as high-priority persona facts (SOTA-4)
+        for chunk in bundle.chunks:
+            if getattr(chunk, "speaker_name", None):
+                facts.append(
+                    {
+                        "fact": f"Quote from {chunk.speaker_name}: \"{chunk.text[:500]}\"",
+                        "entities": [chunk.speaker_name],
+                        "metadata": {
+                            "type": "speaker_quote",
+                            "speaker_name": chunk.speaker_name,
+                            "sentiment": get_val(chunk.sentiment.label),
+                            "urgency": chunk.urgency,
+                            "topic": get_val(chunk.topic_category),
+                        },
+                    }
+                )
+
         # Keep local copy for fallback
         self._local_facts.extend(facts)
 
@@ -181,6 +201,19 @@ class GraphStore:
                 fact_text = fact_data.get("fact", "")
 
                 # 1. Extract rich mention contexts if available
+                if metadata.get("type") == "speaker_quote":
+                    # SOTA-4: Direct quotes are high-priority evidence
+                    personal_facts.append(
+                        {
+                            "text": fact_text,
+                            "sentiment": metadata.get("sentiment", "NEUTRAL"),
+                            "urgency": metadata.get("urgency", 3),
+                            "topic": metadata.get("topic", "feedback"),
+                            "source": "direct_quote",
+                            "confidence": 1.0,
+                        }
+                    )
+                
                 mention_contexts = metadata.get("mention_contexts", [])
                 if mention_contexts:
                     for mention in mention_contexts:

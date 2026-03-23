@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GateVerdict(str, Enum):
@@ -70,9 +70,13 @@ class GatesSummary(BaseModel):
     overall_score: float = 0.0
     all_passed: bool = False
     failed_gates: list[str] = Field(default_factory=list)
+    passed_gates: list[str] = Field(default_factory=list)
     needs_refinement: bool = False
     recommendation: str = ""
+    recommendation_reason: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(extra="allow")  # allows _diagnostics injection
 
     @property
     def gate_count(self) -> int:

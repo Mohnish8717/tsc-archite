@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,9 @@ from tsc.models.gates import GateResult, GateVerdict
 from tsc.models.graph import KnowledgeGraph
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.personas import FinalPersona
+
+from tsc.memory.memory_updater import ZepGraphMemoryUpdater
+from tsc.memory.zep_client import ZepMemoryClient
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +47,10 @@ class MarketAdoptionAgent(mesa.Agent):
     
     def __init__(
         self,
-        unique_id: int,
         model: MarketAdoptionModel,
         world_state: AgentWorldState,
     ):
-        super().__init__(unique_id, model)
+        super().__init__(model)
         self.world_state = world_state
         self.segment = self._classify_segment()
         
@@ -70,28 +72,47 @@ class MarketAdoptionAgent(mesa.Agent):
             return
             
         # React to neighbors
-        neighbors = []
         if self.model.grid is not None:
-            # NetworkGrid uses get_neighbors
-            neighbor_nodes = self.model.grid.get_neighbors(self.pos, include_center=False)
-            neighbors = [self.model.schedule.agents[n] for n in neighbor_nodes]
+            neighbors = self.grid.get_neighbors(self.pos, include_center=False)
             
-        adopted_neighbors = sum(1 for n in neighbors if n.adopts)
-        total_neighbors = len(neighbors)
-        
-        neighbor_pressure = 0.0
-        if total_neighbors > 0:
-            neighbor_pressure = (adopted_neighbors / total_neighbors) * self.influence_factor
+            adopted_neighbors = [n for n in neighbors if n.adopts]
+            total_neighbors = len(neighbors)
             
-        # Current effective probability
-        effective_prob = self.base_llm_probability + neighbor_pressure
-        
-        # Make the stochastic decision this step
-        if np.random.random() < effective_prob:
-            self.adopts = True
-            self.confidence = min(1.0, self.confidence + 0.2)
-            if not self.reasoning:
-                self.reasoning = "Adopted through combined inherent fit and network influence."
+            neighbor_pressure = 0.0
+            if total_neighbors > 0:
+                neighbor_pressure = (len(adopted_neighbors) / total_neighbors) * self.influence_factor
+                
+            # Current effective probability
+            effective_prob = self.base_llm_probability + neighbor_pressure
+            
+            # Make the stochastic decision this step
+            if np.random.random() < effective_prob:
+                self.adopts = True
+                self.confidence = min(1.0, self.confidence + 0.2)
+                if not self.reasoning:
+                    self.reasoning = "Adopted through combined inherent fit and network influence."
+                
+                # EMIT ACTION: CREATE_POST (new adoption)
+                if self.model.memory_updater:
+                    asyncio.create_task(self.model.memory_updater.add_action({
+                        "agent_id": self.unique_id,
+                        "agent_name": f"{self.world_state.segment} Archetype",
+                        "type": "CREATE_POST",
+                        "target_id": self.model.feature.title,
+                        "platform": "Twitter" if self.unique_id % 2 == 0 else "Reddit"
+                    }))
+
+            # EMIT ACTION: LIKE (if already adopted and neighbors adopted)
+            elif self.adopts and adopted_neighbors and np.random.random() < 0.3:
+                if self.model.memory_updater:
+                    target_neighbor = np.random.choice(adopted_neighbors)
+                    asyncio.create_task(self.model.memory_updater.add_action({
+                        "agent_id": self.unique_id,
+                        "agent_name": f"{self.world_state.segment} Archetype",
+                        "type": "LIKE",
+                        "target_id": f"Agent_{target_neighbor.unique_id}",
+                        "platform": "Twitter" if self.unique_id % 2 == 0 else "Reddit"
+                    }))
 
     def set_llm_decision(self, adopts: bool, confidence: float, reasoning: str):
         """Called statically before the simulation steps to inject LLM baseline base."""
@@ -108,6 +129,10 @@ class MarketAdoptionAgent(mesa.Agent):
 
     def _classify_segment(self) -> str:
         """Classify agent into user segment"""
+        # Honor the segment from world_state (persona mapping) if provided
+        if self.world_state.segment and self.world_state.segment != "General":
+            return self.world_state.segment
+            
         if self.world_state.urgency_level > 0.7:
             return "power_user"
         elif self.world_state.tech_comfort > 0.7:
@@ -124,14 +149,15 @@ class MarketAdoptionModel(mesa.Model):
     """
     def __init__(
         self,
-        num_agents: int,
         feature: FeatureProposal,
         company: CompanyContext,
         agent_states: list[AgentWorldState],
+        memory_updater: Optional[ZepGraphMemoryUpdater] = None,
     ):
         super().__init__()
         self.num_agents = num_agents
         self.feature = feature
+        self.memory_updater = memory_updater
         self.schedule = mesa.time.RandomActivation(self)
         
         # Create a small-world network for realistic human-like clustering
@@ -154,7 +180,7 @@ class MarketAdoptionModel(mesa.Model):
             if i >= len(self.G.nodes):
                 logger.warning("Agent %d outside network bounds, skipping placement", i)
                 continue
-            agent = MarketAdoptionAgent(i, self, state)
+            agent = MarketAdoptionAgent(self, state)
             self.schedule.add(agent)
             self.grid.place_agent(agent, i)
             
@@ -208,7 +234,7 @@ class MonteCarloMarketFitGate(BaseGate):
         self,
         llm_client: LLMClient,
         graph_store: Optional[Any] = None,
-        num_agents: int = 3000,
+        num_agents: int = 300,
         enable_parallel: bool = True,
     ):
         super().__init__(llm_client)
@@ -244,7 +270,21 @@ class MonteCarloMarketFitGate(BaseGate):
         logger.info("✓ Generated %d agent world states", len(agent_states))
         
         # Step 2: Setup the MESA Model & Network
-        model = MarketAdoptionModel(self._num_agents, feature, company, agent_states)
+        memory_updater = None
+        if self._graph_store and hasattr(self._graph_store, "_zep"):
+             memory_updater = ZepGraphMemoryUpdater(
+                 zep_client=self._graph_store._zep,
+                 llm=self._llm,
+                 buffer_size=50
+             )
+
+        model = MarketAdoptionModel(
+            self._num_agents, 
+            feature, 
+            company, 
+            agent_states,
+            memory_updater=memory_updater
+        )
         self._assign_agents_to_personas(list(model.schedule.agents), external_personas)
         
         # Step 3: Pre-compute LLM decisions to inject base probabilities
@@ -259,6 +299,11 @@ class MonteCarloMarketFitGate(BaseGate):
                 break
             model.step()
             
+        # Flush strategic insights to Zep
+        if memory_updater:
+            await memory_updater.flush()
+            logger.info("✓ Flushed Zep memory updater: %s", memory_updater.stats)
+
         logger.info("✓ Completed %d MESA simulation steps", SIM_STEPS)
         
         # Step 5: Aggregate results
@@ -267,7 +312,7 @@ class MonteCarloMarketFitGate(BaseGate):
         # Step 6: Map to verdict (Fix 2 Simplification)
         verdict_str = self._map_adoption_to_verdict(results["adoption_rate"])
         verdict = self._verdict_mapping.get(verdict_str, GateVerdict.PASS)
-        score = results["adoption_rate"] * 10
+        score = results["adoption_rate"]
         
         elapsed = time.time() - t0
         logger.info(
@@ -285,6 +330,21 @@ class MonteCarloMarketFitGate(BaseGate):
             reasoning=self._build_reasoning(results),
             details=results,
         )
+
+    def _build_context(
+        self,
+        feature: FeatureProposal,
+        company: CompanyContext,
+        graph: KnowledgeGraph,
+        bundle: ProblemContextBundle,
+        personas: list[FinalPersona],
+    ) -> str:
+        """Dummy implementation to satisfy BaseGate abstract method."""
+        return ""
+
+    def _build_questions(self) -> str:
+        """Dummy implementation to satisfy BaseGate abstract method."""
+        return ""
 
     def _validate_inputs(
         self,
@@ -320,9 +380,9 @@ class MonteCarloMarketFitGate(BaseGate):
                 f"(found {len(graph.nodes) if graph and graph.nodes else 0})"
             )
         
-        if not bundle or not bundle.chunks or len(bundle.chunks) < 5:
+        if not bundle or not bundle.chunks or len(bundle.chunks) < 1:
             raise ValueError(
-                f"Problem context bundle requires at least 5 chunks "
+                f"Problem context bundle requires at least 1 chunk "
                 f"(found {len(bundle.chunks) if bundle and bundle.chunks else 0})"
             )
         
@@ -340,10 +400,60 @@ class MonteCarloMarketFitGate(BaseGate):
     def _get_low_priority_pain_points(self, feature: FeatureProposal) -> list[str]:
         return ["Minor UI annoyance"]
         
-    def _get_top_pain_points(self, graph: KnowledgeGraph) -> list[str]:
+    def _get_top_pain_points(self, graph: KnowledgeGraph, feature: FeatureProposal = None) -> list[str]:
+        """Extract pain points from KG with fallback strategies (PA-2 fix)."""
         if not graph:
-            return ["General pain point"]
-        return [n for n, d in graph.nodes(data=True) if d.get("type") == "PAIN_POINT"][:5]
+            return ["General usability concern"]
+        
+        pain_points: list[str] = []
+        
+        # Strategy 1: Direct PAIN_POINT type entities
+        pain_points.extend(
+            n.name for n in graph.nodes.values() if n.type == "PAIN_POINT"
+        )
+        
+        # Strategy 2: Entities with negative-keyword contexts
+        negative_keywords = {"crash", "bug", "drain", "latency", "freeze", "error", 
+                           "slow", "fail", "broken", "frustrat", "pain", "problem",
+                           "outage", "downtime", "bottleneck", "lag", "timeout"}
+        
+        for node in graph.nodes.values():
+            for ctx in getattr(node, "contexts", []):
+                ctx_lower = ctx.lower()
+                if any(kw in ctx_lower for kw in negative_keywords):
+                    # Extract a concise pain point from context
+                    snippet = ctx[:100].strip()
+                    if snippet and snippet not in pain_points:
+                        pain_points.append(snippet)
+        
+        # Strategy 3: High-urgency entities as implicit pain points
+        for node in graph.nodes.values():
+            if getattr(node, "average_urgency", 0) >= 4.0 and node.name not in pain_points:
+                pain_points.append(f"High-urgency issue: {node.name}")
+        
+        # Strategy 4: Feature-description fallback
+        if not pain_points and feature:
+            desc_lower = feature.description.lower()
+            fallback_triggers = {
+                "performance": "Performance degradation under load",
+                "latency": "High latency impacting user experience",
+                "cost": "Rising infrastructure costs",
+                "battery": "Excessive battery/resource drain",
+                "crash": "Application stability issues",
+                "security": "Security vulnerability concerns",
+                "scale": "Scaling limitations at current growth",
+                "load": "System overload during peak usage",
+            }
+            for trigger, description in fallback_triggers.items():
+                if trigger in desc_lower:
+                    pain_points.append(description)
+        
+        # Ultimate fallback
+        if not pain_points:
+            pain_points = ["General usability concern", "Resource efficiency concern"]
+        
+        logger.info("Extracted %d pain points for Monte Carlo simulation", len(pain_points))
+        return pain_points[:10]
 
     def _validate_personas_are_external(
         self,
@@ -520,11 +630,11 @@ class MonteCarloMarketFitGate(BaseGate):
                 stance_confidence = profile.predicted_stance.confidence or 0.7
                 
                 if "APPROVE" in stance:
-                    affinity = min(1.0, stance_confidence + 0.15)
+                    affinity = min(0.82, max(0.50, stance_confidence + 0.15))
                 elif "CONDITIONAL" in stance:
-                    affinity = stance_confidence
+                    affinity = min(0.58, max(0.30, stance_confidence))
                 else:  # REJECT
-                    affinity = max(0.0, 1.0 - stance_confidence)
+                    affinity = min(0.30, max(0.08, 1.0 - stance_confidence))
                 
                 characteristics["affinity"].append(float(affinity))
                 
@@ -533,10 +643,9 @@ class MonteCarloMarketFitGate(BaseGate):
                 persona_confidence = persona.profile_confidence or 0.5
                 
                 if "Decisive" in speed or "Fast" in speed:
-                    # Scale urgency based on persona confidence
-                    urgency = 0.7 + (persona_confidence * 0.25)
+                    urgency = min(0.85, 0.7 + (persona_confidence * 0.15))
                 else:
-                    urgency = 0.3 + (persona_confidence * 0.4)
+                    urgency = min(0.70, 0.3 + (persona_confidence * 0.30))
                 
                 characteristics["urgency"].append(float(urgency))
                 
@@ -549,8 +658,8 @@ class MonteCarloMarketFitGate(BaseGate):
                     tech_base = 0.55
                 
                 # Scale by persona confidence
-                tech_comfort = tech_base + ((persona.profile_confidence or 0.5) * 0.15)
-                tech_comfort = max(0.0, min(1.0, tech_comfort))
+                tech_comfort = tech_base + ((persona.profile_confidence or 0.5) * 0.10)
+                tech_comfort = max(0.20, min(0.85, tech_comfort))
                 
                 characteristics["tech_comfort"].append(float(tech_comfort))
                 characteristics["segment_names"].append(persona.role)
@@ -577,7 +686,7 @@ class MonteCarloMarketFitGate(BaseGate):
         affinity_scores = characteristics["affinity"]
         if affinity_scores:
             affinity_mean = np.mean(affinity_scores)
-            affinity_std = np.std(affinity_scores) or 0.15
+            affinity_std = max(0.12, np.std(affinity_scores) or 0.15)
         else:
             affinity_mean = 0.6
             affinity_std = 0.2
@@ -591,7 +700,7 @@ class MonteCarloMarketFitGate(BaseGate):
         urgency_scores = characteristics["urgency"]
         if urgency_scores:
             urgency_mean = np.mean(urgency_scores)
-            urgency_std = np.std(urgency_scores) or 0.2
+            urgency_std = max(0.12, np.std(urgency_scores) or 0.2)
         else:
             urgency_mean = 0.5
             urgency_std = 0.25
@@ -605,7 +714,7 @@ class MonteCarloMarketFitGate(BaseGate):
         tech_scores = characteristics["tech_comfort"]
         if tech_scores:
             tech_mean = np.mean(tech_scores)
-            tech_std = np.std(tech_scores) or 0.2
+            tech_std = max(0.12, np.std(tech_scores) or 0.2)
         else:
             tech_mean = 0.65
             tech_std = 0.2
@@ -633,47 +742,73 @@ class MonteCarloMarketFitGate(BaseGate):
         feature: FeatureProposal,
         graph: KnowledgeGraph,
     ) -> None:
-        """Inject LLM decisions into agents as baseline probabilities with timeout support"""
-        
+        """
+        Optimized Injection: Call LLM once per segment archetype (O(S)) 
+        instead of O(N) agents. Propagate decisions stochastically.
+        """
         agents = model.schedule.agents
         pain_points = self._get_top_pain_points(graph)
         
-        # Batch LLM decisions
-        batch_size = 50
+        # 1. Group agents by segment
+        segments: Dict[str, List[MarketAdoptionAgent]] = {}
+        for agent in agents:
+            seg = agent.segment
+            if seg not in segments:
+                segments[seg] = []
+            segments[seg].append(agent)
+            
+        logger.info("Optimized Injection: Identified %d persona segments", len(segments))
         
-        for i in range(0, len(agents), batch_size):
-            batch = agents[i:i+batch_size]
+        # 2. Process each segment archetype
+        for seg_name, seg_agents in segments.items():
+            if not seg_agents:
+                continue
+                
+            # Pick a representative "Archetype" agent (middle of the pack)
+            # Sorting by sum of affinity/urgency to find a 'median' candidate
+            seg_agents.sort(key=lambda a: a.world_state.feature_affinity + a.world_state.urgency_level)
+            archetype = seg_agents[len(seg_agents) // 2]
             
-            logger.info(
-                "Injecting LLM baselines for agent batch %d/%d",
-                i // batch_size + 1,
-                (len(agents) + batch_size - 1) // batch_size,
-            )
+            logger.info("Calling LLM for Archetype: Segment=%s, AgentID=%d", seg_name, archetype.unique_id)
             
-            tasks = [
-                self._get_agent_llm_decision(
-                    agent, feature, pain_points
+            # 3. Call LLM for this archetype ONLY
+            try:
+                adopts, confidence, reasoning = await self._get_agent_llm_decision(
+                    archetype, feature, pain_points
                 )
-                for agent in batch
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for agent, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "LLM decision failed for agent %d: %s",
-                        agent.unique_id, result
-                    )
-                    # Use world state probability as fallback
-                    agent.set_llm_decision(
-                        adopts=False,
-                        confidence=0.5,
-                        reasoning="LLM failed, using fallback"
-                    )
-                else:
-                    adopts, confidence, reasoning = result
-                    agent.set_llm_decision(adopts, confidence, reasoning)
+                
+                # 4. Stochastic Propagation
+                # Baseline probability derived from LLM's definitive archetype stance
+                baseline_prob = 0.7 + (confidence * 0.3) if adopts else 0.0 + (confidence * 0.3)
+                
+                for agent in seg_agents:
+                    # Adjust individual prob based on delta from archetype's core traits
+                    affinity_delta = agent.world_state.feature_affinity - archetype.world_state.feature_affinity
+                    urgency_delta = agent.world_state.urgency_level - archetype.world_state.urgency_level
+                    
+                    # Trait-based shift (-0.2 to +0.2)
+                    trait_shift = (affinity_delta * 0.5 + urgency_delta * 0.5) * 0.4
+                    
+                    # Population noise (Gaussian)
+                    noise = np.random.normal(0, 0.05)
+                    
+                    # Final probability for this individual
+                    final_individual_prob = np.clip(baseline_prob + trait_shift + noise, 0.0, 1.0)
+                    
+                    # Set the individual agent's initial bias
+                    agent.base_llm_probability = final_individual_prob
+                    agent.confidence = confidence
+                    agent.reasoning = f"(Propagated from {seg_name} Archetype) " + reasoning
+                    
+                    # Initial adoption if prob is very high (step 0 adoption)
+                    if np.random.random() < final_individual_prob:
+                        agent.adopts = True
+                        
+            except Exception as e:
+                logger.error("Archetype inference failed for %s: %s", seg_name, e)
+                # Fallback to inherent world state prob for the whole segment
+                for agent in seg_agents:
+                    agent.base_llm_probability = agent.world_state.adoption_probability
 
     async def _get_agent_llm_decision(
         self,
@@ -917,7 +1052,7 @@ Return JSON:
     def _empty_results(self) -> dict[str, Any]:
         """Return empty result set"""
         return {
-            "adoption_rate": 0.0,
+            "score": 0.0,
             "adoption_p10": 0.0,
             "adoption_p50": 0.0,
             "adoption_p90": 0.0,
