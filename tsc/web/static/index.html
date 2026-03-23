@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSC v2.0 — Feature Evaluation Pipeline</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #1a1f2e;
+            --bg-card-hover: #1e2538;
+            --border: #2d3548;
+            --text-primary: #e5e7eb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --accent-cyan: #06b6d4;
+            --accent-purple: #8b5cf6;
+            --accent-green: #10b981;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --gradient-1: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 100%);
+            --gradient-2: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+            --shadow-glow: 0 0 30px rgba(6, 182, 212, 0.15);
+            --radius: 12px;
+            --radius-lg: 16px;
+            --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: var(--gradient-1);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.85rem;
+            color: white;
+        }
+
+        .logo-text {
+            font-weight: 700;
+            font-size: 1.15rem;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-version {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            font-size: 0.8rem;
+            color: var(--accent-green);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* Main Layout */
+        .main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            display: grid;
+            gap: 2rem;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            transition: var(--transition);
+        }
+
+        .card:hover {
+            border-color: rgba(6, 182, 212, 0.3);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card-title .icon {
+            font-size: 1.2rem;
+        }
+
+        /* Config Section */
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        select, input[type="text"] {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.6rem 0.8rem;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.9rem;
+            transition: var(--transition);
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
+        }
+
+        /* File Inputs */
+        .file-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+        }
+
+        .file-input {
+            position: relative;
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            padding: 1rem;
+            text-align: center;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .file-input:hover {
+            border-color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.05);
+        }
+
+        .file-input.has-file {
+            border-color: var(--accent-green);
+            background: rgba(16, 185, 129, 0.05);
+        }
+
+        .file-input input {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .file-input .file-label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .file-input .file-name {
+            font-size: 0.75rem;
+            color: var(--accent-green);
+            margin-top: 0.25rem;
+        }
+
+        /* Run Button */
+        .run-btn {
+            width: 100%;
+            padding: 1rem;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--gradient-1);
+            color: white;
+            font-family: inherit;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .run-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(6, 182, 212, 0.3);
+        }
+
+        .run-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Progress */
+        .progress-section {
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .layer-track {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .layer-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.75rem 1rem;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: var(--transition);
+        }
+
+        .layer-item.running {
+            border-color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.05);
+        }
+
+        .layer-item.done {
+            border-color: var(--accent-green);
+        }
+
+        .layer-num {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--bg-card);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+
+        .layer-item.done .layer-num {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+        }
+
+        .layer-item.running .layer-num {
+            background: rgba(6, 182, 212, 0.2);
+            color: var(--accent-cyan);
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        .layer-info {
+            flex: 1;
+        }
+
+        .layer-name {
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .layer-details {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Result */
+        .result-section {
+            display: none;
+        }
+
+        .result-section.active {
+            display: block;
+        }
+
+        .verdict-display {
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .verdict-label {
+            font-size: 2.5rem;
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+        }
+
+        .verdict-label.approved { color: var(--accent-green); }
+        .verdict-label.conditional { color: var(--accent-amber); }
+        .verdict-label.rejected { color: var(--accent-red); }
+
+        .confidence-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 1s ease;
+        }
+
+        .pillar-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .pillar-card {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .pillar-name {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .pillar-score {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0.5rem 0;
+        }
+
+        .summary-text {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border-left: 3px solid var(--accent-cyan);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+
+        .meta-info {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-top: 1.5rem;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        @media (max-width: 768px) {
+            .config-grid, .file-grid { grid-template-columns: 1fr; }
+            .main { padding: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">TSC</div>
+            <div>
+                <div class="logo-text">Technology-Stakeholder-Consensus</div>
+                <div class="logo-version">v2.0 Pipeline</div>
+            </div>
+        </div>
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            <span id="statusText">Ready</span>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- Configuration -->
+        <div class="card">
+            <div class="card-title"><span class="icon">⚙️</span> Configuration</div>
+            <div class="config-grid">
+                <div class="form-group">
+                    <label>LLM Provider</label>
+                    <select id="provider">
+                        <option value="anthropic">Anthropic (Claude)</option>
+                        <option value="openai">OpenAI (GPT-4o)</option>
+                        <option value="groq">Groq (Llama)</option>
+                        <option value="openrouter">OpenRouter</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Model</label>
+                    <input type="text" id="model" placeholder="Auto-detect from provider">
+                </div>
+            </div>
+        </div>
+
+        <!-- File Upload -->
+        <div class="card">
+            <div class="card-title"><span class="icon">📁</span> Input Documents</div>
+            <div class="file-grid">
+                <div class="file-input" id="fi-interviews">
+                    <input type="file" data-type="interviews" accept=".txt,.pdf,.md,.docx">
+                    <div class="file-label">Customer Interviews</div>
+                    <div class="file-name"></div>
+                </div>
+                <div class="file-input" id="fi-support">
+                    <input type="file" data-type="support" accept=".csv,.txt">
+                    <div class="file-label">Support Tickets</div>
+                    <div class="file-name"></div>
+                </div>
+                <div class="file-input" id="fi-context">
+                    <input type="file" data-type="context" accept=".json">
+                    <div class="file-label">Company Context</div>
+                    <div class="file-name"></div>
+                </div>
+                <div class="file-input" id="fi-proposal">
+                    <input type="file" data-type="proposal" accept=".json">
+                    <div class="file-label">Feature Proposal</div>
+                    <div class="file-name"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Run -->
+        <button class="run-btn" id="runBtn" onclick="startEvaluation()">
+            🚀 Run Evaluation
+        </button>
+
+        <!-- Progress -->
+        <div class="card progress-section" id="progressSection">
+            <div class="card-title"><span class="icon">⏳</span> Pipeline Progress</div>
+            <div class="layer-track" id="layerTrack"></div>
+        </div>
+
+        <!-- Result -->
+        <div class="card result-section" id="resultSection">
+            <div class="card-title"><span class="icon">📊</span> Evaluation Result</div>
+            <div class="verdict-display">
+                <div class="verdict-label" id="verdictLabel"></div>
+                <div style="color: var(--text-secondary); font-size: 0.9rem;">
+                    Confidence: <strong id="confidenceText"></strong>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" id="confidenceFill"></div>
+                </div>
+            </div>
+            <div class="pillar-grid" id="pillarGrid"></div>
+            <div class="summary-text" id="summaryText"></div>
+            <div class="meta-info" id="metaInfo"></div>
+        </div>
+    </main>
+
+    <script>
+        const layers = [
+            "Contextual Ingestor", "Knowledge Graph Builder",
+            "Persona Generation", "Gate Evaluation",
+            "Iterative Refinement", "Stakeholder Debate",
+            "Specification Generation", "Handoff & Monitoring"
+        ];
+        let ws = null;
+        let uploadedFiles = {};
+
+        // File inputs
+        document.querySelectorAll('.file-input input').forEach(input => {
+            input.addEventListener('change', async e => {
+                const file = e.target.files[0];
+                const type = e.target.dataset.type;
+                const container = e.target.parentElement;
+                if (file) {
+                    container.classList.add('has-file');
+                    container.querySelector('.file-name').textContent = file.name;
+
+                    // Upload
+                    const formData = new FormData();
+                    formData.append(type, file);
+                    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                    const data = await res.json();
+                    Object.assign(uploadedFiles, data.files || {});
+                }
+            });
+        });
+
+        // Init layer track
+        function initLayers() {
+            const track = document.getElementById('layerTrack');
+            track.innerHTML = layers.map((name, i) => `
+                <div class="layer-item" id="layer-${i+1}">
+                    <div class="layer-num">${i+1}</div>
+                    <div class="layer-info">
+                        <div class="layer-name">${name}</div>
+                        <div class="layer-details" id="layer-details-${i+1}">Pending</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function startEvaluation() {
+            if (Object.keys(uploadedFiles).length === 0) {
+                alert('Please upload at least one input file.');
+                return;
+            }
+
+            const btn = document.getElementById('runBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Running...';
+            document.getElementById('statusText').textContent = 'Evaluating...';
+            document.getElementById('progressSection').classList.add('active');
+            document.getElementById('resultSection').classList.remove('active');
+            initLayers();
+
+            const provider = document.getElementById('provider').value;
+            const model = document.getElementById('model').value;
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+            ws = new WebSocket(`${protocol}//${location.host}/ws/evaluate`);
+            ws.onopen = () => {
+                ws.send(JSON.stringify({
+                    files: uploadedFiles,
+                    provider,
+                    model: model || undefined,
+                }));
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'progress') {
+                    updateLayer(msg.layer, msg.status, msg.details);
+                } else if (msg.type === 'complete') {
+                    showResult(msg.result);
+                    btn.disabled = false;
+                    btn.textContent = '🚀 Run Evaluation';
+                    document.getElementById('statusText').textContent = 'Complete';
+                } else if (msg.type === 'error') {
+                    alert('Error: ' + msg.message);
+                    btn.disabled = false;
+                    btn.textContent = '🚀 Run Evaluation';
+                    document.getElementById('statusText').textContent = 'Error';
+                }
+            };
+
+            ws.onerror = () => {
+                alert('WebSocket connection failed. Is the server running?');
+                btn.disabled = false;
+                btn.textContent = '🚀 Run Evaluation';
+            };
+        }
+
+        function updateLayer(num, status, details) {
+            const el = document.getElementById(`layer-${num}`);
+            const detailsEl = document.getElementById(`layer-details-${num}`);
+            if (!el) return;
+
+            el.className = `layer-item ${status === 'done' ? 'done' : 'running'}`;
+            if (status === 'done' && details) {
+                const info = Object.entries(details).map(([k,v]) => `${k}: ${v}`).join(' · ');
+                detailsEl.textContent = `✅ ${info}`;
+            } else {
+                detailsEl.textContent = 'Processing...';
+            }
+        }
+
+        function showResult(result) {
+            document.getElementById('resultSection').classList.add('active');
+
+            const verdict = result.final_verdict || 'UNKNOWN';
+            const verdictEl = document.getElementById('verdictLabel');
+            verdictEl.textContent = verdict;
+            verdictEl.className = 'verdict-label ' +
+                (verdict.includes('APPROVED') && !verdict.includes('CONDITIONAL') ? 'approved' :
+                 verdict.includes('CONDITIONAL') ? 'conditional' : 'rejected');
+
+            const conf = result.overall_confidence || 0;
+            document.getElementById('confidenceText').textContent = `${(conf * 100).toFixed(0)}%`;
+            const fill = document.getElementById('confidenceFill');
+            fill.style.width = `${conf * 100}%`;
+            fill.style.background = conf > 0.7 ? 'var(--accent-green)' :
+                                    conf > 0.5 ? 'var(--accent-amber)' : 'var(--accent-red)';
+
+            // Pillars
+            const pillarGrid = document.getElementById('pillarGrid');
+            const pillars = result.verdicts_by_pillar || {};
+            pillarGrid.innerHTML = Object.entries(pillars).map(([name, p]) => `
+                <div class="pillar-card">
+                    <div class="pillar-name">${name.replace(/_/g, ' ')}</div>
+                    <div class="pillar-score">${(p.score * 100).toFixed(0)}%</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted)">${p.verdict}</div>
+                </div>
+            `).join('');
+
+            // Summary
+            document.getElementById('summaryText').textContent =
+                result.summary_for_leadership || 'No summary available.';
+
+            // Meta
+            const meta = result.metadata || {};
+            document.getElementById('metaInfo').innerHTML = `
+                <span>⏱ ${meta.total_time_minutes?.toFixed(1) || '?'} min</span>
+                <span>🪙 ${(meta.total_tokens_used || 0).toLocaleString()} tokens</span>
+                <span>🤖 ${meta.llm_model || 'unknown'}</span>
+            `;
+        }
+    </script>
+</body>
+</html>
