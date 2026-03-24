@@ -136,9 +136,14 @@ Current infrastructure: {', '.join(company.tech_stack) or 'Not specified'}"""
 
 
 # ─── New Gates (4.5 & 4.6) ──────────────────────────────────────────
+# Using hybrid OASIS + Mesa implementations
 
-from tsc.gates.market_fit_gate import MonteCarloMarketFitGate
-from tsc.gates.red_team_gate import RedTeamAdversarialGate
+from tsc.layers.layer4_gates.gate_4_5_market_fit import MarketFitGate
+from tsc.layers.layer4_gates.gate_4_6_red_team import RedTeamGate
+
+# Re-register for sequential execution
+MonteCarloMarketFitGate = MarketFitGate
+RedTeamAdversarialGate = RedTeamGate
 
 # ─── Gate 4.7: Feature Interactions ─────────────────────────────────
 

@@ -153,10 +153,14 @@ class ZepMemoryClient:
                 parsed = []
                 edges = getattr(results, "edges", None) or []
                 for edge in edges:
+                    # MiroFish Optimization: Extract temporal metadata if present
+                    metadata = getattr(edge, "metadata", {}) or {}
                     parsed.append({
                         "fact": getattr(edge, "fact", str(edge)),
                         "score": float(getattr(edge, "score", 0.0) or 0.0),
                         "uuid": str(getattr(edge, "uuid_", "") or ""),
+                        "created_at": metadata.get("created_at"),
+                        "expired_at": metadata.get("expired_at")
                     })
                 if parsed:
                     logger.debug("Zep graph.search returned %d results", len(parsed))
@@ -166,6 +170,35 @@ class ZepMemoryClient:
 
         # Local keyword fallback
         return self._local_keyword_search(query, limit)
+
+    async def get_opinion_evolution(self, entity_name: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Retrieve historical stances for a specific entity to analyze opinion shifts (Temporal RAG)."""
+        if not self._zep_available or not self._client or not self._group_id:
+            # Local fallback search for entity mentions
+            return [f for f in self._local_facts if entity_name.lower() in str(f).lower()][:limit]
+
+        try:
+            # Query for all edges related to the entity
+            results = await self._client.graph.search(
+                group_id=self._group_id,
+                query=f"Stance and opinion of {entity_name}",
+                scope="edges",
+                limit=limit,
+            )
+            parsed = []
+            edges = getattr(results, "edges", None) or []
+            for edge in edges:
+                metadata = getattr(edge, "metadata", {}) or {}
+                parsed.append({
+                    "fact": getattr(edge, "fact", str(edge)),
+                    "timestamp": metadata.get("created_at"),
+                    "is_active": metadata.get("expired_at") is None
+                })
+            # Sort by timestamp if available
+            return sorted(parsed, key=lambda x: x.get("timestamp") or "", reverse=True)
+        except Exception as e:
+            logger.warning("Opinion evolution search failed: %s", e)
+            return []
 
     async def get_graph_entities(self) -> list[dict[str, Any]]:
         """Retrieve entities from the Zep knowledge graph."""
@@ -259,7 +292,14 @@ class ZepMemoryClient:
         current_len = 0
 
         for fact in facts:
-            line = str(fact.get("fact", "") or fact.get("data", "") or json.dumps(fact))
+            # MiroFish Optimization: Include temporal metadata in the line for search grounding
+            fact_prefix = ""
+            if fact.get("created_at"):
+                fact_prefix = f"[{fact['created_at']}] "
+            
+            base_fact = str(fact.get("fact", "") or fact.get("data", "") or json.dumps(fact))
+            line = f"{fact_prefix}{base_fact}"
+            
             # Truncate oversized individual facts
             if len(line) > ZEP_CHAR_LIMIT:
                 logger.warning("Single fact exceeds %d chars — truncating", ZEP_CHAR_LIMIT)

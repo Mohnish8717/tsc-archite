@@ -249,6 +249,19 @@ class PersonaGenerator:
             )
         logger.info("✓ Generated %d personas", len(valid_personas))
 
+        # Step 3.4: Build OASIS Belief Vectors (NEW)
+        from tsc.oasis.profile_builder import BuildBeliefVector
+        for persona in valid_personas:
+            try:
+                # We need to find the context bundle for this persona
+                # Matching by name (Stakeholder name == Persona name)
+                match = next((ctx for sh, ctx in valid_pairs if sh.name == persona.name), None)
+                if match:
+                    belief, _ = await BuildBeliefVector(persona, feature, company)
+                    persona.belief_vector = belief
+            except Exception as e:
+                logger.warning(f"Failed to build belief vector for {persona.name}: {e}")
+
         # Step 4: Persist to Database (Phase 2.1) and Cache
         if self._persona_repo:
             try:

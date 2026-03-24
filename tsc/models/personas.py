@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -90,3 +90,19 @@ class FinalPersona(BaseModel):
     profile_confidence: float = 0.0
     grounding_quality: float = 1.0
     persona_type: str = "INTERNAL"
+    
+    # NEW: OASIS-specific fields
+    belief_vector: Optional[Any] = None # OpinionVector
+    network_position_hint: str = "peripheral"
+    influence_strength: float = 0.5
+    receptiveness: float = 0.5
+
+    def to_oasis_profile(self, feature: Any) -> Any:
+        """Convert persona to OASIS simulation agent."""
+        from tsc.oasis.models import OASISAgentProfile
+        from tsc.oasis.profile_builder import BuildBeliefVector
+        import asyncio
+        
+        # This is a synchronous wrapper for the async builder
+        # In actual pipeline, we'll build it during Layer 3 process()
+        return None 

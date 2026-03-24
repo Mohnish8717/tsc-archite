@@ -202,8 +202,8 @@ class PersonaRepository:
         """Save or update external persona (cache-aware)."""
         async with self.db.get_session() as session:
             stmt = select(ExternalPersona).where(
-                ExternalPersona.segment_type == persona_data.get("segment_type"),
-                ExternalPersona.persona_name == persona_data.get("persona_name"),
+                ExternalPersona.role == persona_data.get("role"),
+                ExternalPersona.name == persona_data.get("name"),
             )
             result = await session.execute(stmt)
             existing = result.scalar_one_or_none()
@@ -221,16 +221,16 @@ class PersonaRepository:
         
         # ✅ Cache invalidation
         await self.db.invalidate_persona(persona_id)
-        logger.info(f"Saved external persona {persona_data['persona_name']}")
+        logger.info(f"Saved external persona {persona_data['name']}")
         
         return persona_id
 
     async def get_external_personas_by_segment(
         self,
-        segment_type: str
+        segment: str
     ) -> List[ExternalPersona]:
         """Get external personas by segment (cache-aware list)."""
-        cache_key = f"personas:segment:{segment_type}"
+        cache_key = f"personas:segment:{segment}"
         
         if self.cache:
             cached = await self.cache.get_list(cache_key)
@@ -239,10 +239,8 @@ class PersonaRepository:
         
         async with self.db.get_session() as session:
             stmt = select(ExternalPersona).where(
-                ExternalPersona.segment_type == segment_type
+                ExternalPersona.role == segment
             )
-            result = await session.execute(stmt)
-            personas = result.scalars().all()
             
             if self.cache:
                 await self.cache.set_list(cache_key, personas)

@@ -29,7 +29,7 @@ import asyncio
 import logging
 import re
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from tsc.llm.base import LLMClient
 from tsc.llm.prompts import (
@@ -37,6 +37,8 @@ from tsc.llm.prompts import (
     DEBATE_ROUND2_USER,
     DEBATE_ROUND3_USER,
     DEBATE_SYSTEM,
+    SUB_QUERY_GEN_SYSTEM,
+    SUB_QUERY_GEN_USER,
 )
 from tsc.models.debate import (
     ConsensusResult,
@@ -907,6 +909,7 @@ class DebateEngine:
         personas: list[FinalPersona],
         gates_summary: GatesSummary,
         top_entities: list[dict],
+        market_fit_insights: Optional[Dict[str, Any]] = None,
     ) -> DebateRound:
         """Round 1: Sequential execution"""
         positions: list[DebatePosition] = []
@@ -926,6 +929,7 @@ class DebateEngine:
                     }
                     for g in gates_summary.results
                 ],
+                market_fit_insights=market_fit_insights,
                 top_entities=top_entities,
             )
 
@@ -959,6 +963,7 @@ class DebateEngine:
         personas: list[FinalPersona],
         gates_summary: GatesSummary,
         top_entities: list[dict],
+        market_fit_insights: Optional[Dict[str, Any]] = None,
     ) -> DebateRound:
         """Execute Round 1 in parallel for all stakeholders"""
 
@@ -977,6 +982,7 @@ class DebateEngine:
                     }
                     for g in gates_summary.results
                 ],
+                market_fit_insights=market_fit_insights,
                 top_entities=top_entities,
             )
 
@@ -1160,6 +1166,60 @@ class DebateEngine:
 
         return consensus
 
+    async def _generate_sub_queries(self, feature: FeatureProposal) -> list[str]:
+        """InsightForge: Decompose feature into 3-5 specific search queries."""
+        try:
+            prompt = SUB_QUERY_GEN_USER.render(feature=feature)
+            response = await self._llm.generate(
+                system_prompt=SUB_QUERY_GEN_SYSTEM,
+                user_prompt=prompt,
+                temperature=0.3, # Low temp for precise query generation
+            )
+            
+            # Robust JSON parsing
+            json_match = re.search(r'\[.*\]', response, re.DOTALL)
+            if json_match:
+                import json
+                queries = json.loads(json_match.group())
+                if isinstance(queries, list):
+                    logger.info("InsightForge generated %d sub-queries", len(queries))
+                    return queries[:5]
+            
+            # Fallback to simple split if JSON fails
+            logger.warning("Sub-query JSON parsing failed, using simple fallback")
+            return [feature.title, f"{feature.title} risks", f"{feature.title} constraints"]
+        except Exception as e:
+            logger.error("Sub-query generation failed: %s", e)
+            return [feature.title]
+
+    async def _expand_context_with_sub_queries(
+        self, 
+        queries: list[str], 
+        zep_client: Any,
+        limit_per_query: int = 5
+    ) -> list[dict[str, Any]]:
+        """Perform parallel searches for all sub-queries and aggregate results."""
+        if not zep_client:
+            return []
+            
+        logger.info("Expanding context using %d sub-queries", len(queries))
+        tasks = [zep_client.search_facts(query, limit=limit_per_query) for query in queries]
+        search_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        aggregated_facts = []
+        seen_uuids = set()
+        
+        for result in search_results:
+            if isinstance(result, list):
+                for fact in result:
+                    uuid = fact.get("uuid") or fact.get("fact")
+                    if uuid not in seen_uuids:
+                        aggregated_facts.append(fact)
+                        seen_uuids.add(uuid)
+        
+        logger.info("Context expanded to %d unique facts", len(aggregated_facts))
+        return aggregated_facts
+
     # ── Main Process ─────────────────────────────────────────────────
 
     async def process(
@@ -1169,11 +1229,16 @@ class DebateEngine:
         graph: KnowledgeGraph,
         personas: list[FinalPersona],
         gates_summary: GatesSummary,
+        zep_client: Optional[Any] = None, # MiroFish Optimization: Allow Zep client injection
     ) -> ConsensusResult:
         """Run debate with full validation integration."""
         t0 = time.time()
 
         logger.info("Layer 6: Starting debate with %d stakeholders", len(personas))
+
+        # Extract OASIS insights from Gate 4.5 if available
+        market_fit_gate = gates_summary.get_gate("4.5")
+        market_fit_insights = market_fit_gate.details.get("oasis") if market_fit_gate else None
 
         try:
             self._validate_inputs(feature, company, graph, personas, gates_summary)
@@ -1193,16 +1258,30 @@ class DebateEngine:
                 del self._debate_cache[cache_key]
 
         top_entities = self._get_top_entities(graph)
+        
+        # MiroFish Optimization: Sub-Query Reasoning (InsightForge)
+        if zep_client:
+            sub_queries = await self._generate_sub_queries(feature)
+            expanded_facts = await self._expand_context_with_sub_queries(sub_queries, zep_client)
+            # Merge with top entities (keeping top 20 total for context limits)
+            for fact in expanded_facts[:10]:
+                top_entities.append({
+                    "name": "Fact",
+                    "type": "GROUNDING",
+                    "mentions": 1,
+                    "average_urgency": 5.0,
+                    "summary": fact.get("fact", "")
+                })
 
         if self._parallel:
             logger.info("Running debate rounds in parallel mode")
             round1 = await self._round1_initial_positions_parallel(
-                feature, personas, gates_summary, top_entities
+                feature, personas, gates_summary, top_entities, market_fit_insights
             )
         else:
             logger.info("Running debate rounds in sequential mode")
             round1 = await self._round1_initial_positions(
-                feature, personas, gates_summary, top_entities
+                feature, personas, gates_summary, top_entities, market_fit_insights
             )
 
         logger.info("Round 1 complete: %d positions", len(round1.positions))

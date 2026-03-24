@@ -430,6 +430,19 @@ Gate results summary:
 - {{ gate.gate_name }}: {{ gate.verdict }} (score: {{ gate.score }})
 {% endfor %}
 
+--- MARKET SIMULATION INSIGHTS (OASIS) ---
+{% if market_fit_insights %}
+- Predicted Adoption Score: {{ market_fit_insights.adoption_score | round(2) }}
+- Consensus Type: {{ market_fit_insights.consensus_type }} (Strength: {{ market_fit_insights.consensus_strength | round(2) }})
+- Market Segments: {{ market_fit_insights.segment_count }} clusters identified
+- Key Market Objections: 
+  {% for obj in market_fit_insights.objections %}
+  * {{ obj }}
+  {% endfor %}
+{% else %}
+- Actual social simulation data not available for this round.
+{% endif %}
+
 Key data points / Evidence:
 {% for entity in top_entities[:10] %}
 - {{ entity.name }}: {{ entity.mentions }} mentions, urgency: {{ entity.average_urgency | round(1) if entity.average_urgency else 'N/A' }}
@@ -437,9 +450,10 @@ Key data points / Evidence:
 
 State your INITIAL POSITION (200-300 words).
 You MUST:
-1. Cite at least 3 specific data points from the evidence above to support your stance.
-2. Identify the #1 biggest risk from YOUR perspective.
-3. Clearly state: APPROVE, REJECT, or CONDITIONALLY APPROVE.""")
+1. Cite at least 1 specific insight from the OASIS market simulation above.
+2. Cite at least 2 specific data points from the Knowledge Graph evidence.
+3. Identify the #1 biggest risk from YOUR perspective.
+4. Clearly state: APPROVE, REJECT, or CONDITIONALLY APPROVE.""")
 
 DEBATE_ROUND2_USER = _env.from_string("""You are {{ name }}, {{ role }}. 
 
@@ -532,3 +546,30 @@ Key Data: {{ key_metrics }}
 ROI: {{ roi }}
 Timeline: {{ timeline }}
 Top Risk: {{ top_risk }}""")
+
+# ─────────────────────────────────────────────────────────────────────
+# Layer 9: Sub-Query Generation (InsightForge)
+# ─────────────────────────────────────────────────────────────────────
+
+SUB_QUERY_GEN_SYSTEM = """You are a precision research analyst. Decompose a complex product feature proposal into 3-5 specific, distinct search queries for a knowledge graph. 
+Focus on identifying:
+1. Technical constraints and dependencies
+2. Potential user pain points or objections
+3. Business/Market risks
+4. Historical context or comparable features
+"""
+
+SUB_QUERY_GEN_USER = _env.from_string("""Feature Proposal:
+- Title: {{ feature.title }}
+- Description: {{ feature.description }}
+- Target Users: {{ feature.target_users }}
+
+Generate exactly 3-5 search queries that will help uncover the most relevant facts from a knowledge graph to evaluate this feature.
+Queries should be concise (max 10 words each).
+
+Return ONLY a JSON array of strings:
+[
+  "query 1",
+  "query 2",
+  "query 3"
+]""")
