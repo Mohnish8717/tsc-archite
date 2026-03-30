@@ -69,8 +69,10 @@ async def run_and_report_conversations():
     
     # 4. Trigger Mid-Simulation Interview Asynchronously
     async def mid_sim_trigger():
-        # wait 30 seconds into the simulation to drop the interview command
-        await asyncio.sleep(45)
+        # Wait until well after timestep 0 completes before firing the interview.
+        # Timestep 0 Phase 1 + Phase 2 + sync pauses ≈ 60-90s at 3 agents.
+        # 120s guarantees we fire at a clean timestep boundary (start of timestep 1 or 2).
+        await asyncio.sleep(120)
         command_file = f"/tmp/oasis_runs/{sim_id}/commands.json"
         
         print("\n📣 [TEST SCRIPT] Firing asynchronous MID-SIMULATION INTERVIEW payload!")

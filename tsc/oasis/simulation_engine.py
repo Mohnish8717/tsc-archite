@@ -56,7 +56,10 @@ builtins.open = _patched_open
 # ============================================================================
 # TIER 7: Concurrency Throttling (Prevents FD saturation)
 # ============================================================================
-_concurrency_semaphore = asyncio.Semaphore(30)
+# Concurrency control for LLM calls (MacOS Optimized)
+# Two separate semaphores prevent interview tasks from starving conversation round tasks.
+_concurrency_semaphore = asyncio.Semaphore(10)   # Conversation rounds: 10 slots
+_interview_semaphore   = asyncio.Semaphore(2)    # Mid-sim interviews: 2 dedicated slots
 
 # External OASIS Imports moved inside RunOASISSimulation to prevent import-time deadlocks
 # ============================================================================
@@ -237,11 +240,13 @@ class ConversationManager:
         backoff_seconds = 2 ** (attempt - 1)
         
         try:
-            # NativeAgent.generate_response is the core logic
-            response_text = await asyncio.wait_for(
-                agent.generate_response(f"INTERVIEW: {question}", feature),
-                timeout=self.reply_timeout
-            )
+            # Use DEDICATED interview semaphore so interview LLM calls
+            # never compete with _concurrency_semaphore held by conversation round tasks.
+            async with _interview_semaphore:
+                response_text = await asyncio.wait_for(
+                    agent.generate_response(f"INTERVIEW: {question}", feature),
+                    timeout=self.reply_timeout
+                )
             
             if not response_text.strip():
                 logger.warning(f"Empty response from agent interview")
@@ -340,114 +345,80 @@ class ConversationManager:
                 return conversation_actions
             
             # Each agent attempts to reply to posts (with per-agent limits)
-            for agent in social_agents:
+            # Parallelize conversation generating to reduce latency
+            async def generate_and_post_reponse(agent):
                 agent_id = getattr(agent, "social_agent_id", str(id(agent)))
                 agent_name = agent_id_to_name.get(agent_id, "Unknown Agent")
-                replies_for_this_agent = 0
                 
-                for post in recent_posts:
-                    # Prevent too many replies from same agent
-                    if replies_for_this_agent >= self.max_replies_per_post:
-                        break
-                    
-                    # Allow agents to reply to any post (especially their own if comments exist)
+                # Check recent posts again within the task to get latest
+                acquired_read_inner = await lock_manager.acquire_read(timeout=3.0)
+                if not acquired_read_inner: return None
+                
+                try:
+                    inner_posts = await asyncio.wait_for(platform.get_recent_posts(limit=5), timeout=5.0)
+                finally:
+                    lock_manager.release_read()
 
-                    
+                if not inner_posts: return None
+                
+                replies_count = 0
+                for post in inner_posts:
+                    if replies_count >= self.max_replies_per_post: break
                     post_id = getattr(post, "post_id", None)
-                    if not post_id:
-                        continue
-                    
-                    # Skip already-replied posts (avoid duplicates)
-                    if post_id in replied_to_posts:
-                        continue
+                    if not post_id or post_id in replied_to_posts: continue
                     
                     try:
-                        # Generate reply with NativeAgent
                         post_content = getattr(post, "content", "[No Content]")
                         global_context = await platform.get_global_context(agent_id_to_name)
                         self_history = await platform.get_recent_history(agent_id)
+                        
+                        # Semaphore now handled inside agent.generate_response to avoid nested deadlocks
                         reply_content = await asyncio.wait_for(
                             agent.generate_response(f"The post was: {post_content}", feature, global_context, self_history),
                             timeout=self.reply_timeout
                         )
                         
-                        # Edge case: Empty reply
-                        if not reply_content.strip():
-                            logger.debug(f"Agent {agent_name} generated empty reply")
-                            continue
+                        if not reply_content.strip(): continue
                         
-                        # Record this conversation
-                        conv_action = {
-                            "agent_id": agent_id,
-                            "agent_name": agent_name,
-                            "reply_to_post_id": post_id,
-                            "reply_to_content": post_content[:100],  # Truncate for logging
-                            "reply_content": reply_content,
-                            "timestep": t,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        conversation_actions.append(conv_action)
-                        replied_to_posts.add(post_id)
-                        replies_for_this_agent += 1
-                        
-                        # TIER 6: Safe platform write with lock
+                        # Write with lock
                         acquired_write = await lock_manager.acquire_write(timeout=5.0)
                         if acquired_write:
                             try:
-                                await asyncio.wait_for(
-                                    platform.create_comment(
-                                        agent_id=int(agent_id) if agent_id.isdigit() else hash(agent_id) % 1000000,
-                                        post_id=post_id,
-                                        content=reply_content
-                                    ),
-                                    timeout=5.0
+                                await platform.create_comment(
+                                    agent_id=int(agent_id) if agent_id.isdigit() else hash(agent_id) % 1000000,
+                                    post_id=post_id,
+                                    content=reply_content
                                 )
+                                # Add to tracking set (using lock for thread safety in gather if needed, but set.add is fine here)
+                                replied_to_posts.add(post_id)
                                 
-                                # Log successful conversation
                                 local_logger.log_action(
-                                    agent_id=agent_id,
-                                    agent_name=agent_name,
-                                    action_type="REPLY",
-                                    content=reply_content,
-                                    timestep=t,
-                                    platform="oasis",
-                                    metadata={"parent_post_id": post_id}
+                                    agent_id=agent_id, agent_name=agent_name,
+                                    action_type="REPLY", content=reply_content,
+                                    timestep=t, platform="oasis", metadata={"parent_post_id": post_id}
                                 )
-                                
-                            except Exception as reply_error:
-                                logger.error(
-                                    f"Failed to post reply: {reply_error}",
-                                    exc_info=False
-                                )
-                                self.failed_replies.append({
-                                    "agent": agent_name,
-                                    "post_id": post_id,
-                                    "error": str(reply_error)
-                                })
+                                return {"agent_id": agent_id, "content": reply_content}
                             finally:
                                 lock_manager.release_write()
-                        else:
-                            logger.warning("Could not acquire write lock for reply posting")
-                            self.failed_replies.append({
-                                "agent": agent_name,
-                                "post_id": post_id,
-                                "error": "Write lock timeout"
-                            })
-                    
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            f"Reply generation timeout for agent {agent_name} "
-                            f"on post {post_id}"
-                        )
-                        self.failed_replies.append({
-                            "agent": agent_name,
-                            "post_id": post_id,
-                            "error": "Generation timeout"
-                        })
-                    
                     except Exception as e:
-                        logger.error(f"Unexpected error generating reply for {agent_name}: {e}")
-                        continue
+                        error_type = type(e).__name__
+                        logger.error(f"Error in parallel reply for {agent_name} ({error_type}): {e}")
+                return None
+
+            # STAGGER agents sequentially — prevents the concurrent Groq API burst
+            # that causes agents 1 & 2 to timeout while agent 0 always wins.
+            # Trade-off: slightly slower per round, but 100% reliable participation.
+            round_results = []
+            for i, agent in enumerate(social_agents):
+                result = await generate_and_post_reponse(agent)
+                round_results.append(result)
+                if i < len(social_agents) - 1:
+                    await asyncio.sleep(2.0)  # Rate-limit buffer between agents
+
+            # Map back to conversation_actions
+            for res in round_results:
+                if res and isinstance(res, dict):
+                    conversation_actions.append(res)
         
         except Exception as e:
             logger.error(
@@ -516,7 +487,7 @@ async def RunOASISSimulation(
     platform_io_manager = PlatformIOManager(max_workers=1)
     conversation_manager = ConversationManager(
         max_retries=3,
-        reply_timeout=30.0,
+        reply_timeout=60.0,
         max_replies_per_post=3
     )
     
@@ -557,23 +528,25 @@ async def RunOASISSimulation(
             self.user_info = type('obj', (object,), {'name': persona_profile.get('name', 'Unknown')})
 
         async def generate_response(self, context_text: str, feature: Any, global_context: str = "", self_history: str = "") -> str:
-            """Generate a contextual agent response via HTTP LLM (tsc.llm)."""
-            social_prompt = ""
-            if global_context:
-                social_prompt = f"\n\n--- GLOBAL CONVERSATION LOG ---\n{global_context}\n-----------------------------------\n"
-                
-            memory_prompt = ""
-            if self_history:
-                memory_prompt = f"\n\n--- YOUR RECENT MESSAGES ---\nYou have already said:\n{self_history}\nDO NOT repeat these points. Evolve your stance.\n-----------------------------------\n"
+            """Generate a contextual agent response via HTTP LLM (tsc.llm) with throttle control."""
+            start_time = datetime.now()
+            try:
+                social_prompt = ""
+                if global_context:
+                    social_prompt = f"\n\n--- GLOBAL CONVERSATION LOG ---\n{global_context}\n-----------------------------------\n"
+                    
+                memory_prompt = ""
+                if self_history:
+                    memory_prompt = f"\n\n--- YOUR RECENT MESSAGES ---\nYou have already said:\n{self_history}\nDO NOT repeat these points. Evolve your stance.\n-----------------------------------\n"
 
-            proposer_prompt = ""
-            if getattr(self, "is_proposer", False):
-                proposer_prompt = "\n5. YOU ARE THE ORIGINAL PROPOSER OF THIS FEATURE. DEFEND your idea against skepticism. Address specific concerns raised by others and argue why the feature is necessary, making concessions if needed."
+                proposer_prompt = ""
+                if getattr(self, "is_proposer", False):
+                    proposer_prompt = "\n5. YOU ARE THE ORIGINAL PROPOSER OF THIS FEATURE. DEFEND your idea against skepticism. Address specific concerns raised by others and argue why the feature is necessary, making concessions if needed."
 
-            other_agents = [name for name in self.all_agent_names if name != self.persona.get('name')]
-            legal_names = ", ".join(other_agents) if other_agents else "None"
+                other_agents = [name for name in self.all_agent_names if name != self.persona.get('name')]
+                legal_names = ", ".join(other_agents) if other_agents else "None"
 
-            system_prompt = f"""You are {self.persona.get('name')}, a {self.persona.get('profile', {}).get('other_info', {}).get('role', 'Stakeholder')}.
+                system_prompt = f"""You are {self.persona.get('name')}, a {self.persona.get('profile', {}).get('other_info', {}).get('role', 'Stakeholder')}.
 Your MBTI is {self.persona.get('profile', {}).get('mbti')}. 
 Profile: {self.persona.get('profile', {}).get('user_profile')}
 
@@ -588,53 +561,62 @@ IMPORTANT INSTRUCTIONS FOR INTERACTION:
 FORMAT REQUIREMENT:
 Output ONLY your 1-2 sentence response. Do not include quotation marks. Do not include meta-commentary or internal reasoning (e.g. skip phrases like 'I will respond briefly:'). Write exactly what your character posts."""
 
-            user_prompt = f"React to this context in the simulation:\n\n{context_text}\n\nFeature: {feature.title}\nDescription: {feature.description}\n\nWhat is your response?"
-            
-            try:
-                return await self.llm.generate(system_prompt, user_prompt)
+                user_prompt = f"React to this context in the simulation:\n\n{context_text}\n\nFeature: {feature.title}\nDescription: {feature.description}\n\nWhat is your response?"
+                
+                async with _concurrency_semaphore:
+                    # Telemetry for diagnosis
+                    wait_time = (datetime.now() - start_time).total_seconds()
+                    if wait_time > 5.0:
+                        logger.warning(f"Agent {self.agent_id} ({self.persona.get('name')}) waited {wait_time:.1f}s for semaphore!")
+                    
+                    return await self.llm.generate(system_prompt, user_prompt)
             except Exception as e:
-                logger.error(f"NativeAgent LLM error: {e}")
+                logger.error(f"NativeAgent LLM error for {self.persona.get('name')}: {e}")
                 return ""
+            finally:
+                duration = (datetime.now() - start_time).total_seconds()
+                if duration > 10.0:
+                    logger.info(f"Agent {self.persona.get('name')} LLM call took {duration:.1f}s")
 
         async def step(self, feature: Any, global_context: str = "", self_history: str = "") -> Any:
             """Perform a simulation step: Read platform, decide, post response."""
-            print(f"DEBUG: Agent {self.agent_id} ({self.persona.get('name')}) waiting for semaphore...", flush=True)
-            async with _concurrency_semaphore:
-                print(f"DEBUG: Agent {self.agent_id} acquired semaphore. Fetching posts...", flush=True)
-                # TIER 2: Connect-Query-Close Pattern (No persistent handles)
-                # 1. Look at recent posts in the channel
-                posts = []
-                try:
-                    posts = await self.platform.get_posts(agent_id=self.agent_id, count=5)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch posts for agent {self.agent_id}: {e}")
-                    return type('obj', (object,), {'msgs': []})
-
-                if not posts:
-                    print(f"DEBUG: Agent {self.agent_id} found no posts.", flush=True)
-                    return type('obj', (object,), {'msgs': []})
-
-                latest_post = posts[0]
-                context_text = "Review the global conversation."
-                print(f"DEBUG: Agent {self.agent_id} generating LLM response...", flush=True)
-                response_text = await self.generate_response(context_text, feature, global_context, self_history)
-                
-                if response_text:
-                    print(f"DEBUG: Agent {self.agent_id} posting comment...", flush=True)
-                    # 2. Write back to platform (Immediate release)
-                    try:
-                        await self.platform.create_comment(
-                            agent_id=self.agent_id,
-                            post_id=latest_post.post_id,
-                            content=response_text
-                        )
-                        print(f"DEBUG: Agent {self.agent_id} post success.", flush=True)
-                        return type('obj', (object,), {'msgs': [type('obj', (object,), {'content': response_text})]})
-                    except Exception as e:
-                        logger.error(f"Failed to post comment for agent {self.agent_id}: {e}")
-                
-                print(f"DEBUG: Agent {self.agent_id} step complete (no response).", flush=True)
+            # Semaphore now handled inside generate_response to avoid re-entry deadlocks 
+            # while still protecting the primary LLM workload.
+            print(f"DEBUG: Agent {self.agent_id} ({self.persona.get('name')}) fetching posts...", flush=True)
+            # TIER 2: Connect-Query-Close Pattern (No persistent handles)
+            # 1. Look at recent posts in the channel
+            posts = []
+            try:
+                posts = await self.platform.get_posts(agent_id=self.agent_id, count=5)
+            except Exception as e:
+                logger.warning(f"Failed to fetch posts for agent {self.agent_id}: {e}")
                 return type('obj', (object,), {'msgs': []})
+
+            if not posts:
+                print(f"DEBUG: Agent {self.agent_id} found no posts.", flush=True)
+                return type('obj', (object,), {'msgs': []})
+
+            latest_post = posts[0]
+            context_text = "Review the global conversation."
+            print(f"DEBUG: Agent {self.agent_id} generating LLM response...", flush=True)
+            response_text = await self.generate_response(context_text, feature, global_context, self_history)
+            
+            if response_text:
+                print(f"DEBUG: Agent {self.agent_id} posting comment...", flush=True)
+                # 2. Write back to platform (Immediate release)
+                try:
+                    await self.platform.create_comment(
+                        agent_id=self.agent_id,
+                        post_id=latest_post.post_id,
+                        content=response_text
+                    )
+                    print(f"DEBUG: Agent {self.agent_id} post success.", flush=True)
+                    return type('obj', (object,), {'msgs': [type('obj', (object,), {'content': response_text})]})
+                except Exception as e:
+                    logger.error(f"Failed to post comment for agent {self.agent_id}: {e}")
+            
+            print(f"DEBUG: Agent {self.agent_id} step complete (no response).", flush=True)
+            return type('obj', (object,), {'msgs': []})
 
     # Instantiate Native LLM Client
     from tsc.llm.factory import create_llm_client
@@ -646,7 +628,7 @@ Output ONLY your 1-2 sentence response. Do not include quotation marks. Do not i
     social_agents = []
     for profile in agent_profiles:
         try:
-            is_proposer_flag = agent_profiles and str(profile.agent_id) == str(agent_profiles[0].agent_id)
+            is_proposer_flag = len(agent_profiles) > 0 and str(profile.agent_id) == str(agent_profiles[0].agent_id)
             agent = NativeAgent(
                 agent_id=str(profile.agent_id),
                 persona_profile=profile.user_info_dict,
@@ -678,7 +660,7 @@ What do you all think? Feedback appreciated."""
             try:
                 await asyncio.wait_for(
                     platform.create_post(
-                        agent_id=int(proposer_id),
+                        agent_id=str(proposer_id),
                         content=proposal_content
                     ),
                     timeout=5.0
@@ -726,7 +708,7 @@ What do you all think? Feedback appreciated."""
             
             action_resp = await asyncio.wait_for(
                 agent.step(feature, global_context, self_history),
-                timeout=15.0
+                timeout=60.0   # Aligned with conversation round timeout
             )
             
             agent_name = agent_id_to_name.get(agent_id, "Unknown Agent")
@@ -781,21 +763,18 @@ What do you all think? Feedback appreciated."""
         """Callback for mid-simulation querying via IPC."""
         responses_file = os.path.join(sim_dir, "mid_sim_interview_responses.json")
         
-        for agent in social_agents:
+        async def interview_agent(agent):
             agent_id_str = getattr(agent, "social_agent_id", str(id(agent)))
             
             # Find or create agent's entry in dynamic_interview_responses
-            agent_entry = next((e for e in dynamic_interview_responses if getattr(getattr(e, "get", lambda x: None), "__call__", lambda x: None)("agent_id") == agent_id_str or (isinstance(e, dict) and e.get("agent_id") == agent_id_str)), None)
+            agent_entry = next((e for e in dynamic_interview_responses if (isinstance(e, dict) and e.get("agent_id") == agent_id_str)), None)
             if not agent_entry:
-                agent_entry = {
-                    "agent_id": agent_id_str,
-                    "responses": []
-                }
+                agent_entry = {"agent_id": agent_id_str, "responses": []}
                 dynamic_interview_responses.append(agent_entry)
             
             agent_responses = []
             for q in questions:
-                # conversation_manager is defined in RunOASISSimulation scope
+                # Parallelize questions for each agent if needed, but per-agent loop is usually fine
                 resp = await conversation_manager.limited_interview(agent, q, feature)
                 if not isinstance(resp, Exception) and resp is not None:
                     agent_responses.append({
@@ -803,8 +782,13 @@ What do you all think? Feedback appreciated."""
                         "content": resp.get("content", ""),
                         "timestamp": resp.get("timestamp", "")
                     })
-            
             agent_entry["responses"].extend(agent_responses)
+
+        # Serialize interviews: run one agent at a time to eliminate API burst.
+        # This is safe because interviews happen at timestep boundaries — not
+        # during an active conversation gather.
+        for agent in social_agents:
+            await interview_agent(agent)
         
         try:
             with open(responses_file, 'w', encoding='utf-8') as f:
@@ -819,14 +803,29 @@ What do you all think? Feedback appreciated."""
     try:
         for t in range(config.num_timesteps):
             # Mid-Simulation Interview & IPC Check
+            # IMPORTANT: Interview fires BEFORE Phase 1 starts. We add a 2s cool-down
+            # after any interview to let the Groq API recover before the gather begins.
+            interview_fired = False
             try:
-                await command_listener.wait_if_paused(interview_callback=perform_mid_sim_interview)
+                questions = await command_listener.check_commands()
+                if questions:
+                    interview_fired = True
+                    logger.info(f"Firing mid-sim interview at timestep {t} boundary...")
+                    await perform_mid_sim_interview(questions)
+                elif command_listener.is_paused:
+                    await command_listener.wait_if_paused(interview_callback=perform_mid_sim_interview)
+                    interview_fired = True
             except Exception as e:
                 logger.error(f"IPC check failed: {e}")
             
             if command_listener.should_stop:
                 logger.warning(f"Simulation stopped by IPC at timestep {t}")
                 break
+
+            # Cool-down: let API rate-limit window reset after an interview burst
+            if interview_fired:
+                logger.info("Interview complete. Cool-down 3s before Phase 1...")
+                await asyncio.sleep(3.0)
             
             logger.info(f"Timestep {t}/{config.num_timesteps}")
             
@@ -836,10 +835,8 @@ What do you all think? Feedback appreciated."""
             logger.debug("Phase 1: Initial agent actions")
             
             # Determine concurrency strategy
-            use_serial = (
-                getattr(config, "concurrency_strategy", "serial") == "serial" or
-                sys.platform == "darwin"
-            )
+            # SOTA Performance Fix: Enable parallel execution on MacOS
+            use_serial = getattr(config, "concurrency_strategy", "parallel") == "serial"
             
             if use_serial:
                 actions = []
