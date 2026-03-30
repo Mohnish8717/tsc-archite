@@ -13,7 +13,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 # Configure Environment
 os.environ["TSC_LLM_PROVIDER"] = "groq"
-os.environ["GROQ_API_KEY"] = "your_groq_api_key_here" # Redacted for security
+os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY", "")
 os.environ["TSC_LLM_MODEL"] = "llama-3.1-8b-instant"
 
 # Import OASIS Components
@@ -26,21 +26,21 @@ logging.basicConfig(level=logging.ERROR) # Minimal logging to see results better
 logger = logging.getLogger("sim_test")
 
 async def run_and_report_conversations():
-    print("🚀 Running 10-Agent OASIS Simulation for Conversation Extraction...")
+    print("🚀 Running 3-Agent OASIS Simulation for Conversation Extraction...")
     
-    # 1. Setup Mock Profiles (Diverse Personas)
+    # 1. Setup Mock Profiles (Expert Market Personas)
     profiles = []
     personas = [
-        ("Alice", "CTO", "Highly skeptical of AI reliability, cares about security.", "INTJ"),
-        ("Bob", "SRE", "Loves automation but hates extra overhead.", "ISTP"),
-        ("Charlie", "Junior Dev", "Excited about any tool that makes coding faster.", "ENFP")
+        ("Dr. Aris Thorne", "Organizational Psychologist", "Expert in workplace productivity and flow states. Focuses on Deep Work disruption.", "INTJ"),
+        ("Sarah Jenkins", "Remote Operations Lead", "Manages 1,000+ remote workers. Focuses on Coordination Costs and talent retention.", "ENTJ"),
+        ("Marcus Vane", "Employment Law Attorney", "Expert in digital privacy and labor rights. Scrutinizes surveillance for legal compliance.", "ISTJ")
     ]
     
     for i, (name, role, bias, mbti) in enumerate(personas): # 3 agents total
         profiles.append(OASISAgentProfile(
             agent_id=i,
             source_persona_id=f"p_{i}",
-            agent_type="internal_stakeholder",
+            agent_type="external_market_segment",
             user_info_dict={
                 "name": name,
                 "profile": {

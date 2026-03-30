@@ -115,10 +115,8 @@ class LightweightPlatform:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            if agent_id is not None:
-                cursor.execute("SELECT post_id, agent_id, content FROM post WHERE agent_id != ? ORDER BY timestamp DESC LIMIT ?", (str(agent_id), count))
-            else:
-                cursor.execute("SELECT post_id, agent_id, content FROM post ORDER BY timestamp DESC LIMIT ?", (count,))
+            # No constraint on agent ID so OP can see their own original post
+            cursor.execute("SELECT post_id, agent_id, content FROM post ORDER BY timestamp DESC LIMIT ?", (count,))
             
             rows = cursor.fetchall()
             # Return objects with dot-access for compatibility with existing logic
@@ -129,6 +127,44 @@ class LightweightPlatform:
             conn.execute("INSERT INTO trace (agent_id, action_type, content, timestamp) VALUES (?, ?, ?, ?)",
                         (str(agent_id), action_type, content, datetime.utcnow()))
             conn.commit()
+
+    async def get_global_context(self, agent_id_to_name: Dict[str, str]) -> str:
+        """Fetch all posts and comments to build a structured global dialogue log."""
+        context_parts = []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Fetch posts
+            cursor.execute("SELECT post_id, agent_id, content, timestamp FROM post ORDER BY timestamp ASC")
+            posts = cursor.fetchall()
+            for p in posts:
+                name = agent_id_to_name.get(str(p['agent_id']), f"Agent {p['agent_id']}")
+                context_parts.append(f"--- [INITIAL POST] by {name} ---\n{p['content']}\n")
+            
+            # Fetch comments in chronological order
+            cursor.execute("SELECT post_id, agent_id, content, timestamp FROM comment ORDER BY timestamp ASC")
+            comments = cursor.fetchall()
+            if comments:
+                context_parts.append("--- [DISCUSSION THREAD] ---")
+                for c in comments:
+                    name = agent_id_to_name.get(str(c['agent_id']), f"Agent {c['agent_id']}")
+                    context_parts.append(f"[{name}]: {c['content']}")
+                
+        return "\n".join(context_parts)
+
+    async def get_recent_history(self, agent_id: str, limit: int = 2) -> str:
+        """Fetch the recent comments made by the specific agent itself to act as Self-Memory."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT content FROM comment WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?", (str(agent_id), limit))
+            comments = cursor.fetchall()
+            if not comments:
+                return ""
+            # Return in chronological order
+            history = [c['content'] for c in reversed(comments)]
+            return "\n".join([f"- {h}" for h in history])
 
 # ============================================================================
 # TIER 2: Essential Simulation Managers (Restored)
@@ -314,10 +350,8 @@ class ConversationManager:
                     if replies_for_this_agent >= self.max_replies_per_post:
                         break
                     
-                    # Skip own posts
-                    # Note: LightweightPlatform returns objects with .agent_id and .post_id
-                    if str(getattr(post, "agent_id", "")) == agent_id:
-                        continue
+                    # Allow agents to reply to any post (especially their own if comments exist)
+
                     
                     post_id = getattr(post, "post_id", None)
                     if not post_id:
@@ -330,8 +364,10 @@ class ConversationManager:
                     try:
                         # Generate reply with NativeAgent
                         post_content = getattr(post, "content", "[No Content]")
+                        global_context = await platform.get_global_context(agent_id_to_name)
+                        self_history = await platform.get_recent_history(agent_id)
                         reply_content = await asyncio.wait_for(
-                            agent.generate_response(f"The post was: {post_content}", feature),
+                            agent.generate_response(f"The post was: {post_content}", feature, global_context, self_history),
                             timeout=self.reply_timeout
                         )
                         
@@ -480,7 +516,7 @@ async def RunOASISSimulation(
     platform_io_manager = PlatformIOManager(max_workers=1)
     conversation_manager = ConversationManager(
         max_retries=3,
-        reply_timeout=10.0,
+        reply_timeout=30.0,
         max_replies_per_post=3
     )
     
@@ -510,24 +546,49 @@ async def RunOASISSimulation(
     # Bypassing CAMEL-AI SocialAgent entirely to avoid macOS gRPC deadlocks.
     # This class performs the same logical 'step' but uses HTTP for LLM calls.
     class NativeAgent:
-        def __init__(self, agent_id: str, persona_profile: Dict[str, Any], platform: Any, llm_client: Any):
+        def __init__(self, agent_id: str, persona_profile: Dict[str, Any], platform: Any, llm_client: Any, is_proposer: bool = False, all_agent_names: Optional[List[str]] = None):
             self.agent_id = int(agent_id)
             self.social_agent_id = agent_id
             self.persona = persona_profile
             self.platform = platform
             self.llm = llm_client
+            self.is_proposer = is_proposer
+            self.all_agent_names = all_agent_names or []
             self.user_info = type('obj', (object,), {'name': persona_profile.get('name', 'Unknown')})
 
-        async def generate_response(self, context_text: str, feature: Any) -> str:
+        async def generate_response(self, context_text: str, feature: Any, global_context: str = "", self_history: str = "") -> str:
             """Generate a contextual agent response via HTTP LLM (tsc.llm)."""
+            social_prompt = ""
+            if global_context:
+                social_prompt = f"\n\n--- GLOBAL CONVERSATION LOG ---\n{global_context}\n-----------------------------------\n"
+                
+            memory_prompt = ""
+            if self_history:
+                memory_prompt = f"\n\n--- YOUR RECENT MESSAGES ---\nYou have already said:\n{self_history}\nDO NOT repeat these points. Evolve your stance.\n-----------------------------------\n"
+
+            proposer_prompt = ""
+            if getattr(self, "is_proposer", False):
+                proposer_prompt = "\n5. YOU ARE THE ORIGINAL PROPOSER OF THIS FEATURE. DEFEND your idea against skepticism. Address specific concerns raised by others and argue why the feature is necessary, making concessions if needed."
+
+            other_agents = [name for name in self.all_agent_names if name != self.persona.get('name')]
+            legal_names = ", ".join(other_agents) if other_agents else "None"
+
             system_prompt = f"""You are {self.persona.get('name')}, a {self.persona.get('profile', {}).get('other_info', {}).get('role', 'Stakeholder')}.
 Your MBTI is {self.persona.get('profile', {}).get('mbti')}. 
 Profile: {self.persona.get('profile', {}).get('user_profile')}
 
 Your goal is to interact on a social platform about a new feature proposal. 
-Be concise, stay in character, and provide realistic feedback (supportive, skeptical, or neutral based on your persona)."""
+Be concise, stay in character, and provide realistic feedback (supportive, skeptical, or neutral based on your persona).{social_prompt}{memory_prompt}
+IMPORTANT INSTRUCTIONS FOR INTERACTION:
+1. You are in a live group discussion. Read the GLOBAL CONVERSATION LOG to understand the current thread state.
+2. DO NOT repeat your previous messages. Evolve your thought based on what others just said.
+3. ADDRESS AT LEAST ONE OTHER AGENT BY NAME explicitly. ONLY mention people in this list: {legal_names}.
+4. If you have already asked a question and it hasn't been answered, pivot to a new concern or summarize the group's current sentiment. Do not keep asking the same question.{proposer_prompt}
 
-            user_prompt = f"React to this context in the simulation:\n\n{context_text}\n\nFeature: {feature.title}\nDescription: {feature.description}\n\nWhat is your response (1-2 sentences)?"
+FORMAT REQUIREMENT:
+Output ONLY your 1-2 sentence response. Do not include quotation marks. Do not include meta-commentary or internal reasoning (e.g. skip phrases like 'I will respond briefly:'). Write exactly what your character posts."""
+
+            user_prompt = f"React to this context in the simulation:\n\n{context_text}\n\nFeature: {feature.title}\nDescription: {feature.description}\n\nWhat is your response?"
             
             try:
                 return await self.llm.generate(system_prompt, user_prompt)
@@ -535,7 +596,7 @@ Be concise, stay in character, and provide realistic feedback (supportive, skept
                 logger.error(f"NativeAgent LLM error: {e}")
                 return ""
 
-        async def step(self, feature: Any) -> Any:
+        async def step(self, feature: Any, global_context: str = "", self_history: str = "") -> Any:
             """Perform a simulation step: Read platform, decide, post response."""
             print(f"DEBUG: Agent {self.agent_id} ({self.persona.get('name')}) waiting for semaphore...", flush=True)
             async with _concurrency_semaphore:
@@ -554,9 +615,9 @@ Be concise, stay in character, and provide realistic feedback (supportive, skept
                     return type('obj', (object,), {'msgs': []})
 
                 latest_post = posts[0]
-                context_text = f"Platform Post: {latest_post.content}"
+                context_text = "Review the global conversation."
                 print(f"DEBUG: Agent {self.agent_id} generating LLM response...", flush=True)
-                response_text = await self.generate_response(context_text, feature)
+                response_text = await self.generate_response(context_text, feature, global_context, self_history)
                 
                 if response_text:
                     print(f"DEBUG: Agent {self.agent_id} posting comment...", flush=True)
@@ -581,14 +642,18 @@ Be concise, stay in character, and provide realistic feedback (supportive, skept
     llm_client = create_llm_client(provider=LLMProvider.GROQ, model="llama-3.1-8b-instant")
 
     # Instantiate Native Agents
+    all_names = [profile.user_info_dict.get('name', 'Unknown') for profile in agent_profiles]
     social_agents = []
     for profile in agent_profiles:
         try:
+            is_proposer_flag = agent_profiles and str(profile.agent_id) == str(agent_profiles[0].agent_id)
             agent = NativeAgent(
                 agent_id=str(profile.agent_id),
                 persona_profile=profile.user_info_dict,
                 platform=platform,
-                llm_client=llm_client
+                llm_client=llm_client,
+                is_proposer=is_proposer_flag,
+                all_agent_names=all_names
             )
             social_agents.append(agent)
             logger.debug(f"✓ NativeAgent {profile.agent_id} initialized")
@@ -655,12 +720,15 @@ What do you all think? Feedback appreciated."""
         max_attempts = 3
         
         try:
+            agent_id = getattr(agent, "social_agent_id", str(id(agent)))
+            global_context = await platform.get_global_context(agent_id_to_name)
+            self_history = await platform.get_recent_history(agent_id)
+            
             action_resp = await asyncio.wait_for(
-                agent.step(feature),
+                agent.step(feature, global_context, self_history),
                 timeout=15.0
             )
             
-            agent_id = getattr(agent, "social_agent_id", str(id(agent)))
             agent_name = agent_id_to_name.get(agent_id, "Unknown Agent")
             
             # Extract content safely
