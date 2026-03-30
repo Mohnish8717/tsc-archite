@@ -11,7 +11,7 @@ if project_root not in sys.path:
 
 from tsc.oasis.models import OASISSimulationConfig, OASISAgentProfile, OpinionVector
 from tsc.models.inputs import FeatureProposal
-from tsc.models.company import CompanyContext
+from tsc.models.inputs import CompanyContext
 from tsc.oasis.simulation_runner import SimulationRunner
 
 async def test_orchestration():

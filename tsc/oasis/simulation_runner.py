@@ -112,6 +112,22 @@ class SimulationRunner:
         # Open log file for output redirection
         log_handle = open(log_file, 'w', encoding='utf-8')
         
+        # Build subprocess environment with macOS gRPC/torch deadlock prevention vars
+        # These MUST be set before the subprocess starts — shell env is the only reliable way.
+        subprocess_env = os.environ.copy()
+        subprocess_env.update({
+            # CRITICAL: Prevents ObjC runtime crash when forking on macOS Sequoia/Sonoma
+            "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
+            # Prevents gRPC mutex deadlock inside asyncio + spawned subprocess
+            "GRPC_ENABLE_FORK_SUPPORT": "false",
+            "GRPC_POLL_STRATEGY": "poll",
+            # Prevent torch from oversubscribing threads (worsens mutex contention)
+            "TOKENIZERS_PARALLELISM": "false",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "KMP_DUPLICATE_LIB_OK": "TRUE",
+        })
+
         # Use specialized subprocess flags for robust group management
         popen_args = {
             "args": [wrapper_script, worker_script, self.payload_file],
@@ -119,7 +135,9 @@ class SimulationRunner:
             "stderr": subprocess.STDOUT,
             "text": True,
             "encoding": 'utf-8',
-            "start_new_session": True if not IS_WINDOWS else False
+            "env": subprocess_env,
+            "start_new_session": True if not IS_WINDOWS else False,
+            "bufsize": 1  # Line buffered to prevent blocking
         }
         # Windows-specific process creation flags
         if IS_WINDOWS:
@@ -127,6 +145,7 @@ class SimulationRunner:
             popen_args["creationflags"] = 0x00000200
 
         self.process = subprocess.Popen(**popen_args)
+
         
         self.run_state.process_pid = self.process.pid
         self.run_state.status = RunnerStatus.RUNNING
@@ -300,3 +319,13 @@ class SimulationRunner:
         
         self.run_state = SimulationRunState(simulation_id=self.simulation_id)
         logger.info(f"Workspace {self.simulation_id} purged for fresh run.")
+
+    def get_result(self) -> Optional[MarketSentimentSeries]:
+        """Read the computed result from disk."""
+        if os.path.exists(self.result_file):
+            try:
+                with open(self.result_file, 'r', encoding='utf-8') as f:
+                    return MarketSentimentSeries.model_validate_json(f.read())
+            except Exception as e:
+                logger.error(f"Failed to read simulation result: {e}")
+        return None

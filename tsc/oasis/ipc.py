@@ -55,11 +55,18 @@ class CommandListener:
         return None
             
     async def wait_if_paused(self, interview_callback=None):
-        """Blocking loop for the worker if a 'pause' command is active."""
+        """Blocking loop for the worker if a 'pause' command is active, and handles interviews."""
+        # Always check for new commands at least once
+        questions = await self.check_commands()
+        if questions and interview_callback:
+            logger.info(f"Performing mid-simulation interview with {len(questions)} questions")
+            await interview_callback(questions)
+
         if self.is_paused:
             logger.info("Simulation PAUSED. Waiting for resume...")
             
         while self.is_paused:
+            await asyncio.sleep(1)
             questions = await self.check_commands()
             if questions and interview_callback:
                 logger.info(f"Performing mid-simulation interview with {len(questions)} questions")
@@ -67,7 +74,6 @@ class CommandListener:
                 
             if self.should_stop:
                 break
-            await asyncio.sleep(1)
 
 class LocalActionLogger:
     """
@@ -78,7 +84,7 @@ class LocalActionLogger:
         self.log_file = os.path.join(base_dir, "actions.jsonl")
         os.makedirs(base_dir, exist_ok=True)
         
-    def log_action(self, agent_id: str, agent_name: str, action_type: str, content: Any, timestep: int, platform: str = "reddit"):
+    def log_action(self, agent_id: str, agent_name: str, action_type: str, content: Any, timestep: int, platform: str = "reddit", metadata: Dict[str, Any] = None):
         """Append a single action to the JSONL log."""
         try:
             entry = {
@@ -88,7 +94,8 @@ class LocalActionLogger:
                 "timestep": timestep,
                 "action_type": action_type,
                 "content": content,
-                "platform": platform
+                "platform": platform,
+                **(metadata or {})
             }
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

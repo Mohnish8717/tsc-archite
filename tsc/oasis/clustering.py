@@ -34,20 +34,24 @@ async def PerformBehavioralClustering(
         "NEUTRAL": []
     }
     
-    pos_keywords = re.compile(r"(love|great|good|excellent|needed|helpful|yes|awesome)", re.I)
-    neg_keywords = re.compile(r"(expensive|hate|bad|confusing|redundant|no|useless|flaw)", re.I)
-    
     # Map agent ID to responses
-    response_map = {str(r["agent_id"]): " ".join([resp.get("content", "") for resp in r["responses"]]) 
+    response_map = {str(r["agent_id"]): " ".join([resp.get("content", "") for resp in r["responses"]]).lower() 
                     for r in simulation_results}
+                    
+    pos_keywords = re.compile(r"\b(love|great|good|excellent|needed|helpful|yes|awesome|support|agree|beneficial|valuable|efficient|innovative|game-changer)\b", re.I)
+    neg_keywords = re.compile(r"\b(expensive|hate|bad|confusing|redundant|no|useless|flaw|concerned|concern|burnout|skeptical|overhead|disruptive|disrupt|inefficient|unnecessary|impact)\b", re.I)
 
     for agent in agents:
         agent_id_str = str(agent.agent_id)
         content_blob = response_map.get(agent_id_str, "")
         
-        if pos_keywords.search(content_blob):
+        # Count sentiment matches
+        pos_hits = len(pos_keywords.findall(content_blob))
+        neg_hits = len(neg_keywords.findall(content_blob))
+        
+        if pos_hits > neg_hits and pos_hits > 0:
             segments["BULLISH"].append(agent)
-        elif neg_keywords.search(content_blob):
+        elif neg_hits > pos_hits and neg_hits > 0:
             segments["BEARISH"].append(agent)
         else:
             segments["NEUTRAL"].append(agent)
@@ -89,6 +93,33 @@ def DetectConsensus(
         return False, score, "polarized"
         
     return False, score, "fragmented"
+
+def CalculateAggregatedMetrics(clusters: List[BeliefCluster], series: MarketSentimentSeries):
+    """
+    Deterministically computes final adoption score and verdict from NLP-clustered segments,
+    replacing the need for a secondary LLM audit step.
+    """
+    if not clusters:
+        series.final_adoption_score = 0.5
+        series.consensus_verdict = "NEUTRAL"
+        return
+        
+    total_agents = sum(c.cluster_size for c in clusters)
+    if total_agents == 0:
+        return
+        
+    bullish_agents = sum(c.cluster_size for c in clusters if c.sentiment_score > 0.6)
+    bearish_agents = sum(c.cluster_size for c in clusters if c.sentiment_score < 0.4)
+    
+    avg_score = sum(c.sentiment_score * (c.cluster_size / total_agents) for c in clusters)
+    series.final_adoption_score = round(avg_score, 2)
+    
+    if bullish_agents > bearish_agents and avg_score > 0.55:
+        series.consensus_verdict = "BULLISH"
+    elif bearish_agents > bullish_agents and avg_score < 0.45:
+        series.consensus_verdict = "BEARISH"
+    else:
+        series.consensus_verdict = "NEUTRAL"
 
 async def PerformBeliefClustering(agents: List[OASISAgentProfile]) -> List[BeliefCluster]:
     """Wrapper for behavioral clustering for backward compatibility."""

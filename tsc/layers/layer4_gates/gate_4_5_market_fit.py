@@ -117,8 +117,11 @@ class MarketFitGate(BaseGate):
                         await asyncio.sleep(2) # Poll frequency
                     
                     # 3. Behavioral Analysis & Consensus Detection
-                    clusters = await PerformBehavioralClustering(agent_profiles, sentiment_series)
+                    from tsc.oasis.clustering import PerformBehavioralClustering, DetectConsensus, CalculateAggregatedMetrics
+                    clusters = await PerformBehavioralClustering(agent_profiles, sentiment_series.raw_responses)
                     sentiment_series.belief_clusters = clusters
+                    
+                    CalculateAggregatedMetrics(clusters, sentiment_series)
                     
                     is_consensus, strength, consensus_type = DetectConsensus(sentiment_series, self.config)
                     sentiment_series.consensus_strength = strength

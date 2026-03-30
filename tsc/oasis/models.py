@@ -124,8 +124,15 @@ class MarketSentimentSeries(BaseModel):
     # Aggregated Insights
     final_adoption_score: float = 0.0 # 0.0 to 1.0
     consensus_verdict: str = "NEUTRAL"
-    key_objections: List[str] = []
-    segment_breakdown: List[BeliefCluster] = []
+    key_objections: List[str] = Field(default_factory=list)
+    segment_breakdown: List[BeliefCluster] = Field(default_factory=list)
+    
+    # Behavioral Clustering & Consensus Extensions
+    belief_clusters: List[BeliefCluster] = Field(default_factory=list)
+    consensus_strength: float = 0.0
+    consensus_type: str = "fragmented"
+    convergence_reached: bool = False
+    raw_responses: List[Dict[str, Any]] = Field(default_factory=list)
     
     # Raw Data pointers
     db_snapshot_path: Optional[str] = None
