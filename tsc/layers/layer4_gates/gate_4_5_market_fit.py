@@ -118,7 +118,7 @@ class MarketFitGate(BaseGate):
                     
                     # 3. Behavioral Analysis & Consensus Detection
                     from tsc.oasis.clustering import PerformBehavioralClustering, DetectConsensus, CalculateAggregatedMetrics
-                    clusters = await PerformBehavioralClustering(agent_profiles, sentiment_series.raw_responses)
+                    clusters = await PerformBehavioralClustering(agent_profiles, sentiment_series.raw_responses, llm_client=self.llm_client)
                     sentiment_series.belief_clusters = clusters
                     
                     CalculateAggregatedMetrics(clusters, sentiment_series)
