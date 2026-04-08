@@ -289,15 +289,17 @@ Return JSON:
 
 PERSONA_SYSTEM = """You are an expert organizational psychologist and decision analyst. Generate a detailed psychological profile of a stakeholder based on documented facts, past decisions, and organizational context. Focus on how they THINK, DECIDE, and COMMUNICATE. Be specific to the provided facts. Avoid generic statements. Ground everything in the evidence provided."""
 
-PERSONA_SYSTEM_GROUNDED = """You are an expert organizational psychologist. Your goal is to generate a persona profile that is 100% GROUNDED in document evidence.
+PERSONA_SYSTEM_GROUNDED = """You are an expert organizational psychologist and character writer. Your goal is to generate personas that feel like REAL, SPECIFIC PEOPLE — not archetypes or job descriptions.
 
-RULES:
+CORE RULES:
 1. Every trait (MBTI, emotions, drivers) MUST be derived from the provided FACTS.
 2. If facts show high urgency and negative sentiment about a topic, that is a PAIN POINT.
 3. If facts show positive sentiment, that is an EXCITEMENT DRIVER.
 4. CITE your evidence for every major claim using [Fact: <text snippet>] notation.
 5. If evidence is insufficient for a trait (e.g. MBTI), state "NOT ENOUGH EVIDENCE" rather than guessing.
-6. Focus on specific behavioral patterns (e.g. "Direct communication" vs "Diplomatic") based on their documented quotes and actions.
+6. DO NOT write generic corporate-speak. Write like a documentary filmmaker who spent a week shadowing this person.
+7. The persona must feel SPECIFIC — their concerns, vocabulary, and reactions should be impossible to swap with another role.
+8. You MUST write the VIVID SCENE (Section 0), SIGNATURE QUOTE (Section 7), PROFESSIONAL BACKSTORY (Section 8), and ROLE VOCABULARY (Section 9). These are mandatory.
 """
 
 PERSONA_USER = _env.from_string("""Based on these facts about {{ name }}, a {{ role }} ({{ title }}):
@@ -334,34 +336,65 @@ KEY EVIDENCE:
 
 ---
 
-Generate a comprehensive ~2000-word psychological profile covering:
+Generate a comprehensive ~2500-word psychological profile covering ALL sections below:
+
+0. VIVID SCENE — WHO IS THIS PERSON RIGHT NOW? (100 words)
+   Write a single, vivid third-person paragraph placing {{ name }} in their natural work environment on a typical Tuesday at 10am.
+   - What is on their screen?
+   - What is the one thing worrying them today?
+   - What meeting are they about to walk into and how do they feel about it?
+   Make every detail match their specific role as {{ role }}. NO generic statements.
 
 1. PERSONALITY TYPE & COGNITIVE STYLE (400 words)
-   - MBTI type and explanation
+   - MBTI type and explanation grounded in ONE specific past professional experience that reveals this tendency
    - How they process information and make decisions
-   - Key strengths and blindspots
+   - Key strengths and blindspots with concrete behavioural examples
 
 2. EMOTIONAL TRIGGERS & MOTIVATION (400 words)
-   - What excites, frustrates, and scares them
+   - What excites them — include ONE real-world example tied to their role (e.g. when a specific outcome made them feel validated)
+   - What frustrates them — include ONE real-world example of a situation that genuinely annoys someone in this role
+   - What scares them — the professional fear that keeps them up at night
    - How they react under pressure
 
 3. COMMUNICATION & COLLABORATION (300 words)
-   - Preferred communication style
-   - How they handle disagreement
+   - Preferred communication style and preferred channel (Slack vs meeting vs doc)
+   - How they handle disagreement — do they go direct, get political, or disengage?
+   - What kind of colleague they are and what kind drives them crazy
 
 4. DECISION PATTERNS (300 words)
    - Speed, data vs intuition, solo vs collaborative
-   - Track record
+   - One past decision they made that exemplifies their style
+   - What information they demand before committing
 
 5. VALUES & WHAT WOULD SWAY THEM (300 words)
-   - What they fundamentally care about
-   - What would change their mind
+   - What they fundamentally care about in their work
+   - The single argument or data point that could change their mind
+   - Their non-negotiables
 
 6. PREDICTED STANCE ON THIS FEATURE (300 words)
    - Will they approve, reject, or condition?
    - What conditions would they require?
-   - What questions will they ask?
-   - Confidence in this prediction""")
+   - What specific questions will they ask in the review meeting?
+   - Confidence in this prediction and why
+
+7. SIGNATURE QUOTE (60 words)
+   Write a verbatim first-person quote that {{ name }} would actually say in a feature review meeting about {{ feature.title }}.
+   The quote must:
+   - Sound natural and match their role's vocabulary
+   - Reveal their deepest bias or concern about this feature
+   - Not be generic — it must be impossible to attribute to someone with a different role
+   Format: "<quote>"
+
+8. PROFESSIONAL BACKSTORY (150 words)
+   Describe 1-2 formative professional experiences that created {{ name }}'s current worldview, biases, and communication style.
+   - What did they do before this role?
+   - What success or failure fundamentally shaped how they think?
+   - Cite any available evidence; if none, extrapolate realistically from their role context.
+
+9. ROLE VOCABULARY (list only)
+   List exactly 6 domain-specific terms or phrases that {{ name }} naturally uses in conversations — the jargon of their specific job.
+   These must be authentic to {{ role }} and NOT generic business buzzwords.
+   Format as a simple bulleted list.""")
 
 # ─────────────────────────────────────────────────────────────────────
 # Layer 4: Gate Analysis (Generic template)
@@ -573,3 +606,146 @@ Return ONLY a JSON array of strings:
   "query 2",
   "query 3"
 ]""")
+
+# ─────────────────────────────────────────────────────────────────────
+# Layer 3: External Persona Psychological Profiling
+#
+# Domain-agnostic: applies to SaaS tools, physical products, service
+# launches, pricing changes, policy rollouts, B2B/B2C market entries,
+# healthcare, finance, retail — any business context.
+# ─────────────────────────────────────────────────────────────────────
+
+EXTERNAL_PERSONA_SYSTEM = """You are an expert market researcher, buyer psychologist, and go-to-market strategist.
+
+Your task is to generate a deep, realistic buyer profile for an EXTERNAL market persona — a customer, buyer segment, or market archetype who will evaluate, purchase, or adopt (or reject) a business offering.
+
+CRITICAL RULES:
+1. These are EXTERNAL personas — customers or buyers, NOT internal employees or stakeholders.
+2. The offering can be anything: a software tool, physical product, new service, pricing change, policy shift, business initiative, or strategic capability. Do NOT assume it is a technical or software feature.
+3. Treat this as market research: think like a buyer anthropologist who has interviewed 50 people in this segment.
+4. Every claim MUST be grounded in the evidence and context provided. Cite with [Evidence: <snippet>] notation.
+5. Balance friction (objections, fears) with VALUE (what problems this solves, what success looks like).
+6. The persona must feel specific — their vocabulary, concerns, and reasoning must be impossible to attribute to a different segment.
+7. Write five NEW mandatory sections (10–14) covering the buyer's economic world, purchase journey, and market positioning. These are REQUIRED and must be substantive."""
+
+EXTERNAL_PERSONA_USER = _env.from_string("""You are profiling {{ name }}, an external market persona representing: {{ role }}
+
+ORGANIZATIONAL CONTEXT (about their company/environment):
+{% for fact in org_context %}
+- {{ fact }}
+{% endfor %}
+
+{% if personal_facts %}
+DOCUMENTED EVIDENCE (from customer interviews, support tickets, market research):
+{% for fact in personal_facts %}
+- {{ fact }}
+{% endfor %}
+{% endif %}
+
+{% if constraint_context %}
+CONSTRAINTS & SIGNALS:
+{% for fact in constraint_context %}
+- {{ fact }}
+{% endfor %}
+{% endif %}
+
+OFFERING BEING EVALUATED:
+- Title: {{ feature.title }}
+- Description: {{ feature.description }}
+- Target Audience: {{ feature.target_users }}
+- Effort / Timeline: {{ feature.effort_weeks_min }}-{{ feature.effort_weeks_max }} weeks
+
+KEY MARKET SIGNALS:
+{% for entity in top_entities[:10] %}
+- {{ entity.name }}: {{ entity.mentions }} mentions, avg urgency {{ entity.average_urgency | round(1) }}
+{% endfor %}
+
+---
+
+Generate a comprehensive ~2500-word buyer profile covering ALL sections below.
+Sections 0–9 cover psychology. Sections 10–14 cover the BUYER'S MARKET WORLD (mandatory).
+
+0. VIVID SCENE — WHO IS THIS BUYER RIGHT NOW? (100 words)
+   A single third-person paragraph placing {{ name }} in their work context on a typical day.
+   - What problem are they currently dealing with?
+   - What decision is weighing on them?
+   Make every detail match their segment. NO generic statements.
+
+1. PERSONALITY TYPE & COGNITIVE STYLE (300 words)
+   - MBTI type grounded in a specific professional behaviour observable in this segment
+   - How they process new offerings (analytical vs. gut feel vs. consensus)
+   - Key strengths and blindspots as a BUYER
+
+2. EMOTIONAL TRIGGERS & MOTIVATION (300 words)
+   - What excites them about the offering's category
+   - What frustrates them about current alternatives
+   - What they fear about making the wrong adoption decision
+
+3. COMMUNICATION & COLLABORATION (200 words)
+   - Preferred channel for learning about new offerings (peer, content, sales, analyst)
+   - How they engage with vendors — demo-first vs. doc-first vs. pilot-first
+
+4. DECISION PATTERNS (200 words)
+   - How fast / slow they decide and why
+   - Data vs. intuition vs. social proof in decision-making
+   - Who else they bring into the decision
+
+5. VALUES & WHAT WOULD SWAY THEM (200 words)
+   - What they fundamentally care about (speed, cost, quality, risk, compliance)
+   - The single argument or proof point that could change their mind
+
+6. PREDICTED STANCE ON THIS OFFERING (200 words)
+   - BULLISH, BEARISH, or CONDITIONAL — and why
+   - Conditions they would require before adopting
+   - Specific questions they would raise in an evaluation meeting
+
+7. SIGNATURE QUOTE (60 words)
+   A verbatim first-person quote {{ name }} would say when evaluating {{ feature.title }}.
+   Must reveal their deepest concern or bias. Must be unmistakably from this segment.
+   Format: "<quote>"
+
+8. BUYER BACKSTORY (150 words)
+   1-2 formative experiences that shaped how {{ name }} evaluates and buys solutions in this category.
+   - What alternatives have they tried before?
+   - What success or failure made them cautious or confident?
+
+9. SEGMENT VOCABULARY (list only)
+   Exactly 6 domain-specific terms {{ name }} uses — authentic to their segment, not generic buzzwords.
+
+---
+
+10. BUYING CONTEXT (300 words) [MANDATORY]
+    - Company size and organisational structure relevant to this purchase
+    - Budget authority: Can {{ name }} approve the purchase alone, or must they escalate? Who are the other approvers?
+    - Typical procurement process: Is it informal (credit card purchase) or formal (RFP, legal review, security audit)?
+    - How many people typically need to sign off, and what do each care about?
+    - What happens if they get it wrong? (career risk, financial impact, operational risk)
+
+11. BUYER JOURNEY (300 words) [MANDATORY]
+    - AWARENESS: How would {{ name }} first hear about this type of offering? (peer, vendor, analyst, organic search, internal mandate)
+    - TRIGGER: What specific event or pain forces them to start evaluating solutions RIGHT NOW?
+    - EVALUATION: What do they do first — request a demo? read docs? find a case study? call a peer?
+    - PROOF REQUIREMENTS: What specific evidence do they need before they feel confident enough to move forward?
+    - DEAL-BREAKERS: Name 2-3 specific conditions that would stop the evaluation immediately.
+    - TIMELINE: How long from first contact to decision? (days / weeks / months)
+
+12. ROI & VALUE FRAMING (300 words) [MANDATORY]
+    - CURRENT PAIN QUANTIFIED: Estimate time, cost, or risk they are carrying without this solution. Be specific (e.g., "4 hrs/week per team member = $X/year").
+    - EXPECTED BENEFIT: What measurable improvement would success look like? (% reduction, $ saved, risk eliminated)
+    - WILLINGNESS TO PAY: What price range do they consider "reasonable", "expensive", and "prohibitive"?
+    - PAYBACK EXPECTATION: How quickly must they see ROI to feel the decision was correct? (months)
+    - SUCCESS METRIC: How would they know, 6 months after adoption, that this was the right call?
+
+13. COMPETITIVE ALTERNATIVES (200 words) [MANDATORY]
+    - CURRENT STATE: What are they using today to address this problem? (manual process, competitor product, workaround, nothing)
+    - SWITCH TRIGGER: What would make them replace their current approach with this offering?
+    - COMPETITOR THREAT: Name 1-2 alternative solutions that could win this segment instead, and why.
+    - SWITCHING COST: What would it cost them (time, money, change effort) to adopt this vs. staying with what they have?
+
+14. ADOPTION BARRIERS (200 words) [MANDATORY]
+    - REGULATORY / COMPLIANCE: Any legal or industry-specific restrictions that affect adoption?
+    - INTEGRATION COMPLEXITY: How hard is it to fit this into their existing processes or systems?
+    - CHANGE MANAGEMENT: Will their team/org resist adoption? What internal friction must they overcome?
+    - VENDOR RISK: What concerns do they have about the vendor (stability, data security, lock-in)?
+    - MITIGATION: What would reduce each barrier enough for them to move forward?""")
+

@@ -15,6 +15,7 @@ class LLMProvider(str, Enum):
     OPENAI = "openai"
     GROQ = "groq"
     OPENROUTER = "openrouter"
+    GOOGLE = "google"
 
 
 class PipelineConfig(BaseSettings):
@@ -33,6 +34,7 @@ class PipelineConfig(BaseSettings):
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
     groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
     openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
+    google_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
     zep_api_key: Optional[str] = Field(default=None, alias="ZEP_API_KEY")
 
     # ── Memory & NLP ────────────────────────────────────────────────
@@ -93,6 +95,7 @@ class PipelineConfig(BaseSettings):
             LLMProvider.OPENAI: self.openai_api_key,
             LLMProvider.GROQ: self.groq_api_key,
             LLMProvider.OPENROUTER: self.openrouter_api_key,
+            LLMProvider.GOOGLE: self.google_api_key,
         }
         key = key_map.get(p)
         if not key:
@@ -102,6 +105,7 @@ class PipelineConfig(BaseSettings):
                 LLMProvider.OPENAI: "OPENAI_API_KEY",
                 LLMProvider.GROQ: "GROQ_API_KEY",
                 LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
+                LLMProvider.GOOGLE: "GEMINI_API_KEY",
             }
             key = os.getenv(env_map.get(p, ""))
 

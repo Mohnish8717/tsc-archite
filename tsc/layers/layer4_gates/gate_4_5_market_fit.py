@@ -42,7 +42,8 @@ class MarketFitGate(BaseGate):
         graph_store: Optional[Any] = None,
         mode: MarketFitMode = MarketFitMode.HYBRID_DUAL,
         num_agents: int = 150, # Optimized for actual OASIS runs
-        enable_parallel: bool = True
+        enable_parallel: bool = True,
+        simulation_name: str = "market_fit_eval"
     ):
         super().__init__(llm_client)
         self.mode = mode
@@ -50,10 +51,12 @@ class MarketFitGate(BaseGate):
         self.enable_parallel = enable_parallel
         self._zep_client = graph_store # Store Zep client for simulation sync
         self.config = OASISSimulationConfig(
+            simulation_name=simulation_name,
             num_agents=num_agents,
             timesteps=10, # Balanced for performance/fidelity
             parallel_execution=enable_parallel
         )
+
 
     async def evaluate(
         self,

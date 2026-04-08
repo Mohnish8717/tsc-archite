@@ -20,9 +20,10 @@ class GroqClient(OpenAIClient):
     def __init__(
         self,
         api_key: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "llama-3.1-8b-instant",
         **kwargs: Any,
     ):
+        logger.info(f"INIT GroqClient for model: {model}")
         super().__init__(api_key, model, **kwargs)
         # Re-initialize with custom base URL
         self._client = openai.AsyncOpenAI(

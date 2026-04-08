@@ -48,5 +48,9 @@ def create_llm_client(
         from tsc.llm.openrouter_provider import OpenRouterClient
         return OpenRouterClient(api_key=k, model=m)
 
+    elif p == LLMProvider.GOOGLE:
+        from tsc.llm.gemini_provider import GeminiClient
+        return GeminiClient(api_key=k, model=m)
+
     else:
         raise ValueError(f"Unknown LLM provider: {p}")

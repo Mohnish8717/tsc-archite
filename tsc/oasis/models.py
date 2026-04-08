@@ -39,27 +39,59 @@ class UserInfoAdapter:
     
     @staticmethod
     def to_oasis_user_info(persona: FinalPersona, recsys_type: str = "reddit") -> Dict[str, Any]:
-        """Constructs the dictionary expected by OASIS SocialAgent."""
+        """Constructs the dictionary expected by OASIS SocialAgent.
+        
+        For EXTERNAL personas, market_context and buyer_journey are injected
+        into other_info so the CAMEL-AI agent reasons from a buyer's economic
+        perspective rather than only from psychological friction signals.
+        """
         # Note: We return a dict instead of constructor UserInfo object to avoid
         # deadlocks caused by heavy library imports (torch, grpc) during the preparation phase.
-        
+
+        other_info: Dict[str, Any] = {
+            "role": persona.role,
+            "traits": persona.psychological_profile.key_traits,
+            "user_profile": persona.psychological_profile.full_profile_text[:2000],
+            "gender": getattr(persona, 'gender', 'unknown'),
+            "age": getattr(persona, 'age', 30),
+            "mbti": persona.psychological_profile.mbti,
+            "country": getattr(persona, 'country', 'US'),
+        }
+
+        # Inject market/buyer context for EXTERNAL personas
+        mc = getattr(persona, "market_context", None)
+        bj = getattr(persona, "buyer_journey", None)
+        if mc is not None:
+            other_info["market_context"] = {
+                "company_size_band": mc.company_size_band,
+                "buyer_role": mc.buyer_role,
+                "annual_solution_budget_usd": mc.annual_solution_budget_usd,
+                "pricing_sensitivity": mc.pricing_sensitivity,
+                "sales_cycle_weeks": mc.sales_cycle_weeks,
+                "deployment_preference": mc.deployment_preference,
+                "industry_vertical": mc.industry_vertical,
+                "regulatory_burden": mc.regulatory_burden,
+            }
+        if bj is not None:
+            other_info["buyer_journey"] = {
+                "awareness_channel": bj.awareness_channel,
+                "evaluation_trigger": bj.evaluation_trigger,
+                "key_proof_points": bj.key_proof_points,
+                "deal_breakers": bj.deal_breakers,
+                "success_metric": bj.success_metric,
+                "roi_threshold_months": bj.roi_threshold_months,
+                "willingness_to_pay_band": bj.willingness_to_pay_band,
+            }
+
         profile_data = {
             "user_profile": persona.psychological_profile.full_profile_text[:1000],
             "gender": getattr(persona, 'gender', 'unknown'),
             "age": getattr(persona, 'age', 30),
             "mbti": persona.psychological_profile.mbti,
             "country": getattr(persona, 'country', 'US'),
-            "other_info": {
-                "role": persona.role,
-                "traits": persona.psychological_profile.key_traits,
-                "user_profile": persona.psychological_profile.full_profile_text[:2000],
-                "gender": getattr(persona, 'gender', 'unknown'),
-                "age": getattr(persona, 'age', 30),
-                "mbti": persona.psychological_profile.mbti,
-                "country": getattr(persona, 'country', 'US'),
-            }
+            "other_info": other_info,
         }
-        
+
         return {
             "user_name": persona.name.lower().replace(" ", "_"),
             "name": persona.name,
@@ -133,6 +165,10 @@ class MarketSentimentSeries(BaseModel):
     consensus_type: str = "fragmented"
     convergence_reached: bool = False
     raw_responses: List[Dict[str, Any]] = Field(default_factory=list)
+    
+    # Agent-Specific Drilldown
+    agent_interactions: Dict[str, List[str]] = Field(default_factory=dict)
+    agent_alignment: Dict[str, float] = Field(default_factory=dict)
     
     # Raw Data pointers
     db_snapshot_path: Optional[str] = None

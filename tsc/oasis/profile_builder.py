@@ -89,22 +89,38 @@ def _extract_technical_feasibility(
     return score
 
 def _extract_market_demand(persona: FinalPersona, feature: FeatureProposal) -> float:
-    """Extract market demand dimension."""
+    """Extract market demand dimension.
+    
+    For EXTERNAL personas: uses MarketContext economic signals (buyer role,
+    pricing sensitivity) in addition to emotional trigger counts.
+    For INTERNAL personas: uses emotional trigger counts only (existing logic).
+    """
     drivers = persona.psychological_profile.emotional_triggers.excited_by
     pain_points = persona.psychological_profile.emotional_triggers.frustrated_by
-    
+
     driver_count = len(drivers)
     pain_point_count = len(pain_points)
-    
+
     if driver_count + pain_point_count == 0:
         demand_score = 0.1
     else:
         demand_score = (driver_count - pain_point_count) / (driver_count + pain_point_count + 1)
-    
+
     if persona.persona_type == "EXTERNAL":
-        demand_score += 0.2
-    
+        demand_score += 0.2  # external buyer demand baseline
+
+        mc = getattr(persona, "market_context", None)
+        if mc is not None:
+            # Decision-makers signal genuine demand; end-users or influencers are weaker signals
+            role_boost = {"decision-maker": 0.20, "champion": 0.15, "influencer": 0.05, "end-user": 0.00}
+            demand_score += role_boost.get(mc.buyer_role, 0.05)
+
+            # Low pricing sensitivity → value-driven buyer → higher latent demand
+            sensitivity_boost = {"low": 0.15, "medium": 0.05, "high": -0.10}
+            demand_score += sensitivity_boost.get(mc.pricing_sensitivity, 0.0)
+
     return demand_score
+
 
 def _extract_resource_alignment(
     persona: FinalPersona,
@@ -116,10 +132,21 @@ def _extract_resource_alignment(
         score += 0.2
     if "Python" in str(company_context.tech_stack):
         score += 0.1
+
+    # EXTERNAL: ROI threshold is a proxy for resource alignment
+    mc = getattr(persona, "market_context", None)
+    bj = getattr(persona, "buyer_journey", None)
+    if persona.persona_type == "EXTERNAL":
+        if bj is not None and bj.roi_threshold_months <= 12:
+            score += 0.2   # fast payback expectation → aligned with resource constraints
+        if mc is not None and mc.annual_solution_budget_usd >= 100_000:
+            score += 0.1   # large budget band → more room for the solution
+
     return score
 
+
 def _extract_risk_tolerance(persona: FinalPersona) -> float:
-    """Extract risk tolerance from MBTI and evidence."""
+    """Extract risk tolerance from MBTI, evidence, and market context."""
     score = 0.0
     mbti = persona.psychological_profile.mbti
     if mbti and len(mbti) >= 4:
@@ -127,18 +154,48 @@ def _extract_risk_tolerance(persona: FinalPersona) -> float:
             score += 0.15
         else:  # Judging
             score -= 0.15
+
+    # EXTERNAL: regulatory-heavy buyers and late adopters are risk-averse
+    mc = getattr(persona, "market_context", None)
+    if persona.persona_type == "EXTERNAL" and mc is not None:
+        burden_penalty = {"heavy": -0.25, "moderate": -0.10, "light": 0.0, "none": 0.10}
+        score += burden_penalty.get(mc.regulatory_burden, 0.0)
+
     return score
+
 
 def _extract_adoption_velocity(
     persona: FinalPersona,
     feature: FeatureProposal,
     market_demand: float
 ) -> float:
-    """Extract adoption velocity dimension."""
+    """Extract adoption velocity dimension.
+    
+    For EXTERNAL personas: sales cycle length and awareness channel provide
+    direct signals of how fast this segment would move to adopt.
+    """
     score = market_demand * 0.4
     if feature.effort_weeks_max and feature.effort_weeks_max < 4:
         score += 0.2
+
+    mc = getattr(persona, "market_context", None)
+    bj = getattr(persona, "buyer_journey", None)
+    if persona.persona_type == "EXTERNAL":
+        if mc is not None and mc.sales_cycle_weeks > 0:
+            # Short sales cycle → fast adoption velocity (inverse relationship)
+            # Normalise: 1 week → +0.30, 52 weeks → ~0.0
+            cycle_boost = max(0.0, 0.30 * (1.0 - (mc.sales_cycle_weeks - 1) / 51))
+            score += cycle_boost
+
+        if bj is not None:
+            # Mandate-driven awareness → fastest adoption (top-down push)
+            channel_boost = {"internal-mandate": 0.20, "conference": 0.10, "peer-recommendation": 0.10,
+                             "vendor-outreach": 0.05, "analyst-report": 0.05, "organic-search": 0.0,
+                             "social-proof": -0.05}
+            score += channel_boost.get(bj.awareness_channel, 0.0)
+
     return score
+
 
 def _calibrate_confidence(
     persona: FinalPersona,
@@ -223,20 +280,26 @@ async def InitializeOASISAgents(
         )
         agents.append(agent)
     
-    # Resample to target count (MiroFish style large-scale simulation)
+    # Resample to target count.
+    # If personas were pre-expanded by PersonaSelectionEngine (GMM), skip random resampling.
+    # Otherwise fall back to legacy random clone for backwards compatibility.
     if len(agents) < config.num_agents and len(agents) > 0:
         agents = _resample_agents(agents, config.num_agents)
     
     logger.info(f"Initialized {len(agents)} agents for actual OASIS simulation")
     return agents, edge_cases_triggered
 
+
 def _resample_agents(agents: List[OASISAgentProfile], target_count: int) -> List[OASISAgentProfile]:
-    """Resample agents to reach target count (preserving persona distribution)."""
+    """
+    Legacy random resample — kept for backward compatibility.
+    Prefer PersonaSelectionEngine.select() + InitializeOASISAgents(pre_expanded=True)
+    for intelligent GMM expansion.
+    """
     original_count = len(agents)
     missing = target_count - original_count
     for i in range(missing):
         source = random.choice(agents[:original_count])
-        # Clone with new ID
         new_agent = OASISAgentProfile(
             agent_id=original_count + i,
             source_persona_id=source.source_persona_id,
@@ -246,7 +309,34 @@ def _resample_agents(agents: List[OASISAgentProfile], target_count: int) -> List
             influence_strength=source.influence_strength,
             receptiveness=source.receptiveness,
         )
-        # Update username to ensure uniqueness in DB
         new_agent.user_info_dict['user_name'] += f"_{i}"
         agents.append(new_agent)
     return agents
+
+
+async def InitializeOASISAgentsFromExpanded(
+    expanded_personas: List[Any],
+    feature: Any,
+    context: Any,
+    config: Any,
+    kg: Optional[Any] = None,
+    market_context: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[OASISAgentProfile], List[str]]:
+    """
+    Lightweight wrapper for use with PersonaSelectionEngine output.
+
+    When personas have already been GMM-expanded to target_n, call this
+    instead of InitializeOASISAgents to avoid redundant resampling.
+    Delegates belief vector building and UserInfo mapping to the base function.
+    """
+    # Temporarily override num_agents to match the expanded list
+    config.num_agents = len(expanded_personas)
+    return await InitializeOASISAgents(
+        personas=expanded_personas,
+        feature=feature,
+        context=context,
+        config=config,
+        kg=kg,
+        market_context=market_context,
+    )
+

@@ -104,7 +104,7 @@ async def main():
     # 2. Get LLM Client
     llm = create_llm_client(
         provider=LLMProvider.GROQ,
-        model="llama-3.3-70b-versatile"
+        model="openai/gpt-oss-120b"
     )
     
     # 3. Create/Get Company

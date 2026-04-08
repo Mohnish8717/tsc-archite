@@ -1,14 +1,14 @@
 import logging
 import os
-import numpy as np
 import json
-from typing import List, Dict, Any, Tuple
-from collections import Counter
-from sklearn.cluster import KMeans
-
+import re
 # Force single-threading for macOS stability before any heavy ML imports
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+import asyncio
+from typing import List, Dict, Any, Tuple
+from collections import Counter
+
 
 from tsc.oasis.models import (
     OASISAgentProfile, 
@@ -22,13 +22,14 @@ logger = logging.getLogger(__name__)
 # Lazy-loaded embedder
 _embedder = None
 
-def _get_embedder():
+async def _get_embedder():
     global _embedder
     if _embedder is None:
+        # Give the event loop a chance to settle before C++ initialization
+        await asyncio.sleep(0.1)
         try:
             from fastembed import TextEmbedding
             # SOTA Upgrade: Move to BGE-Large (1024-dim) for high-fidelity clustering
-            # Note: BGE-M3 not currently supported in this fastembed version, using BGE-Large-v1.5
             logger.info("Loading SOTA FastEmbed model (BAAI/bge-large-en-v1.5) for high-fidelity clustering...")
             _embedder = TextEmbedding(model_name="BAAI/bge-large-en-v1.5")
             logger.info("✓ BGE-Large model loaded.")
@@ -73,16 +74,17 @@ async def PerformBehavioralClustering(
         return []
 
     # 2. Semantic Vectorization (MacOS Optimized)
-    embedder = _get_embedder()
+    embedder = await _get_embedder()
     if embedder is None:
         logger.warning("Embedder unavailable, falling back to basic clustering")
         return await _fallback_clustering(valid_agents, response_map)
 
+    import numpy as np
     embeddings = np.array(list(embedder.embed(agent_texts)))
     
     # 3. K-Means Clustering (SOTA Fix: Dynamic Cluster Cap)
+    from sklearn.cluster import KMeans
     # Scale clusters with population: 1 cluster per ~40-80 agents for large pools.
-    # For small tests (3 agents), it remains 3. For 1,000 agents, it moves to ~12.
     num_clusters = max(min(len(valid_agents), 3), min(len(valid_agents) // 40, 12))
     
     logger.info(f"Clustering {len(valid_agents)} agents into {num_clusters} semantic buckets...")
@@ -237,3 +239,79 @@ def CalculateAggregatedMetrics(clusters: List[BeliefCluster], series: MarketSent
 async def PerformBeliefClustering(agents: List[OASISAgentProfile]) -> List[BeliefCluster]:
     """Wrapper for behavioral clustering for backward compatibility."""
     return await PerformBehavioralClustering(agents, [])
+
+async def AnalyzeAgentAlignment(
+    series: MarketSentimentSeries,
+    feature_title: str,
+    feature_desc: str,
+    llm_client: Any = None
+):
+    """
+    Individually score each agent's alignment with the feature proposal.
+    Alignment Score: 0.0 (Strongly Opposed) to 1.0 (Strongly Aligned / Enthusiastic).
+    """
+    if not series.agent_interactions:
+        return
+
+    from tsc.llm.factory import create_llm_client
+    from tsc.config import LLMProvider
+    
+    if llm_client is None:
+        llm_client = create_llm_client(provider=LLMProvider.GROQ, model="llama-3.1-8b-instant")
+
+    logger.info(f"Auditing sentiment alignment for {len(series.agent_interactions)} agents...")
+    
+    for agent_id, logs in series.agent_interactions.items():
+        if not logs:
+            series.agent_alignment[agent_id] = 0.5
+            continue
+            
+        history_text = "\n".join(logs)
+        audit_prompt = f"""You are a market psychology auditor. Analyze the following interaction history of ONE agent reacting to a feature proposal.
+
+FEATURE PROPOSAL:
+Title: {feature_title}
+Description: {feature_desc}
+
+AGENT INTERACTION HISTORY:
+{history_text}
+
+Task: Use a layered evaluation and probabilistic mapping based on specific "Intent Signals".
+1. Score the agent's sentiment in three dimensions: Accuracy, Efficiency, and Safety (0.0 to 1.0).
+2. Look for clear "Intent Signals" (e.g., "I would try this", "Wait, what about security?", "This is useless"). Map these signals deterministically to a Weighted Alignment Score (e.g. positive adoption intent = 0.7-1.0, strict skepticism without caveat = 0.0-0.3, polite but unconvinced = 0.4-0.6).
+3. Ensure the final alignment_score is a single float between 0.0 and 1.0 that represents true intent to adopt or support, NOT just social politeness.
+
+Output ONLY a valid JSON object:
+{{
+  "dimensions": {{"accuracy": 0.0, "efficiency": 0.0, "safety": 0.0}},
+  "intent_signals_detected": ["signal 1", "signal 2"],
+  "alignment_score": 0.0,
+  "reasoning": "short 1-sentence explanation"
+}}"""
+
+        try:
+            # We use a smaller model for per-agent audits to save quota
+            resp = await llm_client.generate("You are an expert market auditor.", audit_prompt)
+            resp = resp.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(resp)
+            series.agent_alignment[agent_id] = float(data.get("alignment_score", 0.5))
+        except Exception as e:
+            logger.error(f"Alignment audit failed for agent {agent_id}: {e}")
+            series.agent_alignment[agent_id] = 0.5
+
+    # ── Final Alignment Summary Report ───────────────────────────
+    aligned_count = sum(1 for s in series.agent_alignment.values() if s > 0.6)
+    opposed_count = sum(1 for s in series.agent_alignment.values() if s < 0.4)
+    neutral_count = len(series.agent_alignment) - aligned_count - opposed_count
+    
+    print("\n" + "═" * 60)
+    print("📋  AGENT ALIGNMENT INDEX (AAI)")
+    print("═" * 60)
+    print(f"✅ Aligned (Score > 0.6):  {aligned_count}")
+    print(f"❌ Opposed (Score < 0.4):  {opposed_count}")
+    print(f"⚖️  Neutral (0.4 - 0.6):   {neutral_count}")
+    print("-" * 60)
+    avg_alignment = sum(series.agent_alignment.values()) / len(series.agent_alignment) if series.agent_alignment else 0.5
+    print(f"📊 Global Resonance Score: {avg_alignment:.2f}")
+    print("═" * 60 + "\n")
+

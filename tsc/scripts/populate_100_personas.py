@@ -46,9 +46,16 @@ TONES = [
     "Terse & Skeptical", "Enthusiastic Early Adopter", "Hardcore Technical Pedant", "Passive/Resigned", "Aggressive Business-Minded", "Anxious Privacy-Centric", "Wry/Sarcastic"
 ]
 
+ALL_MBTI = [
+    "INTJ", "INTP", "ENTJ", "ENTP",
+    "INFJ", "INFP", "ENFJ", "ENFP",
+    "ISTJ", "ISFJ", "ESTJ", "ESFJ",
+    "ISTP", "ISFP", "ESTP", "ESFP"
+]
+
 sem = asyncio.Semaphore(15)  # Moderate concurrency for stability
 
-async def generate_and_save(llm: Any, repo: PersonaRepository, archetype: Dict[str, str], name: str, tone: str):
+async def generate_and_save(llm: Any, repo: PersonaRepository, archetype: Dict[str, str], name: str, tone: str, mbti: str):
     async with sem:
         relevant_grounding = f"{GROUNDING_DATA['user_experience']}"
         if archetype['segment'] == 'enterprise': relevant_grounding += f" {GROUNDING_DATA['business']}"
@@ -58,6 +65,7 @@ async def generate_and_save(llm: Any, repo: PersonaRepository, archetype: Dict[s
         Generate a deep synthetic customer profile for: {name}.
         ARCHETYPE: {archetype['name']}
         TONE: {tone}
+        MANDATORY MBTI TYPE: {mbti}
         GROUNDING: {relevant_grounding}
         
         JSON STRUCTURE:
@@ -124,7 +132,8 @@ async def main():
         arch = archetypes[i % len(archetypes)]
         name = persona_names[i]
         tone = random.choice(TONES)
-        tasks.append(generate_and_save(llm, repo, arch, name, tone))
+        mbti = random.choice(ALL_MBTI)
+        tasks.append(generate_and_save(llm, repo, arch, name, tone, mbti))
             
     results = await asyncio.gather(*tasks)
     success_count = sum(1 for r in results if r)

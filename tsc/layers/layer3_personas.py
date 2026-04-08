@@ -42,6 +42,8 @@ from tsc.llm.prompts import (
     STAKEHOLDER_SELECTION_USER,
     EXTERNAL_STAKEHOLDER_SELECTION_SYSTEM,
     EXTERNAL_STAKEHOLDER_SELECTION_USER,
+    EXTERNAL_PERSONA_SYSTEM,
+    EXTERNAL_PERSONA_USER,
 )
 from tsc.memory.graph_store import GraphStore
 from tsc.repositories.persona_repository import PersonaRepository
@@ -172,8 +174,19 @@ class PersonaGenerator:
         company: CompanyContext,
         graph: KnowledgeGraph,
         bundle: ProblemContextBundle,
+        tension_vector: Optional[Any] = None,
+        target_seeds: int = 8,
     ) -> list[FinalPersona]:
-        """Execute full Layer 3 pipeline with all fixes and optimizations."""
+        """
+        Execute full Layer 3 pipeline with all fixes and optimizations.
+
+        Args:
+            tension_vector: If provided (from PersonaSelectionEngine Phase 1),
+                            the generated personas are pre-selected using
+                            TensionAwarePersonaSelector (Friction Score + MMR).
+                            If None, the full persona list is returned (legacy).
+            target_seeds:   Max number of seeds to pass to the GMM engine.
+        """
         t0 = time.time()
         logger.info("Layer 3: Generating stakeholder personas")
 
@@ -249,6 +262,16 @@ class PersonaGenerator:
             )
         logger.info("✓ Generated %d personas", len(valid_personas))
 
+        # Step 3.5: Tension-Aware Pre-Selection (new — bypassed if no tension_vector)
+        if tension_vector is not None and len(valid_personas) > target_seeds:
+            valid_personas = self._select_seeds_from_candidates(
+                valid_personas, tension_vector, target_seeds
+            )
+            logger.info(
+                "✓ Tension pre-selection: %d diverse seeds chosen (target=%d)",
+                len(valid_personas), target_seeds
+            )
+
         # Step 3.4: Build OASIS Belief Vectors (NEW)
         from tsc.oasis.profile_builder import BuildBeliefVector
         for persona in valid_personas:
@@ -313,6 +336,27 @@ class PersonaGenerator:
         )
 
         return valid_personas
+
+    def _select_seeds_from_candidates(
+        self,
+        candidates: list[FinalPersona],
+        tension_vector: Any,
+        target_seeds: int = 8,
+    ) -> list[FinalPersona]:
+        """
+        Tension-aware pre-selection of the best seeds from a candidate pool.
+        Delegates to TensionAwarePersonaSelector (Friction Score + MMR).
+        Called from process() when tension_vector is provided.
+        """
+        try:
+            from tsc.selection.persona_selector import TensionAwarePersonaSelector
+            selector = TensionAwarePersonaSelector()
+            return selector.select_seeds(candidates, tension_vector, target_seeds)
+        except Exception as e:
+            logger.warning(
+                "Tension pre-selection failed (%s) — falling back to full candidate list", e
+            )
+            return candidates
 
     async def get_internal_personas_for_company(self, company_id: uuid.UUID) -> list[FinalPersona]:
         """Retrieve all personas for a company from the database."""
@@ -382,13 +426,46 @@ class PersonaGenerator:
     def _map_to_final_persona(self, db_persona: Any, is_internal: bool) -> FinalPersona:
         """Map a database record to a FinalPersona Pydantic model."""
         profile_data = db_persona.psychological_profile
+        if isinstance(profile_data, str):
+            import json
+            try:
+                profile_data = json.loads(profile_data)
+            except Exception:
+                profile_data = {}
         
-        # Reconstruct complex profile object
+        # Map highly unstructured DB triggers into model fields (excited_by/frustrated_by/scared_of)
+        triggers_raw: dict[str, Any] = profile_data.get("emotional_triggers", {})
+        if not isinstance(triggers_raw, dict):
+            triggers_raw = {}
+            
+        mapped_triggers = {"excited_by": [], "frustrated_by": [], "scared_of": []}
+        
+        positive_keys = {"positive", "trust", "values", "motivations", "excited_by", "likes"}
+        negative_keys = {"negative", "anxiety", "concerns", "fears", "frustrated_by", "dislikes"}
+        
+        for k, v in triggers_raw.items():
+            key_lower = k.lower()
+            # Convert value to list of strings
+            val_list = [v] if isinstance(v, str) else v if isinstance(v, list) else []
+            val_strings = [str(item) for item in val_list]
+            
+            if any(pk in key_lower for pk in positive_keys):
+                mapped_triggers["excited_by"].extend(val_strings)
+            elif any(nk in key_lower for nk in negative_keys) or "scared" in key_lower:
+                mapped_triggers["frustrated_by"].extend(val_strings)
+                mapped_triggers["scared_of"].extend(val_strings)
+            else:
+                # Fallback: dump unknown keys into excited_by so they aren't lost
+                mapped_triggers["excited_by"].extend(val_strings)
+
+        key_traits_raw = profile_data.get("key_traits") or profile_data.get("traits") or []
+        key_traits = key_traits_raw if isinstance(key_traits_raw, list) else [str(key_traits_raw)]
+
         profile = PsychologicalProfile(
             mbti=db_persona.mbti_type or "",
             mbti_description=profile_data.get("mbti_description", ""),
-            key_traits=profile_data.get("key_traits", []),
-            emotional_triggers=EmotionalTriggers(**profile_data.get("emotional_triggers", {})),
+            key_traits=key_traits,
+            emotional_triggers=EmotionalTriggers(**mapped_triggers),
             communication_style=CommunicationStyle(**profile_data.get("communication_style", {})),
             decision_pattern=DecisionPattern(**profile_data.get("decision_pattern", {})),
             predicted_stance=PredictedStance(**profile_data.get("predicted_stance", {})),
@@ -1096,8 +1173,14 @@ class PersonaGenerator:
         stakeholder: Stakeholder,
         context: StakeholderContextBundle,
         company: CompanyContext,
+        feature: "FeatureProposal | None" = None,
     ) -> str:
-        """Build a prompt that organizes facts by sentiment and prioritizes direct quotes (SOTA-4)."""
+        """Build a rich, grounded prompt that produces a vivid, role-specific persona narrative.
+        
+        Organises facts by sentiment/source and injects a concrete role-identity sentence
+        so the LLM generates a specific person rather than a generic archetype.
+        Also injects the FeatureProposal for conflict-grounded scenes and friction sections.
+        """
         # Separate direct quotes from other facts
         direct_quotes = [
             f["text"]
@@ -1105,7 +1188,7 @@ class PersonaGenerator:
             if isinstance(f, dict) and f.get("source") == "direct_quote"
         ]
 
-        # Organize other facts by sentiment
+        # Organise other facts by sentiment
         pos_facts = [
             f["text"]
             for f in context.personal_facts
@@ -1119,36 +1202,92 @@ class PersonaGenerator:
         neut_facts = [
             f["text"] if isinstance(f, dict) else str(f)
             for f in context.personal_facts
-            if not isinstance(f, dict) or (f.get("sentiment") not in ["POSITIVE", "NEGATIVE"] and f.get("source") != "direct_quote")
+            if not isinstance(f, dict) or (
+                f.get("sentiment") not in ["POSITIVE", "NEGATIVE"]
+                and f.get("source") != "direct_quote"
+            )
         ]
 
-        prompt = f"""Generate a high-fidelity, grounded persona for {stakeholder.name}, {stakeholder.role} at {company.company_name}.
+        # Build a concrete role-identity sentence to anchor the LLM's writing
+        title_str = f" ({stakeholder.title})" if stakeholder.title else ""
+        team_str = f" at {company.company_name}" if company.company_name else ""
+        domain_str = (
+            f", specialising in {stakeholder.domain_relevance}"
+            if stakeholder.domain_relevance
+            else ""
+        )
+        role_identity = (
+            f"{stakeholder.name} is a {stakeholder.role}{title_str}{team_str}{domain_str}."
+        )
 
-DIRECT QUOTES FROM {stakeholder.name.upper()} (PRIMARY EVIDENCE):
-{chr(10).join(f"- {f}" for f in direct_quotes[:15])}
+        # Build feature-specific conflict context
+        if feature:
+            feature_block = f"""FEATURE UNDER EVALUATION:
+  Title:       {feature.title}
+  Description: {feature.description[:500]}
+  Effort:      {feature.effort_weeks_min}–{feature.effort_weeks_max} weeks
 
-OTHER OBSERVATIONAL EVIDENCE:
-Drivers/Positives:
-{chr(10).join(f"- {f}" for f in pos_facts[:10])}
+CRITICAL: This persona profile MUST reflect how {stakeholder.name} specifically encounters,
+reacts to, and positions themselves on "{feature.title}".
+"""
+        else:
+            feature_block = "(No specific feature context provided.)"
 
-Pain Points/Challenges:
-{chr(10).join(f"- {f}" for f in neg_facts[:10])}
+        prompt = f"""Generate a vivid, highly specific, 2500-word persona profile for:
+{role_identity}
 
-General Context:
-{chr(10).join(f"- {f}" for f in neut_facts[:15])}
+{feature_block}
+This person is NOT a generic archetype. Every section must feel specific to their exact job, 
+level of seniority, and their DIRECT relationship to the feature above.
+Write like a documentary filmmaker who spent a week shadowing them INCLUDING the day they first heard about this feature.
 
-ORGANIZATIONAL CONTEXT:
-{chr(10).join(f"- {c}" for c in context.org_context[:10])}
+DIRECT QUOTES FROM {stakeholder.name.upper()} (HIGHEST PRIORITY EVIDENCE):
+{chr(10).join(f'  - "{f}"' for f in direct_quotes[:15]) or '  (none available)'}
 
-CONSTRAINTS & URGENCY:
-{chr(10).join(f"- {c}" for c in context.constraint_context[:10])}
+OBSERVATIONAL EVIDENCE — DRIVERS (what they value positively):
+{chr(10).join(f'  - {f}' for f in pos_facts[:10]) or '  (none available)'}
 
-STRICT INSTRUCTIONS:
-1. YOUR PRIMARY GOAL is to reflect {stakeholder.name}'s actual voice and concerns based on the DIRECT QUOTES.
-2. EVERY trait, motivation, or frustration you attribute to them MUST be supported by at least one quote or fact.
-3. CITATION FORMAT: End every paragraph or list item with [Source: quote snippet or fact snippet].
-4. DO NOT FABRICATE personality traits that are not evidenced.
-5. If evidence is conflicting, highlight the internal tension.
+OBSERVATIONAL EVIDENCE — PAIN POINTS (what frustrates or blocks them):
+{chr(10).join(f'  - {f}' for f in neg_facts[:10]) or '  (none available)'}
+
+GENERAL CONTEXT FACTS:
+{chr(10).join(f'  - {f}' for f in neut_facts[:15]) or '  (none available)'}
+
+ORGANISATIONAL CONTEXT:
+{chr(10).join(f'  - {c}' for c in context.org_context[:10]) or '  (none available)'}
+
+CONSTRAINTS & URGENCY SIGNALS:
+{chr(10).join(f'  - {c}' for c in context.constraint_context[:10]) or '  (none available)'}
+
+MANDATORY WRITING RULES:
+1. PRIMARY GOAL: Reflect {stakeholder.name}'s actual voice from DIRECT QUOTES.
+2. EVERY trait, motivation, or frustration MUST be supported by a quote or fact.
+3. CITATION FORMAT: End relevant sentences with [Source: <quote/fact snippet>].
+4. DO NOT fabricate personality traits not evidenced by the data.
+5. If evidence is conflicting, explicitly describe the internal tension.
+6. You MUST include ALL ten sections:
+   0 (Vivid Scene — CONFLICT-DRIVEN, see below)
+   1-6 (psychological profile)
+   7 (Signature Quote)
+   8 (Professional Backstory)
+   9 (Role Vocabulary)
+   10 (Feature Friction — see below)
+7. SECTION 0 RULES (Vivid Scene — CRITICAL):
+   - Must place {stakeholder.name} in a moment of DIRECT CONTACT with "{feature.title if feature else 'the feature'}".
+   - Examples of valid scene openers: receiving a Slack message that AI auto-approved a PR without their input;
+     being asked to sign off on company-wide rollout; discovering a false positive caused a production incident;
+     being asked by a junior engineer "do you still review PRs manually?".
+   - GENERIC SCENES ("Tuesday morning routine", "reviewing the day's schedule") ARE FORBIDDEN.
+8. SECTION 10 RULES (Feature Friction — MANDATORY):
+   - Write 4–6 sentences on EACH of these sub-dimensions for this specific persona:
+     a) TRUST: Does {stakeholder.name} trust the AI's code review judgment? Why / why not?
+     b) FALSE POSITIVE BURDEN: How would they respond to a wave of incorrect AI flags?
+     c) PRIVACY / OBSERVABILITY: Does automated review of their code feel like surveillance?
+     d) SKILL ATROPHY: Do they worry about developers losing review craftsmanship?
+     e) AUTONOMY: Do they feel this tool removes meaningful human agency from engineering decisions?
+   - Each sub-dimension must END with {stakeholder.name}'s probable stance: SUPPORT / OPPOSE / CONDITIONAL.
+9. Section 7 must be a verbatim first-person quote about "{feature.title if feature else 'the feature'}" in their natural professional register.
+10. Section 9 must list exactly 6 role-authentic domain terms, NOT generic buzzwords.
 """
         return prompt
 
@@ -1186,26 +1325,50 @@ STRICT INSTRUCTIONS:
         top_entities: list[GraphEntity],
     ) -> FinalPersona:
         """Core profile generation with fallback."""
+        from tsc.models.personas import MarketContext, BuyerJourney
+
+        is_external = getattr(stakeholder, "persona_type", "INTERNAL") == "EXTERNAL"
         profile_text: str = ""
         grounding_score: float = 0.0
 
         try:
-            # Use grounded prompt builder
-            user_prompt = self._build_grounded_persona_prompt(
-                stakeholder, context, company
-            )
-
-            profile_text = await self._llm.generate(
-                system_prompt=PERSONA_SYSTEM_GROUNDED,
-                user_prompt=user_prompt,
-                temperature=0.2,
-                max_tokens=1500,
-            )
+            if is_external:
+                # ── External buyer persona: use domain-agnostic buyer prompt ──
+                user_prompt = EXTERNAL_PERSONA_USER.render(
+                    name=stakeholder.name,
+                    role=stakeholder.role,
+                    org_context=context.org_context,
+                    personal_facts=[
+                        f.get("text", str(f)) if isinstance(f, dict) else str(f)
+                        for f in context.personal_facts
+                    ],
+                    constraint_context=context.constraint_context,
+                    feature=feature,
+                    top_entities=top_entities,
+                )
+                profile_text = await self._llm.generate(
+                    system_prompt=EXTERNAL_PERSONA_SYSTEM,
+                    user_prompt=user_prompt,
+                    temperature=0.35,   # slightly higher creativity for market personas
+                    max_tokens=3000,    # 14 sections need more room
+                )
+            else:
+                # ── Internal stakeholder: use existing grounded org prompt ──
+                user_prompt = self._build_grounded_persona_prompt(
+                    stakeholder, context, company, feature
+                )
+                profile_text = await self._llm.generate(
+                    system_prompt=PERSONA_SYSTEM_GROUNDED,
+                    user_prompt=user_prompt,
+                    temperature=0.2,
+                    max_tokens=2500,
+                )
 
             # Validate grounding quality
             grounding_score = self._validate_grounding(profile_text, context)
             logger.info(
-                "✓ Grounded Profile for %s: %d words, quality=%.2f",
+                "✓ %s Profile for %s: %d words, quality=%.2f",
+                "Buyer" if is_external else "Grounded",
                 stakeholder.name,
                 len(profile_text.split()),
                 grounding_score,
@@ -1234,10 +1397,38 @@ STRICT INSTRUCTIONS:
         # Parse into structured format
         profile = self._parse_profile(profile_text, stakeholder, feature)
 
-        # Calculate confidence (CRITICAL FIX #7)
+        # Calculate confidence
         confidence = self._estimate_profile_confidence(
             stakeholder, context, profile_text
         )
+
+        # ── Hydrate market_context / buyer_journey from LLM-provided metadata ──
+        market_ctx: "MarketContext | None" = None
+        buyer_jrn: "BuyerJourney | None" = None
+        if is_external:
+            mm = getattr(stakeholder, "market_metadata", {}) or {}
+            try:
+                market_ctx = MarketContext(
+                    company_size_band=mm.get("company_size_band", "mid-market"),
+                    buyer_role=mm.get("buyer_role", "influencer"),
+                    annual_solution_budget_usd=int(mm.get("annual_solution_budget_usd", 50_000)),
+                    pricing_sensitivity=mm.get("pricing_sensitivity", "medium"),
+                    sales_cycle_weeks=int(mm.get("sales_cycle_weeks", 8)),
+                    deployment_preference=mm.get("deployment_preference", "cloud"),
+                    industry_vertical=mm.get("industry_vertical", "technology"),
+                    regulatory_burden=mm.get("regulatory_burden", "light"),
+                )
+                buyer_jrn = BuyerJourney(
+                    awareness_channel=mm.get("awareness_channel", "peer-recommendation"),
+                    evaluation_trigger=mm.get("evaluation_trigger", ""),
+                    key_proof_points=mm.get("key_proof_points", []),
+                    deal_breakers=mm.get("deal_breakers", []),
+                    success_metric=mm.get("success_metric", ""),
+                    roi_threshold_months=int(mm.get("roi_threshold_months", 12)),
+                    willingness_to_pay_band=mm.get("willingness_to_pay_band", "moderate"),
+                )
+            except Exception as e:
+                logger.debug("Could not hydrate market context for %s: %s", stakeholder.name, e)
 
         return FinalPersona(
             name=stakeholder.name,
@@ -1254,6 +1445,8 @@ STRICT INSTRUCTIONS:
             profile_confidence=confidence,
             persona_type=getattr(stakeholder, "persona_type", "INTERNAL"),
             grounding_quality=grounding_score,
+            market_context=market_ctx,
+            buyer_journey=buyer_jrn,
         )
 
     def _generate_minimal_profile_text(
@@ -1262,28 +1455,95 @@ STRICT INSTRUCTIONS:
         feature: FeatureProposal,
         context: StakeholderContextBundle,
     ) -> str:
-        """Generate minimal profile when LLM fails."""
-        facts_summary = "\n".join(
-            f"- {f}" for f in context.personal_facts[:5]
+        """Generate a role-archetypal fallback profile when the LLM call fails.
+        
+        Produces a ~200-word narrative that feels specific to the role rather than
+        a generic skeleton, using domain_relevance and available context facts.
+        """
+        facts_snippet = " ".join(
+            str(f.get("text", f) if isinstance(f, dict) else f)
+            for f in context.personal_facts[:3]
         )
-        org_summary = "\n".join(f"- {o}" for o in context.org_context[:3])
+        org_snippet = "; ".join(str(o) for o in context.org_context[:2])
+        domain = stakeholder.domain_relevance or "their core domain"
+        authority = stakeholder.decision_authority or "medium"
+        title = stakeholder.title or stakeholder.role
+
+        # Role-based archetype sentence
+        role_lower = stakeholder.role.lower()
+        if any(k in role_lower for k in ["engineer", "architect", "developer", "tech"]):
+            archetype = (
+                f"{stakeholder.name} is a technically exacting {title} who "
+                f"defaults to scepticism about any change that hasn't been "
+                f"benchmarked. They care deeply about system reliability and "
+                f"will push back hard on anything that risks {domain}."
+            )
+            mbti_guess = "INTJ"
+        elif any(k in role_lower for k in ["product", "pm", "manager"]):
+            archetype = (
+                f"{stakeholder.name} is a data-informed {title} who frames "
+                f"every decision around user outcomes and delivery timelines. "
+                f"They are comfortable making calls with ambiguous data but "
+                f"will demand clear success metrics before signing off on {domain}."
+            )
+            mbti_guess = "ENTJ"
+        elif any(k in role_lower for k in ["cto", "vp", "director", "chief", "exec"]):
+            archetype = (
+                f"{stakeholder.name} is a strategic {title} who thinks in "
+                f"quarters and headcount. They evaluate {domain} primarily "
+                f"through the lens of cost efficiency, competitive positioning, "
+                f"and whether the team can actually ship it on time."
+            )
+            mbti_guess = "ENTJ"
+        elif any(k in role_lower for k in ["security", "compliance", "privacy", "legal"]):
+            archetype = (
+                f"{stakeholder.name} is a risk-first {title} whose instinct "
+                f"is to veto until proven safe. They will interrogate "
+                f"every assumption about {domain} and refuse to proceed "
+                f"without explicit coverage of threat vectors and audit trails."
+            )
+            mbti_guess = "ISTJ"
+        elif any(k in role_lower for k in ["design", "ux", "user", "customer"]):
+            archetype = (
+                f"{stakeholder.name} is a user-advocate {title} who champions "
+                f"simplicity and emotional resonance. They evaluate {domain} "
+                f"through the eyes of the least technical user and will "
+                f"block anything that creates friction without clear payoff."
+            )
+            mbti_guess = "ENFJ"
+        else:
+            archetype = (
+                f"{stakeholder.name} is a pragmatic {title} with {authority} "
+                f"decision authority, primarily concerned with {domain}. They "
+                f"balance competing priorities and tend to approve cautiously."
+            )
+            mbti_guess = "ESTJ"
+
+        context_para = ""
+        if facts_snippet:
+            context_para = f"\n\nContext signals point to: {facts_snippet}."
+        if org_snippet:
+            context_para += f" Organisational backdrop: {org_snippet}."
 
         return (
-            f"PERSONALITY PROFILE: {stakeholder.name}\n\n"
-            f"Role: {stakeholder.role}\n"
-            f"Title: {stakeholder.title}\n"
-            f"Relevance: {stakeholder.relevance_score:.2f}\n"
-            f"Authority: {stakeholder.decision_authority}\n\n"
-            f"MBTI Type: ENTJ (Default — profile generation failed)\n\n"
-            f"Key Traits:\n"
-            f"- {stakeholder.domain_relevance}\n"
-            f"- Decision maker with {stakeholder.decision_authority} "
-            f"authority\n"
-            f"- Evaluating: {feature.title}\n\n"
-            f"Personal Context:\n{facts_summary}\n\n"
-            f"Organizational Context:\n{org_summary}\n\n"
-            f"Predicted Stance: CONDITIONAL_APPROVE\n\n"
-            f"This is a minimal profile generated due to LLM failure.\n"
+            f"0. VIVID SCENE\n"
+            f"{archetype}\n"
+            f"On a typical Tuesday morning, {stakeholder.name} is reviewing "
+            f"the latest update on {feature.title}, weighing its impact on "
+            f"{domain} before a cross-functional sync at 11am."
+            f"{context_para}\n\n"
+            f"1. PERSONALITY TYPE\n"
+            f"MBTI: {mbti_guess} (inferred from role — LLM profile generation failed).\n"
+            f"Decision authority: {authority}. Relevance score: "
+            f"{stakeholder.relevance_score:.2f}.\n\n"
+            f"6. PREDICTED STANCE\n"
+            f"CONDITIONAL_APPROVE — will require evidence of impact on {domain} "
+            f"before committing.\n\n"
+            f"7. SIGNATURE QUOTE\n"
+            f'"Before we move forward on {feature.title}, I need to see the \''
+            f"numbers on {domain} — otherwise we're flying blind.\"\n\n"
+            f"[NOTE: This is a fallback profile generated because the primary "
+            f"LLM call failed. Re-run to get the full 2500-word narrative.]\n"
         )
 
     # ═════════════════════════════════════════════════════════════════

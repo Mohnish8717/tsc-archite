@@ -132,7 +132,7 @@ class RefinementEngine:
 
         # Step 3: Build refinement prompt with context
         refinement_prompt = self._build_refinement_prompt(
-            feature, gates_summary, company, graph, personas
+            feature, gates_summary, company, graph, personas, bundle
         )
         logger.info("✓ Built refinement prompt")
 
@@ -324,12 +324,14 @@ class RefinementEngine:
         company: CompanyContext,
         graph: KnowledgeGraph,
         personas: list[FinalPersona],
+        bundle: Any = None,
     ) -> str:
         """Build detailed refinement prompt with comprehensive context."""
         failed_gates_detail = self._format_failed_gates(gates_summary)
         stakeholder_summary = self._summarize_stakeholder_concerns(personas)
         company_summary = self._summarize_company_context(company)
         key_entities = self._extract_key_entities(graph)
+        behavioral_evidence = self._extract_behavioral_evidence(bundle)
 
         passed_count = len(gates_summary.results) - len(
             gates_summary.failed_gates
@@ -341,8 +343,9 @@ FEATURE PROPOSAL REFINEMENT REQUEST
 ═══════════════════════════════════════════════════════════════════════════
 
 Feature Title: {feature.title}
-Current Overall Score: {gates_summary.overall_score:.2f}/10.00
-Status: {len(gates_summary.failed_gates)} gates failed, {passed_count} gates passed
+# Scores are on a 0.0–1.0 scale. Showing as % for clarity.
+Current Market Adoption Score: {gates_summary.overall_score * 100:.1f}% (PASS threshold: ≥50%)
+Status: {len(gates_summary.failed_gates)} gates FAILED, {passed_count} gates passed
 
 ───────────────────────────────────────────────────────────────────────────
 CURRENT FEATURE DESCRIPTION:
@@ -371,6 +374,11 @@ COMPANY CONSTRAINTS & CONTEXT:
 KEY ENTITIES & DEPENDENCIES:
 ───────────────────────────────────────────────────────────────────────────
 {key_entities}
+
+───────────────────────────────────────────────────────────────────────────
+BEHAVIORAL EVIDENCE FROM SIMULATION (Actual agent dialogue):
+───────────────────────────────────────────────────────────────────────────
+{behavioral_evidence}
 
 ───────────────────────────────────────────────────────────────────────────
 YOUR TASK:
@@ -529,9 +537,23 @@ Do not include markdown formatting, only valid JSON.
 
         return "\n".join(entity_lines[:15])
 
-    # ═════════════════════════════════════════════════════════════════
-    # CRITICAL FIX #3: Response Validation
-    # ═════════════════════════════════════════════════════════════════
+    def _extract_behavioral_evidence(self, bundle: ProblemContextBundle) -> str:
+        """Opt A: Extract top behavioral insights from simulation chunks."""
+        if not bundle or not bundle.chunks:
+            return "No behavioral evidence available."
+        # Sort by coherence (highest = most signal-rich) and take top 5
+        top_chunks = sorted(
+            bundle.chunks,
+            key=lambda c: getattr(c, 'coherence_score', 0.0),
+            reverse=True
+        )[:5]
+        lines = []
+        for i, chunk in enumerate(top_chunks, 1):
+            text = getattr(chunk, 'text', str(chunk))[:300]
+            score = getattr(chunk, 'coherence_score', 0.0)
+            lines.append(f"{i}. [coherence={score:.2f}] {text}")
+        return "\n".join(lines) if lines else "No behavioral evidence available."
+
 
     def _validate_refinement(
         self, refinement: Any
@@ -773,8 +795,8 @@ Do not include markdown formatting, only valid JSON.
         reasons = []
 
         overall_improvement = comparison["overall_improvement"]
-        if overall_improvement > 0.20:
-            reasons.append(f"significant_improvement:{overall_improvement:.2f}")
+        if overall_improvement > 0.05:  # OPT-B: lowered from 0.10 to 0.05
+            reasons.append(f"improvement:{overall_improvement:.2f}")
 
         fixed = comparison["failed_gates_fixed"]
         broken = comparison["newly_failed_gates"]
@@ -782,11 +804,11 @@ Do not include markdown formatting, only valid JSON.
         if fixed > 0 and broken == 0:
             reasons.append(f"fixed_gates:{fixed}_no_regressions")
 
-        if refined.overall_score >= 0.70 and original.overall_score < 0.70:
+        if refined.overall_score >= 0.50 and original.overall_score < 0.50:
             reasons.append("reached_pass_threshold")
 
         confidence = refinement_data.get("confidence", 0.5)
-        if overall_improvement > 0.10 and confidence >= 0.70:
+        if overall_improvement > 0.05 and confidence >= 0.60:  # OPT-B: lowered threshold
             reasons.append(
                 f"good_improvement_high_confidence:{overall_improvement:.2f}"
             )

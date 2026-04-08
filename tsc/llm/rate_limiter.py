@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 class TokenBucket:
     """Dual token + request rate limiter with proportional refill."""
 
-    tpm_limit: int = 5500       # 10% safety margin under Groq free-tier 6000
-    rpm_limit: int = 14_000
+    tpm_limit: int = 4000       # 33% safety margin under Groq free-tier 6,000
+    rpm_limit: int = 20         # 33% safety margin under Groq free-tier 30
 
     refill_interval: float = 60.0  # seconds
 

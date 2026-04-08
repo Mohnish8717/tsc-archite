@@ -241,6 +241,8 @@ class PersonaRepository:
             stmt = select(ExternalPersona).where(
                 ExternalPersona.role == segment
             )
+            result = await session.execute(stmt)
+            personas = result.scalars().all()
             
             if self.cache:
                 await self.cache.set_list(cache_key, personas)

@@ -5,6 +5,7 @@ import json
 import time
 import signal
 import threading
+import atexit
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import logging
@@ -49,6 +50,8 @@ class SimulationRunner:
         
         self._monitor_thread: Optional[threading.Thread] = None
         self._stop_monitor = threading.Event()
+        
+        SimulationRunner._active_runners[self.simulation_id] = self
         
     def _load_run_state(self) -> Optional[SimulationRunState]:
         """Load persistent status from disk."""
@@ -116,11 +119,15 @@ class SimulationRunner:
         # These MUST be set before the subprocess starts — shell env is the only reliable way.
         subprocess_env = os.environ.copy()
         subprocess_env.update({
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
             # CRITICAL: Prevents ObjC runtime crash when forking on macOS Sequoia/Sonoma
             "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
             # Prevents gRPC mutex deadlock inside asyncio + spawned subprocess
             "GRPC_ENABLE_FORK_SUPPORT": "false",
             "GRPC_POLL_STRATEGY": "poll",
+            "GRPC_DNS_RESOLVER": "native",
+            "AIOHTTP_CLIENT_TIMEOUT": "300",
             # Prevent torch from oversubscribing threads (worsens mutex contention)
             "TOKENIZERS_PARALLELISM": "false",
             "OMP_NUM_THREADS": "1",
@@ -244,11 +251,20 @@ class SimulationRunner:
         if self.process and self.process.poll() is None:
             try:
                 if IS_WINDOWS:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)], capture_output=True)
+                    try:
+                        subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T"], capture_output=True, timeout=5)
+                        self.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)], capture_output=True)
                 else:
                     pgid = os.getpgid(self.process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                logger.warning(f"Hard-cleanup performed on simulation group for PID: {self.process.pid}")
+                    os.killpg(pgid, signal.SIGTERM)
+                    try:
+                        self.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"Process PGID {pgid} hanging. Escalating to SIGKILL.")
+                        os.killpg(pgid, signal.SIGKILL)
+                logger.warning(f"Cleanup performed on simulation group for PID: {self.process.pid}")
             except Exception as e:
                 logger.error(f"Force cleanup failed: {e}")
         
@@ -329,3 +345,42 @@ class SimulationRunner:
             except Exception as e:
                 logger.error(f"Failed to read simulation result: {e}")
         return None
+
+    _cleanup_registered = False
+
+    @classmethod
+    def cleanup_all_simulations(cls):
+        """Clean all active simulation runners on application exit."""
+        if not cls._active_runners:
+            return
+        logger.info("Atexit Hook Triggered: Cleaning up active OASIS simulations...")
+        for sim_id, runner in list(cls._active_runners.items()):
+            try:
+                if runner.process and runner.process.poll() is None:
+                    runner.stop()
+            except Exception as e:
+                logger.error(f"Failed to cleanup simulation {sim_id}: {e}")
+        cls._active_runners.clear()
+
+    @classmethod
+    def register_cleanup(cls):
+        """Register the global exit handlers strictly once."""
+        if cls._cleanup_registered:
+            return
+        
+        def cleanup_handler(signum, frame):
+            cls.cleanup_all_simulations()
+            sys.exit(0)
+            
+        atexit.register(cls.cleanup_all_simulations)
+        try:
+            signal.signal(signal.SIGTERM, cleanup_handler)
+            signal.signal(signal.SIGINT, cleanup_handler)
+            if hasattr(signal, 'SIGHUP'):
+                signal.signal(signal.SIGHUP, cleanup_handler)
+        except ValueError:
+            pass # Subthreads cannot use signal hooks securely
+        cls._cleanup_registered = True
+
+# Register global cleanup upon import
+SimulationRunner.register_cleanup()

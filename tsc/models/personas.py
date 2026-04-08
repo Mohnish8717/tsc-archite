@@ -53,6 +53,75 @@ class PsychologicalProfile(BaseModel):
     full_profile_text: str = ""  # The complete ~2000-word narrative
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Market / Buyer Context (EXTERNAL personas only)
+# Domain-agnostic — works for any business, product, or strategic feature.
+# ─────────────────────────────────────────────────────────────────────
+
+class MarketContext(BaseModel):
+    """
+    Economic and organisational attributes of an external buyer/customer.
+    Fully domain-agnostic: applies to SaaS tools, physical products, policy
+    changes, service launches, B2B/B2C market entries, etc.
+    """
+    company_size_band: str = "mid-market"
+    # micro (<10 employees) | small (10–99) | mid-market (100–999) | enterprise (1000+)
+
+    buyer_role: str = "influencer"
+    # decision-maker | influencer | end-user | champion
+
+    annual_solution_budget_usd: int = 50_000
+    # Rough annual spend authority for solutions in this category
+
+    pricing_sensitivity: str = "medium"
+    # high (budget-drives everything) | medium | low (value-drives)
+
+    sales_cycle_weeks: int = 8
+    # Typical weeks from first contact to signed agreement
+
+    deployment_preference: str = "cloud"
+    # cloud | on-prem | hybrid | managed-service | physical | policy-mandate
+
+    industry_vertical: str = "technology"
+    # finance | healthcare | retail | technology | government |
+    # manufacturing | education | real-estate | media | other
+
+    regulatory_burden: str = "light"
+    # none | light | moderate | heavy
+
+
+class BuyerJourney(BaseModel):
+    """
+    How this persona moves from problem awareness through to post-adoption.
+    Fully domain-agnostic: maps to any buying process regardless of product type.
+    """
+    awareness_channel: str = "peer-recommendation"
+    # peer-recommendation | analyst-report | vendor-outreach |
+    # organic-search | internal-mandate | conference | social-proof
+
+    evaluation_trigger: str = ""
+    # The specific business event or pain that forces them to seek a solution
+
+    key_proof_points: list[str] = Field(default_factory=list)
+    # What they need to see/hear before they believe the solution works
+
+    deal_breakers: list[str] = Field(default_factory=list)
+    # Conditions that stop the evaluation immediately
+
+    success_metric: str = ""
+    # How they would quantify success after adoption
+
+    roi_threshold_months: int = 12
+    # Payback period they consider acceptable (shorter = more urgent buyer)
+
+    willingness_to_pay_band: str = "moderate"
+    # low | moderate | high | very-high (relative to solution list price)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Stakeholder Models
+# ─────────────────────────────────────────────────────────────────────
+
 class Stakeholder(BaseModel):
     """A selected stakeholder before profiling."""
 
@@ -63,6 +132,9 @@ class Stakeholder(BaseModel):
     domain_relevance: str = ""
     decision_authority: str = "medium"
     persona_type: str = "INTERNAL"
+
+    # Economic metadata (populated for EXTERNAL stakeholders from LLM selection)
+    market_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class StakeholderContextBundle(BaseModel):
@@ -90,19 +162,23 @@ class FinalPersona(BaseModel):
     profile_confidence: float = 0.0
     grounding_quality: float = 1.0
     persona_type: str = "INTERNAL"
-    
-    # NEW: OASIS-specific fields
-    belief_vector: Optional[Any] = None # OpinionVector
+
+    # OASIS-specific fields
+    belief_vector: Optional[Any] = None  # OpinionVector
     network_position_hint: str = "peripheral"
     influence_strength: float = 0.5
     receptiveness: float = 0.5
+
+    # Market/Buyer context — populated only for EXTERNAL personas
+    market_context: Optional[MarketContext] = None
+    buyer_journey: Optional[BuyerJourney] = None
 
     def to_oasis_profile(self, feature: Any) -> Any:
         """Convert persona to OASIS simulation agent."""
         from tsc.oasis.models import OASISAgentProfile
         from tsc.oasis.profile_builder import BuildBeliefVector
         import asyncio
-        
-        # This is a synchronous wrapper for the async builder
-        # In actual pipeline, we'll build it during Layer 3 process()
-        return None 
+
+        # Synchronous wrapper — actual build happens in Layer 3 process()
+        return None
+
