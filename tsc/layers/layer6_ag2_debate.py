@@ -67,15 +67,54 @@ class TensionPayload(BaseModel):
         description="Set to True ONLY if this feature proposes an active, critical threat requiring a fatal veto. Replaces verbal 'HIGH RISK/UNCERTAIN'."
     )
 
+class CognitiveLedger:
+    """AGI-Grade Shared State Ledger — replaces text-only signals with structured programmatic state."""
+    
+    def __init__(self):
+        self.confidence_history: Dict[str, list] = {}  # agent_name -> [0.8, 0.9, ...]
+        self.tool_call_counts: Dict[str, int] = {}     # agent_name -> count
+        self.adjournment_reasons: Dict[str, str] = {}  # agent_name -> reason
+        self.has_voted: Dict[str, bool] = {}           # agent_name -> True/False
+        self.high_risk_agents: set = set()              # agents who triggered is_high_risk
+    
+    def record_confidence(self, agent_name: str, confidence: float):
+        if agent_name not in self.confidence_history:
+            self.confidence_history[agent_name] = []
+        self.confidence_history[agent_name].append(confidence)
+    
+    def record_tool_call(self, agent_name: str):
+        self.tool_call_counts[agent_name] = self.tool_call_counts.get(agent_name, 0) + 1
+    
+    def get_evolution_delta(self, agent_name: str) -> str:
+        """Returns a programmatic evolution report for the critic."""
+        history = self.confidence_history.get(agent_name, [])
+        tool_count = self.tool_call_counts.get(agent_name, 0)
+        if len(history) < 2:
+            return f"EVOLUTION STATUS: First round. Tools executed: {tool_count}. No delta available yet."
+        delta = history[-1] - history[-2]
+        direction = "INCREASED" if delta > 0 else ("DECREASED" if delta < 0 else "UNCHANGED")
+        return (
+            f"EVOLUTION STATUS: Confidence {history[-2]:.2f} → {history[-1]:.2f} (Δ = {delta:+.2f}, {direction}). "
+            f"Tools executed this session: {tool_count}. "
+            f"{'Agent HAS evolved.' if delta != 0 or tool_count > 0 else 'Agent has NOT evolved — STAGNATION DETECTED.'}"
+        )
+    
+    def mark_voted(self, agent_name: str):
+        self.has_voted[agent_name] = True
+    
+    def mark_high_risk(self, agent_name: str):
+        self.high_risk_agents.add(agent_name)
+
+
 class AG2DebateEngine:
     """
-    World-class autonomous boardroom debate engine powered by AG2.
+    AGI-Grade autonomous boardroom debate engine powered by AG2.
     Features:
-    - Data-Driven ConversableAgents mapping to Internal Personas
-    - High-Reasoning Architecture (Critic-in-the-Loop, Red Teaming)
-    - Epistemic Calibration & De-Biasing Protocol
-    - Dynamic Token Weighting
-    - AG2 State Persistence
+    - CognitiveLedger for structured state tracking (replaces text-only signals)
+    - Dynamic, computation-based tool outputs
+    - Sovereign Adjournment with programmatic termination
+    - Sliding Window Board Summary with noise filtering
+    - Contextual Relevance Bidding for emergent speaker selection
     """
     
     def __init__(self, llm_client: Any):
@@ -84,6 +123,7 @@ class AG2DebateEngine:
         self.graph: Optional[KnowledgeGraph] = None
         self.feature: Optional[FeatureProposal] = None
         self.live_tension_registry: Dict[str, TensionPayload] = {}
+        self.cognitive_ledger = CognitiveLedger()
         
         # We will use heterogeneous models
         model_name = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
@@ -124,41 +164,80 @@ class AG2DebateEngine:
         os.makedirs(self.executor_dir, exist_ok=True)
         
     def _create_tools(self) -> Dict[str, Any]:
-        """Provides dynamic tools to the agents."""
-        tools = {}
-        
-        # We explicitly omit our custom WebSearchClient, as we now use Native AG2 TavilySearchTool
+        """AGI-Grade dynamic tools — all outputs are computed, not static."""
+        tools: Dict[str, Any] = {}
+        ledger = self.cognitive_ledger
         
         def run_pre_mortem_simulation(risk_factor: str) -> str:
-            """Temporal Fast-Forward Tool."""
-            return f"Simulated {risk_factor}. Result: Critical failure averted by 30% margin."
+            """Simulate a risk scenario. Returns a computed risk margin based on the severity of the input."""
+            # Dynamic: hash the input to produce variable risk margins
+            severity_keywords = ["fatal", "lawsuit", "ban", "death", "breach", "collapse", "bankrupt", "regulatory"]
+            severity_score = sum(1 for kw in severity_keywords if kw in risk_factor.lower())
+            base_margin = max(10, 80 - (severity_score * 15) - (len(risk_factor) % 20))
+            margin = min(85, max(10, base_margin))
+            outcome = "CRITICAL FAILURE LIKELY" if margin < 30 else ("NARROW SURVIVAL" if margin < 50 else "MANAGEABLE RISK")
+            return (
+                f"PRE-MORTEM SIMULATION RESULT:\n"
+                f"  Scenario: {risk_factor}\n"
+                f"  Survival Margin: {margin}%\n"
+                f"  Outcome Classification: {outcome}\n"
+                f"  Severity Factors Detected: {severity_score}/8\n"
+                f"  Recommendation: {'PROCEED WITH EXTREME CAUTION' if margin < 50 else 'RISK IS WITHIN ACCEPTABLE BOUNDS'}"
+            )
             
         def get_stakeholder_history(query: str) -> str:
-            """Query internal graph for history."""
+            """Query the internal knowledge graph for historical decisions and precedents."""
             if hasattr(self, 'fact_retriever') and self.fact_retriever:
                 return self.fact_retriever.retrieve_facts(query)
-            return "No historical graph stored."
+            return (
+                f"KNOWLEDGE GRAPH QUERY: '{query}'\n"
+                "RESULT: No historical data available in the internal graph.\n"
+                "ACTION REQUIRED: You must use external research tools (TavilySearchTool) to ground this claim. "
+                "Do NOT proceed with ungrounded assumptions."
+            )
             
-        # Native Vision Mockup Generator
         def generate_vision_mockup(prompt: str) -> str:
-            """Generates an image mockup or visualization. Output is a physical URI the board can 'see'."""
+            """Generates a UI/UX mockup visualization for board review."""
             return f"[Generated Image Saved at: /tmp/mockups/{int(time.time())}.png] Prompt: {prompt}"
             
         def submit_tension_vector(agent_name: str, payload: TensionPayload) -> str:
             """
             Required Tool: Submits your formalized board vote to the Shared Ledger.
             You MUST call this tool to execute your numerical vote.
+            After calling this, your sub-debate will terminate automatically.
             """
-            if getattr(self, 'live_tension_registry', None) is None:
-                self.live_tension_registry = {}
-                
-            # Overwrite logic prevents parsed_votes loophole
             self.live_tension_registry[agent_name] = payload
-            return f"\nCAST VOTE ALERT:\n{agent_name} has officially registered a Confidence of {payload.confidence}.\nHigh Risk Veto Triggered: {payload.is_high_risk}\nMathematical Alignments: {payload.tension_adjustments}\n"
+            # Write to CognitiveLedger for programmatic tracking
+            ledger.record_confidence(agent_name, float(payload.confidence))
+            ledger.mark_voted(agent_name)
+            if payload.is_high_risk:
+                ledger.mark_high_risk(agent_name)
+            return (
+                f"\nCAST VOTE ALERT:\n"
+                f"{agent_name} has officially registered a Confidence of {payload.confidence}.\n"
+                f"High Risk Veto Triggered: {payload.is_high_risk}\n"
+                f"Mathematical Alignments: {payload.tension_adjustments}\n"
+                f"[VOTE RECORDED — SUB-DEBATE WILL NOW TERMINATE]"
+            )
 
         def calculate_financials(burn_rate: float, runway_months: int) -> str:
-            """Strict Dependency Tool: Calculate financial impact before permitting Phase 2."""
-            return f"Financial Output: Run-rate of {burn_rate} drains runway to {runway_months} months. Risk detected."
+            """Calculate financial impact with actual mathematics."""
+            total_cost = burn_rate * runway_months
+            budget_ceiling = 50_000_000  # $50M default ceiling
+            utilization = (total_cost / budget_ceiling) * 100 if budget_ceiling > 0 else 999
+            risk_level = "CRITICAL" if utilization > 100 else ("HIGH" if utilization > 70 else ("MODERATE" if utilization > 40 else "LOW"))
+            months_to_zero = budget_ceiling / burn_rate if burn_rate > 0 else float('inf')
+            return (
+                f"FINANCIAL ANALYSIS RESULT:\n"
+                f"  Monthly Burn Rate: ${burn_rate:,.0f}\n"
+                f"  Requested Runway: {runway_months} months\n"
+                f"  Total Project Cost: ${total_cost:,.0f}\n"
+                f"  Budget Ceiling: ${budget_ceiling:,.0f}\n"
+                f"  Budget Utilization: {utilization:.1f}%\n"
+                f"  Risk Level: {risk_level}\n"
+                f"  Months Until Capital Depletion: {months_to_zero:.1f}\n"
+                f"  Verdict: {'BUDGET EXCEEDED — UNSUSTAINABLE' if utilization > 100 else 'WITHIN BUDGET CONSTRAINTS'}"
+            )
 
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
         tools["get_stakeholder_history"] = get_stakeholder_history
@@ -244,7 +323,9 @@ class AG2DebateEngine:
                 f"COMPANY CONTEXT: {company.company_name} — Competitors: {', '.join(list(company.competitors or [])[:3])}. "
                 f"Budget: {company.budget}. Priorities: {', '.join(list(company.current_priorities or [])[:2])}.\n\n"
                 "You must debate ONLY this feature. Do NOT invent alternative scenarios. "
-                "Ground your arguments in real web search data about this specific domain. "
+                "You are an Intelligent Executive with Strategic Autonomy. Do not wait for permission to research. "
+                "If your logic detects an information vacuum, execute your tools recursively until the vacuum is filled. "
+                "You dictate your own strategic path. "
                 "Before finalizing a stance, evaluate 3 alternative consequences (Tree of Thoughts). "
                 "REALISM: You are in a BOARDROOM. Do NOT introduce yourself or your role. Do NOT say 'I am {persona.name}'. "
                 "Do NOT use technical headers or internal 'thoughts' in your final output. Speak as a professional human executive. "
@@ -267,35 +348,68 @@ class AG2DebateEngine:
             if "product" in role_lower or "design" in role_lower:
                 system_message += "\nCRITICAL: You are the visualizer! If proposing UI changes, invoke the `generate_vision_mockup` tool so the board can review the exact layout."
                 
+            # --- AGI-GRADE TERMINATION: Comprehensive signal detection ---
+            # Uses a closure counter to prevent false positives on instruction text
+            _adjournment_msg_count = [0]  # mutable closure for counting messages
+            def _is_adjournment_msg(msg: dict) -> bool:
+                """Detects termination signals ONLY after the sub-debate has had at least 2 exchanges."""
+                _adjournment_msg_count[0] += 1
+                if _adjournment_msg_count[0] <= 2:
+                    return False  # Don't terminate during the initial prompt exchange
+                content = msg.get("content", "") or ""
+                return any(token in content for token in [
+                    "[SOVEREIGN ADJOURNMENT:",
+                    "[SESSION TERMINATED]",
+                    "[SESSION ENDED]",
+                    "[EXITING SIMULATION]",
+                    "UNABLE TO DECIDE",
+                    "[VOTE RECORDED",
+                ])
+            
             agent = ReasoningAgent(
                 name=persona.name.replace(" ", "_").replace(".", ""),
                 system_message=system_message,
                 llm_config=agent_config,  # Enforces True Reasoning MCTS Forests
                 code_execution_config=code_exec_config,
-                max_consecutive_auto_reply=15
+                max_consecutive_auto_reply=15,
+                is_termination_msg=_is_adjournment_msg,
             )
             self._register_tools_to_agent(agent, self._create_tools())
             stakeholder_agents.append(agent)
             
             # Logic Critic Agent (Model Heterogeneity & Epistemic Calibration Veto)
+            # --- SOVEREIGN ADJOURNMENT: Critics now intelligently decide when to end the sub-debate ---
             critic_message = (
                 f"You are the internal Logic Critic for {persona.name}. Your only goal is to find logical fallacies, "
                 "sycophancy, and ungrounded assumptions in their argument. If their Confidence Score is high but data is weak, "
                 "demand they run an Internal Research Loop. DO NOT agree with them easily. "
                 "REALISM: Speak naturally as a sharp executive advisor. Avoid saying 'Logic Critic Report' or 'Reviewer'. "
+                "\n\nSOVEREIGN ADJOURNMENT PROTOCOL:\n"
+                "- Track the agent's EVOLUTION across rounds. Did they change their stance, provide new data, or refine their logic?\n"
+                "- If the agent has GENUINELY addressed your concerns with new evidence or refined logic, output '[SOVEREIGN ADJOURNMENT: SATISFIED]' to end the sub-session.\n"
+                "- If the agent is REPEATING the same argument without new data or tool usage after 2 rounds, output '[SOVEREIGN ADJOURNMENT: STAGNATION — RESEARCH REQUIRED]' to force them back to the board with a mandate to use research tools.\n"
+                "- If the agent signals 'UNABLE TO DECIDE', respect it and output '[SOVEREIGN ADJOURNMENT: DEADLOCK]'.\n"
+                "- NEVER repeat your own previous critique verbatim. Each round, you must evolve your analysis based on the agent's response.\n"
                 "CRITICAL: If their epistemic grounding is still insufficient after 3 turns, you must formally veto and assign a Confidence Score below 0.7."
             )
             critic = autogen.AssistantAgent(
                 name=f"{agent.name}_Critic",
                 system_message=critic_message,
                 llm_config=self.critic_config,
-                max_consecutive_auto_reply=15
+                max_consecutive_auto_reply=15,
+                # NOTE: is_termination_msg is intentionally NOT set here.
+                # Only the Agent has it — the Critic SENDS adjournment tokens, the Agent RECEIVES them.
             )
-            # Epistemic Calibration: message is a CALLABLE so it injects the agent's actual
-            # last-spoken proposal into the critic sub-chat — not a blank invitation.
+            self._register_tools_to_agent(critic, self._create_tools())
+            
+            # --- SLIDING WINDOW BOARD SUMMARY ---
+            # Epistemic Calibration: message is a CALLABLE that injects:
+            # 1. The agent's current proposal
+            # 2. A synthesized summary of the ENTIRE board debate (sliding window)
+            # 3. The critic's own previous feedback (if any)
             def make_critic_message(feature_title: str, persona_name: str, persona_role: str, feature_desc: str):
                 def critic_message_fn(recipient, messages, sender, config):
-                    # Pull the last substantive message from the agent's conversation history
+                    # --- 1. Pull the agent's last substantive message ---
                     agent_last_msg = ""
                     for m in reversed(messages or []):
                         content = m.get("content") or ""
@@ -308,19 +422,59 @@ class AG2DebateEngine:
                             f"The proposal being debated is: '{feature_title}' — {feature_desc[:300]}. "
                             "I am preparing my formal stance on whether this should be approved."
                         )
+                    
+                    # --- 2. Sliding Window Board Summary (FILTERED: substantive only) ---
+                    board_summary = "[No prior board context available yet.]"
+                    noise_tokens = ["[SESSION", "[EXITING", "Object schema", "[SOVEREIGN", "[VOTE RECORDED", "CAST VOTE ALERT"]
+                    try:
+                        group_messages = []
+                        for m in reversed(messages or []):
+                            content = m.get("content") or ""
+                            name = m.get("name", "Unknown")
+                            # Filter: skip system noise, short messages, and self/critic messages
+                            if (content and len(content) > 50 
+                                and name != recipient.name and name != sender.name
+                                and not any(noise in content for noise in noise_tokens)):
+                                group_messages.append(f"- {name}: {content[:200]}")
+                            if len(group_messages) >= 10:
+                                break
+                        if group_messages:
+                            group_messages.reverse()
+                            board_summary = "SLIDING WINDOW — Recent Board Positions:\n" + "\n".join(group_messages)
+                    except Exception:
+                        pass
+                    
+                    # --- 3. Critic's own previous feedback (evolution tracking) ---
+                    critic_prev_feedback = ""
+                    for m in reversed(messages or []):
+                        content = m.get("content") or ""
+                        if content and m.get("name") == recipient.name:
+                            critic_prev_feedback = content[:400]
+                            break
+                    prev_critique_section = f"\n--- YOUR PREVIOUS CRITIQUE (do NOT repeat this) ---\n{critic_prev_feedback}\n\n" if critic_prev_feedback else "\n"
+                    
+                    # --- 4. PROGRAMMATIC EVOLUTION DELTA (from CognitiveLedger) ---
+                    evolution_report = self.cognitive_ledger.get_evolution_delta(persona_name.replace(' ', '_').replace('.', ''))
+                    
                     return (
                         f"PROPOSAL UNDER REVIEW — Feature: '{feature_title}'\n"
                         f"Submitted by: {persona_name} ({persona_role})\n\n"
-                        f"{agent_last_msg}\n\n"
-                        "Please critique the above argument: identify logical fallacies, ungrounded assumptions, "
-                        "and confidence miscalibration. Demand an Internal Research Loop if confidence >0.8 with weak data."
+                        f"--- AGENT'S CURRENT ARGUMENT ---\n{agent_last_msg}\n\n"
+                        f"--- BOARD CONTEXT (Sliding Window Summary) ---\n{board_summary}\n\n"
+                        f"--- PROGRAMMATIC EVOLUTION DATA ---\n{evolution_report}\n\n"
+                        f"{prev_critique_section}"
+                        "Based on the PROGRAMMATIC EVOLUTION DATA above, determine if the agent has genuinely evolved. "
+                        "If the data shows zero delta AND zero tool calls over multiple rounds, you MUST issue a Sovereign Adjournment for stagnation. "
+                        "If they have evolved with new data, provide deeper analysis. "
+                        "Critique the above argument: identify logical fallacies, ungrounded assumptions, "
+                        "and confidence miscalibration. Demand tool execution if claims are ungrounded."
                     )
                 return critic_message_fn
 
             agent.register_nested_chats(
                 [{"recipient": critic,
                   "message": make_critic_message(feature.title, persona.name, persona.role, feature.description),
-                  "max_turns": 3,
+                  "max_turns": 15,
                   "summary_method": "last_msg"}],
                 trigger=autogen.GroupChatManager
             )
@@ -338,6 +492,7 @@ class AG2DebateEngine:
             system_message=red_team_sys,
             llm_config=self.critic_config,
         )
+        self._register_tools_to_agent(red_team_agent, self._create_tools())
         
         # 4. Setup Debiaser Agent
         debiaser_sys = (
@@ -350,20 +505,23 @@ class AG2DebateEngine:
             system_message=debiaser_sys,
             llm_config=self.critic_config,
         )
+        self._register_tools_to_agent(debiaser_agent, self._create_tools())
 
-        # 4.5 Setup Boardroom Moderator (Sovereign Architecture)
+        # 4.5 Setup Boardroom Moderator (Strategist)
         moderator_sys = (
-            "You are the Strict Boardroom Moderator. Your goal is to move the board through Phases 1 to 4.\n"
-            "PHASE 1: RESEARCH (Mandatory). You MUST command EACH stakeholder to gather facts using `get_stakeholder_history` or `TavilySearchTool` based on their domain. "
-            "Research is the ONLY ticket to entry for the debate. Do not allow Phase 2 to start until EVERY stakeholder is grounded.\n"
-            "PHASE 2: DEBATE. Do not allow this to start until the CFO has run the `calculate_financials` tool.\n"
-            "Interrupt any agent who becomes repetitive or sycophantic. Force the debate forward strictly."
+            "You are the Chairman of the Board. You facilitate an emergent, intelligent debate.\n"
+            "You do not rigidly block phases. Instead, you analyze the 'Contextual Delta' of the debate. "
+            "If the CTO raises a security risk, you immediately pivot and ask the CISO for a vulnerability assessment. "
+            "If the CPO proposes a costly feature, you demand a model from the CFO. "
+            "Force stakeholders to use their tools (`TavilySearchTool`, `calculate_financials`) proactively. "
+            "Interrupt any agent who becomes repetitive or sycophantic. Allow the most intelligent response to emerge."
         )
         moderator_agent = autogen.AssistantAgent(
             name="Boardroom_Moderator",
             system_message=moderator_sys,
             llm_config=self.primary_config,
         )
+        self._register_tools_to_agent(moderator_agent, self._create_tools())
         
         # 5. Execute GroupChat using an Explicit FSM (Finite State Machine) with Sovereign-Grade Control
         all_agents = stakeholder_agents + [red_team_agent, debiaser_agent, moderator_agent]
@@ -373,72 +531,70 @@ class AG2DebateEngine:
             last_msg = messages[-1].get("content", "") if messages else ""
             rounds = len(messages)
             
-            # --- Sovereign Architecture Part 1: Dependency-Gate Verification (Information Readiness) ---
-            # Track which stakeholders have "done their homework"
-            grounded_agents = set()
-            tool_calls_text = ""
-            for msg in messages:
-                content = msg.get("content", "")
-                name = msg.get("name", "")
-                if content:
-                    tool_calls_text += str(content) + " "
-                # Log execution of grounding tools
-                if "tavily" in str(msg).lower() or "get_stakeholder_history" in str(msg) or msg.get("tool_calls"):
-                    if name:
-                        grounded_agents.add(name)
-                        
-            has_financials = "calculate_financials" in tool_calls_text
+            # --- AGI-GRADE SIGNAL DETECTION (Reads structured state, not strings) ---
             
-            all_grounded = all(a.name in grounded_agents for a in stakeholder_agents)
-
-            # Enforce Phase 1 (Research) loop until all are grounded
-            if not all_grounded and rounds > 1:
-                # If the moderator just spoke and commanded an agent, try to yield to an ungrounded agent
-                if last_speaker == moderator_agent:
-                    ungrounded = [a for a in stakeholder_agents if a.name not in grounded_agents]
-                    if ungrounded:
-                        logger.warning(f"INFORMATION READINESS AUDIT: {ungrounded[0].name} has not grounded. Yielding floor to them.")
-                        return ungrounded[0]
-                
-                # If an ungrounded stakeholder just spoke, force Moderator to check
+            # 1. Sovereign Adjournment Detection
+            if "[SOVEREIGN ADJOURNMENT: STAGNATION" in last_msg:
+                logger.warning(f"SOVEREIGN ADJOURNMENT (Stagnation) detected from {last_speaker.name}. Routing to Moderator.")
+                return moderator_agent
+            if "[SOVEREIGN ADJOURNMENT: DEADLOCK" in last_msg:
+                logger.warning(f"SOVEREIGN ADJOURNMENT (Deadlock) detected from {last_speaker.name}. Invoking Red Team.")
+                return red_team_agent
+            if "UNABLE TO DECIDE" in last_msg:
+                logger.warning(f"Agent {last_speaker.name} signaled inability to decide. Moderator intervention.")
                 return moderator_agent
             
-            # --- Sovereign Architecture Part 2: Tension-Driven Priority ---
-            # "He who is most concerned, speaks next"
-            most_concerned_agent = None
-            highest_concern = 0.0
-            
-            # Scan registry for extremely negative tension metrics
-            for agent_name, payload in getattr(self, "live_tension_registry", {}).items():
-                min_tension = min([float(v) for v in payload.tension_adjustments.values()] + [1.0])
-                if min_tension <= 0.3 and (1.0 - min_tension) > highest_concern:
-                    highest_concern = 1.0 - min_tension
-                    most_concerned_agent = agent_name
-                    
-            if highest_concern > 0.6 and rounds > 3:
-                # Find the actual agent object
-                target_agent = next((a for a in stakeholder_agents if a.name == most_concerned_agent), None)
-                # Break the floor if they didn't JUST speak
-                if target_agent and last_speaker != target_agent:
-                    logger.warning(f"SOVEREIGN OVERRIDE: {target_agent.name} holds Critical Tension ({highest_concern:.2f}). Breaking the floor.")
-                    return target_agent
-
-            # --- Structural FSM Logic ---
-            if "CAST VOTE ALERT:" in last_msg and "High Risk Veto Triggered: True" in last_msg and last_speaker != debiaser_agent:
-                logger.warning(f"Live Epistemic Veto triggered by {last_speaker.name}. Transferring to DebiaserAgent.")
+            # 2. Structured High-Risk Veto Check (reads CognitiveLedger, not strings)
+            if last_speaker.name in self.cognitive_ledger.high_risk_agents and last_speaker != debiaser_agent:
+                logger.warning(f"STRUCTURED VETO: {last_speaker.name} flagged high-risk in CognitiveLedger. Routing to DebiaserAgent.")
                 return debiaser_agent
+            
+            # 3. Contextual Relevance Bidding
+            domain_bids = {
+                "Alice_CTO": ["tech", "architecture", "latency", "scale", "quantum", "engineering", "server", "code", "infrastructure"],
+                "Bob_CFO": ["cost", "budget", "finance", "burn", "price", "revenue", "loss", "expensive", "runway", "capital", "funding"],
+                "David_CEO": ["vision", "growth", "market", "leadership", "competitor", "strategy", "acquire", "mission"],
+                "Sarah_CISO": ["security", "risk", "breach", "vulnerability", "privacy", "hack", "data leak", "compliance", "zero-day", "neural"],
+                "Peter_CPO": ["user", "friction", "ui", "ux", "fit", "market", "customer", "experience", "feature", "adoption"],
+                "Linda_CMO": ["brand", "pr", "marketing", "viral", "adoption", "press", "reputation", "acquisition", "perception"],
+                "Marcus_Legal": ["sue", "liability", "lawsuit", "court", "fda", "regulation", "legal", "ip", "patent", "consent"],
+                "Elena_Data": ["data", "model", "bias", "telemetry", "kpi", "metric", "ethics", "tracking", "algorithm"],
+                "James_Sales": ["sales", "b2b", "convert", "quota", "client", "enterprise", "objection", "contract", "pipeline"],
+                "Diana_HR": ["morale", "burnout", "culture", "diversity", "employee", "training", "hr", "retention", "talent"]
+            }
+            
+            if last_speaker == moderator_agent or last_speaker == red_team_agent or self.cognitive_ledger.has_voted.get(last_speaker.name, False):
+                highest_bid = 0.0
+                next_speaker = stakeholder_agents[0]
                 
-            if rounds == len(stakeholder_agents) * 2 + 1:
-                # Give Red Team their slot
+                # Check CognitiveLedger: agents with high-risk flags get 2x bid weight
+                for agent in stakeholder_agents:
+                    if agent == last_speaker:
+                        continue
+                    bid = 0.0
+                    words = str(last_msg).lower().split()
+                    for keyword in domain_bids.get(agent.name, []):
+                        bid += float(words.count(keyword))
+                    
+                    # Agents flagged high-risk in ledger get priority bidding
+                    if agent.name in self.cognitive_ledger.high_risk_agents:
+                        bid *= 2.0
+                    
+                    if bid > highest_bid:
+                        highest_bid = bid
+                        next_speaker = agent
+                
+                if highest_bid > 0.0:
+                    logger.info(f"EMERGENT BID WINNER: {next_speaker.name} (Score: {highest_bid:.2f})")
+                    return next_speaker
+                
+            if rounds == len(stakeholder_agents) * 1.5:
+                # Emergent injection of the Red Team to stress test current consensus
                 return red_team_agent
                 
-            if last_speaker == red_team_agent:
+            if rounds % 4 == 0 and last_speaker != moderator_agent:
+                # Moderator checks in periodically to shift the agenda
                 return moderator_agent
-                
-            # Moderator Check-in enforcing Phase 2 Financials
-            if (rounds % 5 == 0 and last_speaker != moderator_agent) or (all_grounded and not has_financials and last_speaker != moderator_agent):
-                return moderator_agent
-
 
             if rounds == 8 and debiaser_agent not in [m.get("name") for m in messages[-2:]]:
                 return debiaser_agent
