@@ -156,10 +156,15 @@ class AG2DebateEngine:
             self.live_tension_registry[agent_name] = payload
             return f"\nCAST VOTE ALERT:\n{agent_name} has officially registered a Confidence of {payload.confidence}.\nHigh Risk Veto Triggered: {payload.is_high_risk}\nMathematical Alignments: {payload.tension_adjustments}\n"
 
+        def calculate_financials(burn_rate: float, runway_months: int) -> str:
+            """Strict Dependency Tool: Calculate financial impact before permitting Phase 2."""
+            return f"Financial Output: Run-rate of {burn_rate} drains runway to {runway_months} months. Risk detected."
+
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
         tools["get_stakeholder_history"] = get_stakeholder_history
         tools["generate_vision_mockup"] = generate_vision_mockup
         tools["submit_tension_vector"] = submit_tension_vector
+        tools["calculate_financials"] = calculate_financials
         return tools
         
     def _register_tools_to_agent(self, agent: autogen.ConversableAgent, tools: Dict[str, Any]):
@@ -345,33 +350,100 @@ class AG2DebateEngine:
             system_message=debiaser_sys,
             llm_config=self.critic_config,
         )
+
+        # 4.5 Setup Boardroom Moderator (Sovereign Architecture)
+        moderator_sys = (
+            "You are the Strict Boardroom Moderator. Your goal is to move the board through Phases 1 to 4.\n"
+            "PHASE 1: RESEARCH (Mandatory). You MUST command EACH stakeholder to gather facts using `get_stakeholder_history` or `TavilySearchTool` based on their domain. "
+            "Research is the ONLY ticket to entry for the debate. Do not allow Phase 2 to start until EVERY stakeholder is grounded.\n"
+            "PHASE 2: DEBATE. Do not allow this to start until the CFO has run the `calculate_financials` tool.\n"
+            "Interrupt any agent who becomes repetitive or sycophantic. Force the debate forward strictly."
+        )
+        moderator_agent = autogen.AssistantAgent(
+            name="Boardroom_Moderator",
+            system_message=moderator_sys,
+            llm_config=self.primary_config,
+        )
         
-        # 5. Execute GroupChat using an Explicit FSM (Finite State Machine)
-        all_agents = stakeholder_agents + [red_team_agent, debiaser_agent]
+        # 5. Execute GroupChat using an Explicit FSM (Finite State Machine) with Sovereign-Grade Control
+        all_agents = stakeholder_agents + [red_team_agent, debiaser_agent, moderator_agent]
         
         def fsm_speaker_selector(last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
             messages = groupchat.messages
             last_msg = messages[-1].get("content", "") if messages else ""
             rounds = len(messages)
             
-            # The "Live Logic Gap" Fix: Intercept Epistemic Veto Post-Mortems immediately
+            # --- Sovereign Architecture Part 1: Dependency-Gate Verification (Information Readiness) ---
+            # Track which stakeholders have "done their homework"
+            grounded_agents = set()
+            tool_calls_text = ""
+            for msg in messages:
+                content = msg.get("content", "")
+                name = msg.get("name", "")
+                if content:
+                    tool_calls_text += str(content) + " "
+                # Log execution of grounding tools
+                if "tavily" in str(msg).lower() or "get_stakeholder_history" in str(msg) or msg.get("tool_calls"):
+                    if name:
+                        grounded_agents.add(name)
+                        
+            has_financials = "calculate_financials" in tool_calls_text
+            
+            all_grounded = all(a.name in grounded_agents for a in stakeholder_agents)
+
+            # Enforce Phase 1 (Research) loop until all are grounded
+            if not all_grounded and rounds > 1:
+                # If the moderator just spoke and commanded an agent, try to yield to an ungrounded agent
+                if last_speaker == moderator_agent:
+                    ungrounded = [a for a in stakeholder_agents if a.name not in grounded_agents]
+                    if ungrounded:
+                        logger.warning(f"INFORMATION READINESS AUDIT: {ungrounded[0].name} has not grounded. Yielding floor to them.")
+                        return ungrounded[0]
+                
+                # If an ungrounded stakeholder just spoke, force Moderator to check
+                return moderator_agent
+            
+            # --- Sovereign Architecture Part 2: Tension-Driven Priority ---
+            # "He who is most concerned, speaks next"
+            most_concerned_agent = None
+            highest_concern = 0.0
+            
+            # Scan registry for extremely negative tension metrics
+            for agent_name, payload in getattr(self, "live_tension_registry", {}).items():
+                min_tension = min([float(v) for v in payload.tension_adjustments.values()] + [1.0])
+                if min_tension <= 0.3 and (1.0 - min_tension) > highest_concern:
+                    highest_concern = 1.0 - min_tension
+                    most_concerned_agent = agent_name
+                    
+            if highest_concern > 0.6 and rounds > 3:
+                # Find the actual agent object
+                target_agent = next((a for a in stakeholder_agents if a.name == most_concerned_agent), None)
+                # Break the floor if they didn't JUST speak
+                if target_agent and last_speaker != target_agent:
+                    logger.warning(f"SOVEREIGN OVERRIDE: {target_agent.name} holds Critical Tension ({highest_concern:.2f}). Breaking the floor.")
+                    return target_agent
+
+            # --- Structural FSM Logic ---
             if "CAST VOTE ALERT:" in last_msg and "High Risk Veto Triggered: True" in last_msg and last_speaker != debiaser_agent:
-                logger.warning(f"Live Epistemic Veto triggered by {last_speaker.name}. Transferring to DebiaserAgent for immediate reflection.")
+                logger.warning(f"Live Epistemic Veto triggered by {last_speaker.name}. Transferring to DebiaserAgent.")
                 return debiaser_agent
                 
-            # Ghost Participant Fix: Force Phase 3 (Adversarial) into the timeline
-            if rounds == len(stakeholder_agents) + 1:
+            if rounds == len(stakeholder_agents) * 2 + 1:
+                # Give Red Team their slot
                 return red_team_agent
                 
-            # Ghost Participant Fix: Force Phase 4 (Mitigation Loop) back to the leader
             if last_speaker == red_team_agent:
-                return stakeholder_agents[0]
+                return moderator_agent
                 
-            # Pre-Mortem Bias Audit Injection
+            # Moderator Check-in enforcing Phase 2 Financials
+            if (rounds % 5 == 0 and last_speaker != moderator_agent) or (all_grounded and not has_financials and last_speaker != moderator_agent):
+                return moderator_agent
+
+
             if rounds == 8 and debiaser_agent not in [m.get("name") for m in messages[-2:]]:
                 return debiaser_agent
-                
-            # Standard Round Robin through stakeholders
+
+            # Round Robin Fallback
             if last_speaker in stakeholder_agents:
                 idx = stakeholder_agents.index(last_speaker)
                 if idx + 1 < len(stakeholder_agents):
