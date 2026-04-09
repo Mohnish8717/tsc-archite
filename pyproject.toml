@@ -51,6 +51,10 @@ dependencies = [
     "sqlalchemy>=2.0",
     "aiosqlite>=0.20",
     "asyncpg>=0.29",
+
+    # Multi-Agent Debate
+    "ag2>=0.2",
+    "tavily-python>=0.3",
 ]
 
 [project.optional-dependencies]

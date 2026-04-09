@@ -84,6 +84,8 @@ class ConsensusResult(BaseModel):
 
     mitigations: list[str] = Field(default_factory=list)
     next_steps: list[str] = Field(default_factory=list)
+    tension_shifts: dict[str, float] = Field(default_factory=dict)
+    overall_summary: str = ""
 
     debate_rounds: list[DebateRound] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.utcnow)

@@ -15,6 +15,7 @@ from tsc.layers.layer3_personas import PersonaGenerator
 from tsc.layers.layer4_gates import GateExecutor
 from tsc.layers.layer5_refinement import RefinementEngine
 from tsc.layers.layer6_debate import DebateEngine
+from tsc.layers.layer6_ag2_debate import AG2DebateEngine
 from tsc.layers.layer7_spec import SpecGenerator
 from tsc.layers.layer8_handoff import HandoffGenerator
 from tsc.llm.base import LLMClient
@@ -139,7 +140,15 @@ class TSCPipeline:
 
         # Layer 6: Debate
         self._emit_progress(6, "Stakeholder Debate", "running")
-        debate = DebateEngine(self._llm)
+        
+        import os
+        if os.getenv("DEBATE_ENGINE_TYPE", "ag2").lower() == "ag2":
+            logger.info("Using deep-thinking AG2 Debate Engine")
+            debate = AG2DebateEngine(self._llm)
+        else:
+            logger.info("Using legacy Debate Engine")
+            debate = DebateEngine(self._llm)
+            
         consensus = await debate.process(
             feature, company, graph, personas, gates_summary
         )
