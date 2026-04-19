@@ -162,6 +162,8 @@ class FinalPersona(BaseModel):
     profile_confidence: float = 0.0
     grounding_quality: float = 1.0
     persona_type: str = "INTERNAL"
+    domain_expertise: list[str] = Field(default_factory=list)
+    role_short: str = ""
 
     # OASIS-specific fields
     belief_vector: Optional[Any] = None  # OpinionVector

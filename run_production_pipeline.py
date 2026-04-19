@@ -8,10 +8,11 @@ from pathlib import Path
 PROJECT_ROOT = Path("/Users/mohnish/Downloads/tsc architecture")
 sys.path.append(str(PROJECT_ROOT))
 
-# Configure Environment for Groq (Provided by User)
-os.environ["TSC_LLM_PROVIDER"] = "groq"
-os.environ["GROQ_API_KEY"] = os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY_HERE")
-os.environ["TSC_LLM_MODEL"] = "llama-3.1-8b-instant"
+# Configure Environment for Google Gemini
+import dotenv
+dotenv.load_dotenv(PROJECT_ROOT / ".env")
+os.environ["TSC_LLM_PROVIDER"] = "google"
+os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it"
 
 # macOS Stability Fixes
 # os.environ["TSC_MOCK_EMBEDDINGS"] = "1"

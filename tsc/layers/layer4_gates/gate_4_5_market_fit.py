@@ -40,7 +40,7 @@ class MarketFitGate(BaseGate):
         self, 
         llm_client: Any,
         graph_store: Optional[Any] = None,
-        mode: MarketFitMode = MarketFitMode.HYBRID_DUAL,
+        mode: MarketFitMode = MarketFitMode.OASIS_ONLY,
         num_agents: int = 150, # Optimized for actual OASIS runs
         enable_parallel: bool = True,
         simulation_name: str = "market_fit_eval"
