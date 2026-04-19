@@ -1299,23 +1299,41 @@ class AG2DebateEngine:
         except Exception as e:
             logger.warning(f"Native TransformMessages missing or failed to inject: {e}")
         
-        # V25-Fix3: Content-level thought-tag stripping via process_message_before_send hook
-        # This strips <thought> tags BEFORE the message enters the GroupChat, not just from history.
+        # V26-Fix2: Content-level thought-tag handling via process_message_before_send hook
+        # V26: Instead of DISCARDING thought-tag content, EXTRACT it. When the LLM wraps
+        # its entire response in <thought> tags with nothing outside, the old logic produced
+        # empty messages. Now we strip the TAGS but preserve the CONTENT inside them.
         import re as _re_hook
         def _strip_thoughts_before_send(sender, message, recipient, silent):
-            """V25: Strip <thought> tags from message content BEFORE it enters GroupChat."""
+            """V26: Extract content from <thought> tags instead of discarding it."""
+            def _clean_thought_tags(text):
+                if not text or not isinstance(text, str):
+                    return text
+                if '<thought>' not in text.lower():
+                    return text
+                # Step 1: Extract text between <thought> tags (the reasoning content)
+                thought_content = []
+                for match in _re_hook.finditer(r'<thought>(.*?)</thought>', text, flags=_re_hook.IGNORECASE | _re_hook.DOTALL):
+                    thought_content.append(match.group(1).strip())
+                # Step 2: Remove the <thought>...</thought> blocks from the original text
+                outside = _re_hook.sub(r'<thought>.*?</thought>', '', text, flags=_re_hook.IGNORECASE | _re_hook.DOTALL)
+                outside = _re_hook.sub(r'\n{3,}', '\n\n', outside).strip()
+                # Step 3: If there's content outside the tags, use that (clean transcript)
+                if outside and len(outside) > 20:
+                    return outside
+                # Step 4: If ALL content was inside tags, use the extracted thought content
+                # This prevents empty messages caused by over-aggressive stripping
+                if thought_content:
+                    return '\n'.join(thought_content)
+                return text  # Ultimate fallback: return original
+            
             if isinstance(message, str):
-                if '<thought>' in message.lower():
-                    cleaned = _re_hook.sub(r'<thought>.*?</thought>', '', message, flags=_re_hook.IGNORECASE | _re_hook.DOTALL)
-                    cleaned = _re_hook.sub(r'\n{3,}', '\n\n', cleaned).strip()
-                    return cleaned if cleaned else message
-                return message
+                return _clean_thought_tags(message) or message
             elif isinstance(message, dict) and 'content' in message:
                 content = message.get('content', '')
-                if isinstance(content, str) and '<thought>' in content.lower():
-                    cleaned = _re_hook.sub(r'<thought>.*?</thought>', '', content, flags=_re_hook.IGNORECASE | _re_hook.DOTALL)
-                    cleaned = _re_hook.sub(r'\n{3,}', '\n\n', cleaned).strip()
-                    message['content'] = cleaned if cleaned else content
+                cleaned = _clean_thought_tags(content)
+                if cleaned:
+                    message['content'] = cleaned
                 return message
             return message
         
@@ -1324,7 +1342,7 @@ class AG2DebateEngine:
                 ag.register_hook("process_message_before_send", _strip_thoughts_before_send)
             except Exception:
                 pass  # Some agent types may not support hooks
-        logger.info("V25-Fix3: Content-level ThoughtTagStripper hook registered on all agents.")
+        logger.info("V26-Fix2: Content-preserving ThoughtTag handler registered on all agents.")
             
         
         self.debate_fsm = DebateStateMachine(agent_count=len(stakeholder_agents))
@@ -1361,7 +1379,7 @@ class AG2DebateEngine:
         self.authority_router = LiveAuthorityRouter(stakeholder_agents)
         
         # V24-Fix6: Turn-based adjournment gate
-        ADJOURNMENT_TURN_LIMIT = 30  # V25: Increased from 20→30 for 10-agent full boardroom
+        ADJOURNMENT_TURN_LIMIT = 40  # V26: Increased from 30→40 for full 10-agent deliberation
         _main_turn_counter = [0]  # Mutable closure for tracking turns
         _adjournment_forced = [False]  # Flag to prevent double-adjournment
         
@@ -1404,7 +1422,7 @@ class AG2DebateEngine:
             # At ADJOURNMENT_TURN_LIMIT, enter a 3-turn "Last Call" where the Moderator
             # announces approaching adjournment and remaining agents get a final turn.
             # At ADJOURNMENT_TURN_LIMIT + 3, force-vote and deliver verdict.
-            LAST_CALL_WINDOW = 3
+            LAST_CALL_WINDOW = 5  # V26: 5-turn window for remaining agents
             if _main_turn_counter[0] >= ADJOURNMENT_TURN_LIMIT and not _adjournment_forced[0]:
                 turns_past_limit = _main_turn_counter[0] - ADJOURNMENT_TURN_LIMIT
                 
@@ -1441,19 +1459,53 @@ class AG2DebateEngine:
                     _adjournment_forced[0] = True
                     logger.info(f"V25-Fix4: ADJOURNMENT GATE TRIGGERED at turn {_main_turn_counter[0]}")
                     
-                    # Force-vote for any agent who hasn't voted yet
+                    # Force-vote for any agent who hasn't voted yet — use INFORMED votes
                     for fa in [a for a in groupchat.agents if a in stakeholder_agents]:
                         if not self.cognitive_ledger.has_voted.get(fa.name, False):
-                            logger.info(f"V25-Fix4: Force-voting for unvoted agent: {fa.name}")
-                            fallback_payload = TensionPayload(
-                                adjustments={"General_Assessment": 0.5},
-                                confidence=0.4,
-                                is_high_risk=False,
-                                is_low_information=True,
-                                tool_call_hashes=[]
-                            )
+                            logger.info(f"V26-Fix4: Generating informed force-vote for: {fa.name}")
+                            # V26-Fix4: Use LLM-informed vote instead of 0.50 heuristic fallback
+                            try:
+                                debate_text = "\n".join([
+                                    f"{m.get('name', '?')}: {str(m.get('content', ''))[:200]}"
+                                    for m in messages[-10:]  # Last 10 messages for context
+                                ])
+                                vote_prompt = (
+                                    f"You are {fa.name}. You just listened to a boardroom debate about the feature.\n\n"
+                                    f"DEBATE SUMMARY:\n{debate_text[:1200]}\n\n"
+                                    f"Provide your FINAL vote in this EXACT JSON format:\n"
+                                    f'{{"dimension": "<your primary concern>", "score": <0.1 to 0.9>, '
+                                    f'"confidence": <0.3 to 0.9>, "is_high_risk": <true/false>, '
+                                    f'"reasoning": "<one sentence>"}}'
+                                )
+                                reply = fa.generate_reply(messages=[{"role": "user", "content": vote_prompt}])
+                                if isinstance(reply, dict):
+                                    reply = reply.get("content", "")
+                                reply_text = AG2DebateEngine._strip_thought_tags(str(reply))
+                                import json as _fv_json
+                                json_match = _re_hook.search(r'\{[^{}]+\}', reply_text)
+                                if json_match:
+                                    vote_data = _fv_json.loads(json_match.group())
+                                    fallback_payload = TensionPayload(
+                                        adjustments={str(vote_data.get('dimension', 'General_Assessment')): max(0.1, min(0.9, float(vote_data.get('score', 0.5))))},
+                                        confidence=max(0.3, min(0.9, float(vote_data.get('confidence', 0.5)))),
+                                        is_high_risk=bool(vote_data.get('is_high_risk', False)),
+                                        is_low_information=False,
+                                        tool_call_hashes=[]
+                                    )
+                                    logger.info(f"V26-Fix4: INFORMED force-vote for {fa.name}: {vote_data.get('dimension')}={vote_data.get('score')}, conf={vote_data.get('confidence')}")
+                                else:
+                                    raise ValueError("No JSON found in reply")
+                            except Exception as e:
+                                logger.warning(f"V26-Fix4: Informed force-vote failed for {fa.name}: {e}. Using heuristic.")
+                                fallback_payload = TensionPayload(
+                                    adjustments={"General_Assessment": 0.5},
+                                    confidence=0.4,
+                                    is_high_risk=False,
+                                    is_low_information=True,
+                                    tool_call_hashes=[]
+                                )
                             self.live_tension_registry[fa.name] = fallback_payload
-                            self.cognitive_ledger.record_confidence(fa.name, 0.4)
+                            self.cognitive_ledger.record_confidence(fa.name, fallback_payload.confidence)
                             self.cognitive_ledger.mark_voted(fa.name)
                     
                     # Inject final adjournment mandate
@@ -1490,6 +1542,29 @@ class AG2DebateEngine:
                         import re as _re_addr
                         if _re_addr.search(rf'\b{_re_addr.escape(agent_first)}\b', last_msg, _re_addr.IGNORECASE):
                             logger.info(f"V25-Fix1: Direct-address detected for {agent.name} (matched '{agent_first}')")
+                            return agent
+            
+            # V26-Fix1: Mandatory Executive Rotation — force silent stakeholders to speak
+            # Check every 3 turns; champions (CEO, CPO, Sales) get priority
+            ROTATION_INTERVAL = 3
+            if rounds > 2 and rounds % ROTATION_INTERVAL == 0 and not _adjournment_forced[0]:
+                # Build list of agents who haven't spoken recently
+                speaker_names_in_transcript = [m.get('name', '') for m in messages[-(ROTATION_INTERVAL * 3):]]
+                champion_roles = ['CEO', 'CPO', 'Sales']
+                
+                # First pass: silent champions
+                for agent in groupchat.agents:
+                    if agent in stakeholder_agents and agent != last_speaker:
+                        if agent.name not in speaker_names_in_transcript:
+                            if any(r in agent.name.upper() for r in champion_roles):
+                                logger.info(f"V26-Fix1: Mandatory rotation → champion {agent.name} (silent for {ROTATION_INTERVAL}+ turns)")
+                                return agent
+                
+                # Second pass: any silent stakeholder
+                for agent in groupchat.agents:
+                    if agent in stakeholder_agents and agent != last_speaker:
+                        if agent.name not in speaker_names_in_transcript:
+                            logger.info(f"V26-Fix1: Mandatory rotation → {agent.name} (silent for {ROTATION_INTERVAL}+ turns)")
                             return agent
                 
             state = self.debate_fsm.tick()
@@ -1568,6 +1643,16 @@ class AG2DebateEngine:
                         bid += 2.0
                     elif rel_score > 0.6:  # Deference: agent less likely to interrupt
                         bid -= 0.5
+                
+                # V26-Fix5: Champion Activation Priority
+                # When the last message contains attack language, champions get a +3.0 bid bonus
+                # to ensure they step in and defend the feature.
+                attack_keywords = ['risk', 'veto', 'reject', 'kill', 'liability', 'breach', 'threat',
+                                   'dangerous', 'impossible', 'fatal', 'failure', 'catastroph']
+                if any(kw in str(last_msg).lower() for kw in attack_keywords):
+                    if any(r in agent.name.upper() for r in ['CEO', 'CPO', 'Sales']):
+                        bid += 3.0
+                        logger.debug(f"V26-Fix5: Champion bid boost for {agent.name} (attack detected)")
                 
                 if bid > highest_bid:
                     highest_bid = bid
