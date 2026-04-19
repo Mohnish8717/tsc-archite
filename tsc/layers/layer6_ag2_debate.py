@@ -1298,6 +1298,33 @@ class AG2DebateEngine:
             logger.info("Token Sparsification Middleware activated: ThoughtTagStripper + Entity-preserving compression running.")
         except Exception as e:
             logger.warning(f"Native TransformMessages missing or failed to inject: {e}")
+        
+        # V25-Fix3: Content-level thought-tag stripping via process_message_before_send hook
+        # This strips <thought> tags BEFORE the message enters the GroupChat, not just from history.
+        import re as _re_hook
+        def _strip_thoughts_before_send(sender, message, recipient, silent):
+            """V25: Strip <thought> tags from message content BEFORE it enters GroupChat."""
+            if isinstance(message, str):
+                if '<thought>' in message.lower():
+                    cleaned = _re_hook.sub(r'<thought>.*?</thought>', '', message, flags=_re_hook.IGNORECASE | _re_hook.DOTALL)
+                    cleaned = _re_hook.sub(r'\n{3,}', '\n\n', cleaned).strip()
+                    return cleaned if cleaned else message
+                return message
+            elif isinstance(message, dict) and 'content' in message:
+                content = message.get('content', '')
+                if isinstance(content, str) and '<thought>' in content.lower():
+                    cleaned = _re_hook.sub(r'<thought>.*?</thought>', '', content, flags=_re_hook.IGNORECASE | _re_hook.DOTALL)
+                    cleaned = _re_hook.sub(r'\n{3,}', '\n\n', cleaned).strip()
+                    message['content'] = cleaned if cleaned else content
+                return message
+            return message
+        
+        for ag in all_agents:
+            try:
+                ag.register_hook("process_message_before_send", _strip_thoughts_before_send)
+            except Exception:
+                pass  # Some agent types may not support hooks
+        logger.info("V25-Fix3: Content-level ThoughtTagStripper hook registered on all agents.")
             
         
         self.debate_fsm = DebateStateMachine(agent_count=len(stakeholder_agents))
@@ -1334,7 +1361,7 @@ class AG2DebateEngine:
         self.authority_router = LiveAuthorityRouter(stakeholder_agents)
         
         # V24-Fix6: Turn-based adjournment gate
-        ADJOURNMENT_TURN_LIMIT = 20  # Hard ceiling on main GroupChat turns
+        ADJOURNMENT_TURN_LIMIT = 30  # V25: Increased from 20→30 for 10-agent full boardroom
         _main_turn_counter = [0]  # Mutable closure for tracking turns
         _adjournment_forced = [False]  # Flag to prevent double-adjournment
         
@@ -1373,41 +1400,76 @@ class AG2DebateEngine:
                 # Fire-and-forget: don't block speaker selection
                 _u22_bg_pool.submit(_async_synth_update, task_synthesizer, last_msg, self.cognitive_ledger)
             
-            # ── V24-Fix6: TURN-BASED ADJOURNMENT GATE ──
-            # When we reach the turn limit, force all unvoted focused agents to
-            # vote immediately, then hand off to moderator for final adjournment.
+            # ── V25-Fix4: GRACEFUL ADJOURNMENT with "Last Call" window ──
+            # At ADJOURNMENT_TURN_LIMIT, enter a 3-turn "Last Call" where the Moderator
+            # announces approaching adjournment and remaining agents get a final turn.
+            # At ADJOURNMENT_TURN_LIMIT + 3, force-vote and deliver verdict.
+            LAST_CALL_WINDOW = 3
             if _main_turn_counter[0] >= ADJOURNMENT_TURN_LIMIT and not _adjournment_forced[0]:
-                _adjournment_forced[0] = True
-                logger.info(f"V24-Fix6: ADJOURNMENT GATE TRIGGERED at turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}")
+                turns_past_limit = _main_turn_counter[0] - ADJOURNMENT_TURN_LIMIT
                 
-                # Force-vote for any focused agent who hasn't voted yet
-                focused_in_chat = [a for a in groupchat.agents if a in stakeholder_agents]
-                for fa in focused_in_chat:
-                    if not self.cognitive_ledger.has_voted.get(fa.name, False):
-                        logger.info(f"V24-Fix6: Force-voting for unvoted agent: {fa.name}")
-                        fallback_payload = TensionPayload(
-                            adjustments={"General_Assessment": 0.5},
-                            confidence=0.4,
-                            is_high_risk=False,
-                            is_low_information=True,
-                            tool_call_hashes=[]
-                        )
-                        self.live_tension_registry[fa.name] = fallback_payload
-                        self.cognitive_ledger.record_confidence(fa.name, 0.4)
-                        self.cognitive_ledger.mark_voted(fa.name)
+                if turns_past_limit == 0:
+                    # First trigger: Moderator announces Last Call
+                    logger.info(f"V25-Fix4: LAST CALL announced at turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}")
+                    moderator_agent.update_system_message(
+                        moderator_agent.system_message +
+                        "\n\n[LAST CALL] The deliberation is nearing its limit. "
+                        "Announce: 'The chair is calling LAST CALL. Each remaining executive has ONE final "
+                        "turn to state their position or vote before adjournment.' "
+                        "Directly call on any executive who has NOT yet spoken by name."
+                    )
+                    print(f"\n{'='*80}")
+                    print(f"⏱️  LAST CALL: Turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}. Final turns before adjournment.")
+                    print(f"{'='*80}")
+                    return moderator_agent
                 
-                # Inject adjournment command into moderator
-                moderator_agent.update_system_message(
-                    moderator_agent.system_message + 
-                    "\n\n[MANDATORY ADJOURNMENT] The board has reached its deliberation limit. "
-                    "You MUST now deliver the final summary and verdict. State: "
-                    "'[BOARDROOM ADJOURNED] The chair calls this session to a close.' "
-                    "Summarize the key positions and the board's recommendation."
-                )
-                print(f"\n{'='*80}")
-                print(f"⏱️  ADJOURNMENT GATE: Turn limit ({ADJOURNMENT_TURN_LIMIT}) reached. Forcing final verdict.")
-                print(f"{'='*80}")
-                return moderator_agent
+                elif turns_past_limit < LAST_CALL_WINDOW:
+                    # Last Call window: route to agents who haven't spoken yet
+                    silent_agents = [
+                        a for a in groupchat.agents
+                        if a in stakeholder_agents
+                        and a.name not in [m.get('name', '') for m in messages]
+                        and a != last_speaker
+                    ]
+                    if silent_agents:
+                        logger.info(f"V25-Fix4: Last Call routing to silent agent: {silent_agents[0].name}")
+                        return silent_agents[0]
+                    # All have spoken — fall through to normal routing for one more round
+                
+                else:
+                    # Hard adjournment: force-vote and close
+                    _adjournment_forced[0] = True
+                    logger.info(f"V25-Fix4: ADJOURNMENT GATE TRIGGERED at turn {_main_turn_counter[0]}")
+                    
+                    # Force-vote for any agent who hasn't voted yet
+                    for fa in [a for a in groupchat.agents if a in stakeholder_agents]:
+                        if not self.cognitive_ledger.has_voted.get(fa.name, False):
+                            logger.info(f"V25-Fix4: Force-voting for unvoted agent: {fa.name}")
+                            fallback_payload = TensionPayload(
+                                adjustments={"General_Assessment": 0.5},
+                                confidence=0.4,
+                                is_high_risk=False,
+                                is_low_information=True,
+                                tool_call_hashes=[]
+                            )
+                            self.live_tension_registry[fa.name] = fallback_payload
+                            self.cognitive_ledger.record_confidence(fa.name, 0.4)
+                            self.cognitive_ledger.mark_voted(fa.name)
+                    
+                    # Inject final adjournment mandate
+                    moderator_agent.update_system_message(
+                        moderator_agent.system_message +
+                        "\n\n[MANDATORY ADJOURNMENT] The board has reached its deliberation limit. "
+                        "You MUST now deliver the FINAL VERDICT. Structure your response as:\n"
+                        "1. Summary of key positions and tensions\n"
+                        "2. The board's recommendation (APPROVED / CONDITIONALLY_APPROVED / REJECTED)\n"
+                        "3. Specific conditions or mitigations if conditional\n"
+                        "End with: '[BOARDROOM ADJOURNED] The chair calls this session to a close.'"
+                    )
+                    print(f"\n{'='*80}")
+                    print(f"⏱️  ADJOURNMENT GATE: Hard limit reached. Forcing final verdict.")
+                    print(f"{'='*80}")
+                    return moderator_agent
             
             # If adjournment was already forced, keep returning moderator until termination
             if _adjournment_forced[0]:
@@ -1416,6 +1478,19 @@ class AG2DebateEngine:
             if "[SOVEREIGN ADJOURNMENT:" in last_msg or "[BOARDROOM ADJOURNED]" in last_msg:
                 self.debate_fsm.advance(override=DebateState.VOTE)
                 return moderator_agent
+            
+            # V25-Fix1: Direct-address detection — if last message names a specific agent, route to them
+            if not _adjournment_forced[0]:
+                for agent in groupchat.agents:
+                    if agent == last_speaker or agent == task_synthesizer:
+                        continue
+                    agent_first = agent.name.split("_")[0]  # "Alice" from "Alice_CTO"
+                    # Match patterns like "Alice," or "Alice." or "Alice:" in the message
+                    if len(agent_first) > 2 and agent_first.lower() in last_msg.lower():
+                        import re as _re_addr
+                        if _re_addr.search(rf'\b{_re_addr.escape(agent_first)}\b', last_msg, _re_addr.IGNORECASE):
+                            logger.info(f"V25-Fix1: Direct-address detected for {agent.name} (matched '{agent_first}')")
+                            return agent
                 
             state = self.debate_fsm.tick()
             
@@ -1670,35 +1745,58 @@ class AG2DebateEngine:
         logger.info(f"U22-P3: BATCH VOTERS (background): {[a.name for a in background_agents]}")
         
         # U22-P3: Compile the stance digest for the focused debate
-        # U23-Fix2: Strip thought tags from stance digest for clean visible output
+        # V25: Increase truncation to 500 chars to avoid broken thought tags
         stance_digest = "\n".join([
-            f"- {name}: {AG2DebateEngine._strip_thought_tags(stance)[:200]}" for name, stance in initial_stances.items()
+            f"- {name}: {AG2DebateEngine._strip_thought_tags(stance)[:500]}" for name, stance in initial_stances.items()
         ])
         
-        # V24: Focus the GroupChat on conflict agents + support agents (red team, debiaser, moderator, synthesizer)
-        # V24-Fix1: Inject adversarial reasoning directly into focused agents' system messages
-        # so they self-challenge within the main GroupChat (replaces nested sub-debates)
-        for ca in conflict_agents:
-            adversarial_injection = (
-                "\n\n[ADVERSARIAL REASONING MANDATE]\n"
-                "Before stating your position, you MUST internally identify ONE fatal flaw in the proposal "
-                "from your domain expertise. Present BOTH your concern AND a specific 'Fatal Scenario' with "
-                "a quantitative metric (e.g., '0.7 probability of breach within 12 months'). "
-                "You are expected to CHALLENGE other executives' numbers directly. "
-                "If the CEO cites a revenue figure, question it. If the CISO raises a risk, demand the specific CVE. "
-                "This is a REAL boardroom — argue, push back, demand specifics."
-            )
-            ca.update_system_message(ca.system_message + adversarial_injection)
+        # V25-Fix2: Feature Champion Defense — inject defense mandate into CEO/CPO/Sales
+        # These agents have business incentive to APPROVE the feature and must push back on critics.
+        CHAMPION_ROLES = ['CEO', 'CPO', 'Sales']
+        champion_names = []
+        for agent in stakeholder_agents:
+            role_in_name = agent.name.upper()
+            if any(r in role_in_name for r in CHAMPION_ROLES):
+                defense_injection = (
+                    "\n\n[FEATURE DEFENSE MANDATE]\n"
+                    "You are the CHAMPION of this feature proposal. Your career and credibility depend on it.\n"
+                    "When critics attack, you MUST push back with specific counter-arguments:\n"
+                    "- If the CISO raises security risks, argue that the risk is manageable with mitigations.\n"
+                    "- If the CFO challenges costs, present the revenue upside and ROI.\n"
+                    "- If someone proposes killing or weakening the feature, defend its strategic value.\n"
+                    "Do NOT concede easily. Demand that critics provide hard data, not hypothetical scenarios.\n"
+                    "A real executive defending their proposal does not fold at the first objection."
+                )
+                agent.update_system_message(agent.system_message + defense_injection)
+                champion_names.append(agent.name)
         
-        focused_agents = conflict_agents + [red_team_agent, debiaser_agent, moderator_agent, task_synthesizer]
+        logger.info(f"V25-Fix2: Feature Champions designated: {champion_names}")
+        
+        # V25-Fix1 + V24-Fix1: Inject adversarial reasoning into NON-champion conflict agents
+        for ca in conflict_agents:
+            if ca.name not in champion_names:
+                adversarial_injection = (
+                    "\n\n[ADVERSARIAL REASONING MANDATE]\n"
+                    "Before stating your position, you MUST internally identify ONE fatal flaw in the proposal "
+                    "from your domain expertise. Present BOTH your concern AND a specific 'Fatal Scenario' with "
+                    "a quantitative metric (e.g., '0.7 probability of breach within 12 months'). "
+                    "You are expected to CHALLENGE other executives' numbers directly. "
+                    "If the CEO cites a revenue figure, question it. If the CISO raises a risk, demand the specific CVE. "
+                    "This is a REAL boardroom — argue, push back, demand specifics."
+                )
+                ca.update_system_message(ca.system_message + adversarial_injection)
+        
+        # V25-Fix1: ALL stakeholders in the GroupChat (not just top-3 conflict agents)
+        # This enables direct-address routing: when Alice is called by name, she can respond.
+        focused_agents = stakeholder_agents + [red_team_agent, debiaser_agent, moderator_agent, task_synthesizer]
         
         groupchat = autogen.GroupChat(
             agents=focused_agents,
             messages=[],
-            max_round=ADJOURNMENT_TURN_LIMIT + 3,  # V24: Allow a few extra turns after adjournment gate for wrap-up
+            max_round=ADJOURNMENT_TURN_LIMIT + 5,  # V25: Extra turns for Last Call + verdict
             speaker_selection_method=fsm_speaker_selector
         )
-        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=self.primary_config, max_consecutive_auto_reply=ADJOURNMENT_TURN_LIMIT + 3)
+        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=self.primary_config, max_consecutive_auto_reply=ADJOURNMENT_TURN_LIMIT + 5)
         
         logger.info("Executing AG2 Autonomous Boardroom Debate (V24 Direct Cross-Agent Mode)...")
         
