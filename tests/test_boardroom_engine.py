@@ -232,7 +232,7 @@ class TestT07FSMAdvanceAfterResearch:
         fsm = DebateStateMachine(agent_count=3)
         fsm.current_state = DebateState.RESEARCH
         fsm.state_round = 0
-        for _ in range(4):
+        for _ in range(2):  # U22: RESEARCH budget reduced to 1
             fsm.tick()
         assert fsm.current_state == DebateState.CHALLENGE
 

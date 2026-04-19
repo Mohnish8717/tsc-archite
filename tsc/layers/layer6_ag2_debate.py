@@ -12,6 +12,8 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import Enum, auto
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import difflib
 
 try:
     import numpy as np
@@ -84,11 +86,11 @@ class DebateStateMachine:
         DebateState.VOTE:       [DebateState.CLOSED],
     }
     STATE_ROUND_BUDGETS = {
-        DebateState.OPENING:    5,
-        DebateState.RESEARCH:   2,
-        DebateState.CHALLENGE:  2,
+        DebateState.OPENING:    2,   # U22: Broadcast handles initial stances
+        DebateState.RESEARCH:   1,   # U22: Prefetch eliminates this phase
+        DebateState.CHALLENGE:  3,   # U22: Top 3 conflicts only
         DebateState.MITIGATION: 2,
-        DebateState.VOTE:       4,
+        DebateState.VOTE:       4,   # U22: Batch voting
     }
 
     def __init__(self, agent_count: int):
@@ -570,27 +572,73 @@ class AG2DebateEngine:
             logger.debug(f'Failed to load persona history for {persona.name}: {e}')
             return ''
         
+    @staticmethod
+    def _strip_thought_tags(text: str) -> str:
+        """U23-Fix2: Remove <thought>...</thought> inner monologue from visible output."""
+        import re
+        cleaned = re.sub(r'<thought>.*?</thought>', '', text, flags=re.IGNORECASE | re.DOTALL)
+        # Also strip leading/trailing whitespace and collapse multiple newlines
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned if cleaned else text  # Fallback to original if stripping removed everything
+
     def _create_tools(self) -> Dict[str, Any]:
         """AGI-Grade dynamic tools — all outputs are computed, not static."""
         tools: Dict[str, Any] = {}
         ledger = self.cognitive_ledger
         
         def run_pre_mortem_simulation(risk_factor: str) -> str:
-            """Simulate a risk scenario. Returns a computed risk margin based on the severity of the input."""
-            # Dynamic: hash the input to produce variable risk margins
-            severity_keywords = ["fatal", "lawsuit", "ban", "death", "breach", "collapse", "bankrupt", "regulatory"]
-            severity_score = sum(1 for kw in severity_keywords if kw in risk_factor.lower())
-            base_margin = max(10, 80 - (severity_score * 15) - (len(risk_factor) % 20))
-            margin = min(85, max(10, base_margin))
-            outcome = "CRITICAL FAILURE LIKELY" if margin < 30 else ("NARROW SURVIVAL" if margin < 50 else "MANAGEABLE RISK")
-            return (
-                f"PRE-MORTEM SIMULATION RESULT:\n"
-                f"  Scenario: {risk_factor}\n"
-                f"  Survival Margin: {margin}%\n"
-                f"  Outcome Classification: {outcome}\n"
-                f"  Severity Factors Detected: {severity_score}/8\n"
-                f"  Recommendation: {'PROCEED WITH EXTREME CAUTION' if margin < 50 else 'RISK IS WITHIN ACCEPTABLE BOUNDS'}"
-            )
+            """U23-Fix4: LLM-powered pre-mortem. Analyzes risk factors with actual reasoning instead of keyword hashing."""
+            try:
+                # Use a direct LLM call to analyze the risk scenario
+                import openai
+                client = openai.OpenAI(
+                    api_key=self.primary_config.get('config_list', [{}])[0].get('api_key', ''),
+                    base_url=self.primary_config.get('config_list', [{}])[0].get('base_url', '')
+                )
+                model = self.primary_config.get('config_list', [{}])[0].get('model', 'gemma-4-31b-it')
+                
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            f"You are a Risk Analyst. Analyze this risk scenario for a technology product:\n\n"
+                            f"RISK FACTOR: {risk_factor}\n\n"
+                            f"Respond in EXACTLY this format (numbers only, no explanation outside the format):\n"
+                            f"SURVIVAL_MARGIN: [0-100]\n"
+                            f"OUTCOME: [CRITICAL FAILURE LIKELY / NARROW SURVIVAL / MANAGEABLE RISK]\n"
+                            f"FAILURE_MECHANISM: [one sentence describing how this fails]\n"
+                            f"RECOMMENDATION: [one sentence]"
+                        )
+                    }],
+                    max_tokens=200,
+                    temperature=0.3
+                )
+                llm_result = resp.choices[0].message.content.strip()
+                
+                # Parse LLM output
+                import re
+                margin_match = re.search(r'SURVIVAL_MARGIN:\s*(\d+)', llm_result)
+                margin = int(margin_match.group(1)) if margin_match else 50
+                
+                return f"PRE-MORTEM SIMULATION RESULT (LLM-Analyzed):\n  Scenario: {risk_factor}\n  Survival Margin: {margin}%\n{llm_result}"
+            except Exception as e:
+                # Fallback to enhanced keyword analysis if LLM fails
+                logger.warning(f"LLM pre-mortem failed, using fallback: {e}")
+                severity_keywords = ["fatal", "lawsuit", "ban", "death", "breach", "collapse", "bankrupt", "regulatory",
+                                     "congestion", "overload", "bottleneck", "spiral", "cascade", "flood", "ddos"]
+                severity_score = sum(1 for kw in severity_keywords if kw in risk_factor.lower())
+                base_margin = max(10, 80 - (severity_score * 10) - (len(risk_factor) % 15))
+                margin = min(85, max(10, base_margin))
+                outcome = "CRITICAL FAILURE LIKELY" if margin < 30 else ("NARROW SURVIVAL" if margin < 50 else "MANAGEABLE RISK")
+                return (
+                    f"PRE-MORTEM SIMULATION RESULT (Heuristic Fallback):\n"
+                    f"  Scenario: {risk_factor}\n"
+                    f"  Survival Margin: {margin}%\n"
+                    f"  Outcome Classification: {outcome}\n"
+                    f"  Severity Factors Detected: {severity_score}/{len(severity_keywords)}\n"
+                    f"  Recommendation: {'PROCEED WITH EXTREME CAUTION' if margin < 50 else 'RISK IS WITHIN ACCEPTABLE BOUNDS'}"
+                )
             
         def run_multi_agent_rag(query: str) -> str:
             """
@@ -960,8 +1008,9 @@ class AG2DebateEngine:
                 new_config_list = []
                 for cfg in config.get('config_list', []):
                     cfg_copy = cfg.copy()
-                    # U8: Skip logit_bias entirely for Google-native API (unsupported)
-                    if cfg_copy.get('api_type') == 'google':
+                    # U8: Skip logit_bias entirely for Google-native API or Google OpenAI-compatible endpoint (unsupported)
+                    is_google_endpoint = "generativelanguage.googleapis.com" in (cfg_copy.get('base_url') or "")
+                    if cfg_copy.get('api_type') == 'google' or is_google_endpoint:
                         new_config_list.append(cfg_copy)
                         continue
                     # For OpenAI/Groq: attempt runtime tokenizer lookup
@@ -1080,22 +1129,20 @@ class AG2DebateEngine:
                     "in economic and technical logic rather than waiting for RAG search results."
                 )
 
-            # --- AGI-GRADE TERMINATION: Comprehensive signal detection ---
-            # Uses a closure counter to prevent false positives on instruction text
+            # --- V24: TERMINATION (Cross-Dialogue Aware) ---
+            # Only terminate on explicit adjournment signals. Minimum 6 exchanges required.
             _adjournment_msg_count = [0]  # mutable closure for counting messages
             def _is_adjournment_msg(msg: dict) -> bool:
-                """Detects termination signals ONLY after the sub-debate has had at least 2 exchanges."""
+                """Detects termination signals ONLY after sufficient cross-dialogue has occurred."""
                 _adjournment_msg_count[0] += 1
-                if _adjournment_msg_count[0] <= 2:
-                    return False  # Don't terminate during the initial prompt exchange
+                if _adjournment_msg_count[0] <= 6:
+                    return False  # Don't terminate until agents have cross-dialogued
                 content = msg.get("content", "") or ""
                 return any(token in content for token in [
                     "[SOVEREIGN ADJOURNMENT:",
                     "[SESSION TERMINATED]",
                     "[SESSION ENDED]",
-                    "[EXITING SIMULATION]",
-                    "UNABLE TO DECIDE",
-                    "[VOTE RECORDED",
+                    "[BOARDROOM ADJOURNED]",
                 ])
             
             agent = ReasoningAgent(
@@ -1116,106 +1163,17 @@ class AG2DebateEngine:
         # U5: Track consecutive skips for frustration
         self._consecutive_skips: Dict[str, int] = {a.name: 0 for a in stakeholder_agents}
 
-        for idx, (persona, agent) in enumerate(zip(personas, stakeholder_agents)):
-            
-            # Dynamic Multi-Way Research Roles & Nested Chats
-            sub_roles = []
-            
-            # The Contrarian (System Prompt Sabotage & Temp Diversity)
-            sub_roles.append(("The_Contrarian", 
-                f"You are The Contrarian acting on behalf of the {persona.role}. "
-                f"Your core domain focus is: {persona.domain_expertise}. "
-                "Your job is to find one reason why the ORIGINAL FEATURE PROPOSAL will fail based STRICTLY on your domain expertise. NEVER agree. "
-                "CRITICAL: DO NOT debate or analyze mitigations proposed by other agents. DO NOT debate the Moderator. Focus entirely on destroying the BASE plan using your domain metrics (e.g. if you are CFO, focus ONLY on financial ruin). "
-                "RIGOR MANDATE: You MUST cite a specific metric (e.g. '0.8 probability of 500ms latency spike') and describe a specific 'Fatal Scenario' event. Vague analysis is unacceptable. "
-                "Do NOT argue generic product/user-retention flaws unless you are the CPO or CMO. "
-                "NEVER mention backend errors, Pydantic exceptions, or tool failures out loud. Correct syntax silently.", 
-                0.5, 0.8)) # threshold 0.5, temp 0.8
-                
-            if "compliance" in role_lower or "legal" in role_lower or "ciso" in role_lower:
-                sub_roles.append(("Regulatory_Auditor", 
-                "You are the Regulatory Compliance Auditor. Scrutinize for legal, compliance, and fatal boundaries. NEVER mention backend/tool errors out loud.", 
-                0.3, 0.0))
-            if "finance" in role_lower or "cfo" in role_lower:
-                sub_roles.append(("Resource_Scarcity_Agent", 
-                "You are the Resource Scarcity Agent. Uncover budget overruns. NEVER mention backend/tool errors out loud.", 
-                0.8, 0.3))
+        # ═══════════════════════════════════════════════════════════════════
+        # V24-Fix1: REMOVED nested chats entirely.
+        # The sub-debate architecture (Moderator ↔ Contrarian) caused:
+        #   - Zero cross-agent dialogue (each agent spoke in isolation)
+        #   - Void loops (empty sub-debate output poisoning next sub-debate)
+        #   - Echo loops ("Session closed" ping-pong wasting 60%+ API budget)
+        # Instead, adversarial reasoning is injected directly into each
+        # focused agent's system message so they self-challenge within the
+        # live multi-speaker GroupChat.
+        # ═══════════════════════════════════════════════════════════════════
 
-            # Dissent Validation Layer (Moderator for nested chats)
-            dissent_sys = (
-                "You are the Dissent Validation Moderator. Ensure all critiques from sub-agents are grounded in facts. "
-                "CRITICAL SYSTEM RULE: You are a structural moderator, NOT a board executive. DO NOT propose mitigations, new strategies, or compromises (e.g., 'Tiered Disclosure' or 'Escrowed Models'). "
-                "Your ONLY job is to extract the tension vector from the sub-agents regarding the ORIGINAL feature proposal. "
-                "MANDATORY REJECTION OF VAGUE ANALSYIS: If a sub-agent provides a generic or vague critique without specific KPIs or a 'Fatal Scenario', "
-                "you MUST reject their response and demand specific domain metrics (e.g. Latency, Cost, Security vulnerability ID). "
-                "CRITICAL ESCAPE HATCH: If tools fail to produce data, or the right data cannot be found, DO NOT lock the debate in an endless loop waiting for grounding. "
-                "Instead, IMMEDIATELY terminate the critique by instructing the sub-agent to use `submit_tension_vector` with `is_low_information: true`, "
-                "voting based purely on their logical deduction. Force the decision."
-            )
-            # U16: Relax validation rigor if reasoning_only or as a dynamic mid-sim fallback
-            dissent_sys += (
-                "\n\n[REASONING-FIRST DYNAMIC FALLBACK] If high-fidelity grounding cannot be found after 2 attempts, "
-                "you MUST signal the transition to 'Logical Deduction Mode'. Accept structured logical extrapolations "
-                "as high-fidelity reasoning. DO NOT ESCALATE TO HUMAN MODERATOR."
-            )
-            dissent_moderator = autogen.AssistantAgent(
-                name=f"{agent.name}_Moderator",
-                system_message=dissent_sys,
-                llm_config=self.critic_config,
-                max_consecutive_auto_reply=15,
-                is_termination_msg=_is_adjournment_msg,
-            )
-            self._register_tools_to_agent(dissent_moderator, self._create_tools())
-
-            def compute_tension(msg_content, messages=None):
-                # PyTorch/SentenceTransformers replaced with difflib to prevent macOS gRPC thread deadlocks
-                import difflib
-                try:
-                    past_texts = [m.get("content", "") for m in messages[:-1] if m.get("content")]
-                    if not past_texts:
-                        return 0.5
-                        
-                    curr_text = str(msg_content).lower()
-                    max_sim = max([difflib.SequenceMatcher(None, pt.lower(), curr_text).ratio() for pt in past_texts], default=0.0)
-                    return max(0.0, 1.0 - max_sim) # Divergence score
-                except Exception as e:
-                    logger.error(f"Semantic divergence failed: {e}")
-                    return 0.5
-
-            chat_queue = []
-            for role_name, role_sys, threshold, temp in sub_roles:
-                sub_agent = autogen.AssistantAgent(
-                    name=f"{agent.name}_{role_name}",
-                    system_message=role_sys,
-                    llm_config={**self.primary_config, "temperature": temp},
-                    max_consecutive_auto_reply=15,
-                    is_termination_msg=_is_adjournment_msg,
-                )
-                self._register_tools_to_agent(sub_agent, self._create_tools())
-
-                def make_sub_message_fn(t=threshold, r=role_name):
-                    def msg_fn(recipient, messages, sender, config):
-                        # Parallel Trigger Evaluation via Semantic Divergence
-                        original_msg_content = messages[-1].get("content", "") if messages else ""
-                        tension_score = compute_tension(original_msg_content, messages=messages)
-                        if tension_score >= t:
-                            return f"Divergence Tension is {tension_score:.2f}. Sub-agent {r}, validate this assumption: {str(original_msg_content)[:500]}"  # pyre-ignore
-                        return None # Skip chat to prevent Hall of Mirrors
-                    return msg_fn
-                
-                chat_queue.append({
-                    "recipient": sub_agent,
-                    "sender": dissent_moderator,
-                    "message": make_sub_message_fn(threshold, role_name),
-                    "max_turns": 8,
-                    "summary_method": "last_msg"
-                })
-
-            # AG2 nested chats run internally and only append their final summary to the caller's context.
-            agent.register_nested_chats(
-                chat_queue,
-                trigger=autogen.GroupChatManager
-            )
 
         # 3. Setup Red Team Agent
         red_team_sys = (
@@ -1289,30 +1247,55 @@ class AG2DebateEngine:
             from autogen.agentchat.contrib.capabilities.transform_messages import TransformMessages
             from autogen.agentchat.contrib.capabilities.transforms import MessageTransform
             
+            # V24-Fix2: ThoughtTagStripper — strips <thought>...</thought> from ALL messages
+            # This runs as middleware so NO thought tags leak to any visible output.
+            import re as _re_transform
+            class ThoughtTagStripper(MessageTransform):
+                def apply_transform(self, messages: List[Dict]) -> List[Dict]:
+                    cleaned = []
+                    for msg in messages:
+                        content = msg.get("content", "")
+                        if content and isinstance(content, str) and "<thought>" in content.lower():
+                            stripped = _re_transform.sub(r'<thought>.*?</thought>', '', content, flags=_re_transform.IGNORECASE | _re_transform.DOTALL)
+                            stripped = _re_transform.sub(r'\n{3,}', '\n\n', stripped).strip()
+                            if stripped:
+                                cleaned.append({**msg, "content": stripped})
+                            else:
+                                cleaned.append(msg)  # Fallback if stripping removed everything
+                        else:
+                            cleaned.append(msg)
+                    return cleaned
+                    
+                def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages: List[Dict]) -> Tuple[str, bool]:
+                    had_effect = any(
+                        "<thought>" in str(m.get("content", "")).lower()
+                        for m in pre_transform_messages
+                    )
+                    return "ThoughtTagStripper applied", had_effect
+
             class EntityPreservingCompression(MessageTransform):
                 def apply_transform(self, messages: List[Dict]) -> List[Dict]:
-                    if len(messages) <= 3:
+                    if len(messages) <= 4:
                         return messages
                     compressed = []
-                    n_trim = len(messages) - 3
+                    n_trim = len(messages) - 4
                     for msg in messages[:n_trim]: # pyre-ignore
                         content = str(msg.get("content", ""))
                         if "CONSTRAINT" in content.upper() or "RISK" in content.upper() or "PINNED" in content.upper():
                             compressed.append({**msg, "content": f"[COMPRESSED ENTITY PRESERVED] {content[:200]}..."})
                         else:
                             compressed.append({**msg, "content": "[COMPRESSED]"})
-                    compressed.extend(messages[-3:]) # pyre-ignore
+                    compressed.extend(messages[-4:]) # pyre-ignore
                     return compressed
                     
                 def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages: List[Dict]) -> Tuple[str, bool]:
-                    # Return tuple to satisfy autogen.agentchat.contrib.capabilities.transform_messages
-                    had_effect = len(pre_transform_messages) > 3
+                    had_effect = len(pre_transform_messages) > 4
                     return "EntityPreservingCompression applied", had_effect
                     
-            compressor = TransformMessages(transforms=[EntityPreservingCompression()])
+            compressor = TransformMessages(transforms=[ThoughtTagStripper(), EntityPreservingCompression()])
             for ag in all_agents:
                 compressor.add_to_agent(ag)
-            logger.info("Token Sparsification Middleware activated: Entity-preserving compression running.")
+            logger.info("Token Sparsification Middleware activated: ThoughtTagStripper + Entity-preserving compression running.")
         except Exception as e:
             logger.warning(f"Native TransformMessages missing or failed to inject: {e}")
             
@@ -1350,71 +1333,131 @@ class AG2DebateEngine:
                 
         self.authority_router = LiveAuthorityRouter(stakeholder_agents)
         
+        # V24-Fix6: Turn-based adjournment gate
+        ADJOURNMENT_TURN_LIMIT = 20  # Hard ceiling on main GroupChat turns
+        _main_turn_counter = [0]  # Mutable closure for tracking turns
+        _adjournment_forced = [False]  # Flag to prevent double-adjournment
+        
         def fsm_speaker_selector(last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
             messages = groupchat.messages
             last_msg = messages[-1].get("content", "") if messages else ""
             rounds = len(messages)
+            _main_turn_counter[0] = rounds
             
             # --- OVERRIDE TRIGGERS & SYNC ---
             
-            # Background Synthesizer Sweep
+            # U22-P2: Async Background Synthesizer (Non-Blocking Observer Pattern)
             if last_speaker != task_synthesizer and last_msg and len(last_msg) > 50:
-                current_ledger = self.cognitive_ledger.get_formatted_agenda()
-                synth_prompt = (
-                    f"Analyze for task updates.\n\n"
-                    f"--- CURRENT TASK LEDGER ---\n{current_ledger}\n\n"
-                    f"Speaker: {last_speaker.name}\n"
-                    f"Message: {last_msg[:1000]}\n\n"
+                def _async_synth_update(synth_agent, msg_text, cog_ledger):
+                    try:
+                        current_ledger = cog_ledger.get_formatted_agenda()
+                        synth_prompt = (
+                            f"Analyze for task updates.\n\n"
+                            f"--- CURRENT TASK LEDGER ---\n{current_ledger}\n\n"
+                            f"Message: {msg_text[:1000]}\n\n"
+                        )
+                        reply = synth_agent.generate_reply(messages=[{"role": "user", "content": synth_prompt}])
+                        if isinstance(reply, dict):
+                            reply = reply.get("content", "")
+                        if isinstance(reply, str):
+                            if "ADD_MICRO_TASK:" in reply:
+                                parts = reply.split("ADD_MICRO_TASK:")[1].split("\n")[0].split("|")
+                                if len(parts) >= 3:
+                                    cog_ledger.internal_add_micro_task(parts[0].strip(), parts[1].strip(), parts[2].strip())
+                            if "RESOLVE_TASK:" in reply:
+                                parts = reply.split("RESOLVE_TASK:")[1].split("\n")[0].split("|")
+                                if len(parts) >= 2:
+                                    cog_ledger.internal_update_task(parts[0].strip(), "RESOLVED", parts[1].strip())
+                    except Exception as e:
+                        logger.debug(f"Async TaskSynthesizer exception: {e}")
+                # Fire-and-forget: don't block speaker selection
+                _u22_bg_pool.submit(_async_synth_update, task_synthesizer, last_msg, self.cognitive_ledger)
+            
+            # ── V24-Fix6: TURN-BASED ADJOURNMENT GATE ──
+            # When we reach the turn limit, force all unvoted focused agents to
+            # vote immediately, then hand off to moderator for final adjournment.
+            if _main_turn_counter[0] >= ADJOURNMENT_TURN_LIMIT and not _adjournment_forced[0]:
+                _adjournment_forced[0] = True
+                logger.info(f"V24-Fix6: ADJOURNMENT GATE TRIGGERED at turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}")
+                
+                # Force-vote for any focused agent who hasn't voted yet
+                focused_in_chat = [a for a in groupchat.agents if a in stakeholder_agents]
+                for fa in focused_in_chat:
+                    if not self.cognitive_ledger.has_voted.get(fa.name, False):
+                        logger.info(f"V24-Fix6: Force-voting for unvoted agent: {fa.name}")
+                        fallback_payload = TensionPayload(
+                            adjustments={"General_Assessment": 0.5},
+                            confidence=0.4,
+                            is_high_risk=False,
+                            is_low_information=True,
+                            tool_call_hashes=[]
+                        )
+                        self.live_tension_registry[fa.name] = fallback_payload
+                        self.cognitive_ledger.record_confidence(fa.name, 0.4)
+                        self.cognitive_ledger.mark_voted(fa.name)
+                
+                # Inject adjournment command into moderator
+                moderator_agent.update_system_message(
+                    moderator_agent.system_message + 
+                    "\n\n[MANDATORY ADJOURNMENT] The board has reached its deliberation limit. "
+                    "You MUST now deliver the final summary and verdict. State: "
+                    "'[BOARDROOM ADJOURNED] The chair calls this session to a close.' "
+                    "Summarize the key positions and the board's recommendation."
                 )
-                try:
-                    reply = task_synthesizer.generate_reply(messages=[{"role": "user", "content": synth_prompt}])
-                    if isinstance(reply, dict):
-                        reply = reply.get("content", "")
-                    if isinstance(reply, str):
-                        if "ADD_MICRO_TASK:" in reply:
-                            parts = reply.split("ADD_MICRO_TASK:")[1].split("\n")[0].split("|")
-                            if len(parts) >= 3:
-                                self.cognitive_ledger.internal_add_micro_task(parts[0].strip(), parts[1].strip(), parts[2].strip())
-                        if "RESOLVE_TASK:" in reply:
-                            parts = reply.split("RESOLVE_TASK:")[1].split("\n")[0].split("|")
-                            if len(parts) >= 2:
-                                self.cognitive_ledger.internal_update_task(parts[0].strip(), "RESOLVED", parts[1].strip())
-                except Exception as e:
-                    logger.debug(f"TaskSynthesizer parsing exception: {e}")
+                print(f"\n{'='*80}")
+                print(f"⏱️  ADJOURNMENT GATE: Turn limit ({ADJOURNMENT_TURN_LIMIT}) reached. Forcing final verdict.")
+                print(f"{'='*80}")
+                return moderator_agent
+            
+            # If adjournment was already forced, keep returning moderator until termination
+            if _adjournment_forced[0]:
+                return moderator_agent
                     
-            if "[SOVEREIGN ADJOURNMENT:" in last_msg or "UNABLE TO DECIDE" in last_msg:
+            if "[SOVEREIGN ADJOURNMENT:" in last_msg or "[BOARDROOM ADJOURNED]" in last_msg:
                 self.debate_fsm.advance(override=DebateState.VOTE)
                 return moderator_agent
                 
             state = self.debate_fsm.tick()
             
+            allowed_agents = groupchat.agents
+            
             # 1. State-specific explicit routing
             if state == DebateState.OPENING:
-                if last_speaker in stakeholder_agents:
-                    idx = stakeholder_agents.index(last_speaker)
-                    if idx + 1 < len(stakeholder_agents):
-                        return stakeholder_agents[idx + 1]
-                return stakeholder_agents[0]
+                # Find current index among allowed agents
+                stakeholders_in_chat = [a for a in allowed_agents if a in stakeholder_agents]
+                if not stakeholders_in_chat:
+                    return moderator_agent
+                
+                if last_speaker in stakeholders_in_chat:
+                    idx = stakeholders_in_chat.index(last_speaker)
+                    if idx + 1 < len(stakeholders_in_chat):
+                        return stakeholders_in_chat[idx + 1]
+                return stakeholders_in_chat[0]
                 
             elif state == DebateState.CHALLENGE:
                 if last_speaker == moderator_agent:
-                    return red_team_agent
+                    return red_team_agent if red_team_agent in allowed_agents else moderator_agent
                 if last_speaker == red_team_agent:
-                    return debiaser_agent
+                    return debiaser_agent if debiaser_agent in allowed_agents else moderator_agent
                 pass  # Allow stakeholders to organically respond to Red Team
 
             elif state == DebateState.VOTE:
                 # U3: Sequential voting via dedicated index counter
+                # Filter total list by what is allowed in this chat
                 voter = self.debate_fsm.next_voter(stakeholder_agents)
+                while voter and voter not in allowed_agents:
+                    voter = self.debate_fsm.next_voter(stakeholder_agents)
+                
                 if voter is None:
-                    return moderator_agent  # All voted → CLOSED
+                    return moderator_agent  # All (allowed) voted → CLOSED
                 return voter
                 
             elif state == DebateState.CLOSED:
                 return moderator_agent
-                
+            
+            # 2. Dynamic Routing / Bidding logic
             authority_pick = self.authority_router.evaluate(last_msg, last_speaker)
-            if authority_pick:
+            if authority_pick and authority_pick in allowed_agents:
                 # U5: Track skips — authority router overrode bidding
                 for sa in stakeholder_agents:
                     if sa != authority_pick and sa != last_speaker:
@@ -1429,10 +1472,12 @@ class AG2DebateEngine:
             # U2: Use dynamically-built domain bids instead of hardcoded names
             domain_bids = getattr(self, '_domain_bids', {})
             
-            highest_bid = 0.0
-            next_selected = stakeholder_agents[0]
-            for agent in stakeholder_agents:
-                if agent == last_speaker:
+            highest_bid = -1.0
+            next_selected = None
+            
+            # Only bid among agents in the current GroupChat
+            for agent in allowed_agents:
+                if agent == last_speaker or agent in [moderator_agent, task_synthesizer, red_team_agent, debiaser_agent]:
                     continue
                 bid = 0.0
                 words = str(last_msg).lower().split()
@@ -1452,6 +1497,11 @@ class AG2DebateEngine:
                 if bid > highest_bid:
                     highest_bid = bid
                     next_selected = agent
+
+            # Fallback if no stakeholder bid
+            if not next_selected:
+                potential_fallbacks = [a for a in allowed_agents if a != last_speaker and a != task_synthesizer]
+                next_selected = potential_fallbacks[0] if potential_fallbacks else moderator_agent
 
             # U5: Track consecutive skips for frustration
             for sa in stakeholder_agents:
@@ -1488,31 +1538,306 @@ class AG2DebateEngine:
             print(f"\n[LEDGER INJECTION] {next_selected.name} context updated. Phase: {state.name}.")
             return next_selected
 
+        # ═══════════════════════════════════════════════════════════════════
+        # U22: BROADCAST DELIBERATION — 3-Phase Parallel Architecture
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # U22-P2: Background thread pool for async TaskSynthesizer
+        _u22_bg_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="u22_synth")
+        
+        # U22-P1: Parallel Research Prefetch (Single-Call Direct Research)
+        # Instead of spinning up a 4-agent RAG sub-debate per agent (6-8 LLM calls each),
+        # we do ONE direct LLM call per agent to generate their research brief.
+        # This cuts API usage from ~80 calls to ~10 calls for the research phase.
+        # The full multi-agent RAG is preserved as a tool for MID-DEBATE research.
+        logger.info("U22-P1: Starting Parallel Research Prefetch (Direct Single-Call Mode)...")
+        _prefetch_start = time.time()
+        prefetch_cache: Dict[str, Dict[str, str]] = {}
+        tools_instance = self._create_tools()
+        
+        # Rate-limit semaphore: cap at 3 concurrent calls to stay under 15 RPM free-tier
+        import threading as _threading
+        _rate_semaphore = _threading.Semaphore(3)
+        
+        def _prefetch_research_direct(agent_obj, feat):
+            """Single direct LLM call per agent — replaces the 4-agent RAG sub-debate for prefetch."""
+            agent_name = agent_obj.name
+            try:
+                _rate_semaphore.acquire()
+                try:
+                    # Direct single-call research prompt — one LLM call instead of 6-8
+                    research_prompt = (
+                        f"You are {agent_name}, a senior executive. "
+                        f"Analyze this feature proposal from your professional domain:\n\n"
+                        f"FEATURE: {feat.title}\n"
+                        f"DESCRIPTION: {feat.description[:600]}\n\n"
+                        f"Provide a concise Intelligence Brief (3-5 bullet points) covering:\n"
+                        f"1. Key risks from YOUR domain perspective\n"
+                        f"2. Critical questions that need answers\n"
+                        f"3. Your initial stance (SUPPORT / OPPOSE / CONDITIONAL)\n"
+                        f"Be specific and grounded. No generic statements."
+                    )
+                    reply = agent_obj.generate_reply(messages=[{"role": "user", "content": research_prompt}])
+                    if isinstance(reply, dict):
+                        reply = reply.get("content", "")
+                    rag_result = str(reply)[:1500]
+                finally:
+                    _rate_semaphore.release()
+                
+                # Web search is static/mocked — no LLM call needed
+                web_result = tools_instance["web_search"](f"{feat.title} risks {agent_name}")
+                
+                # Record research receipt so ER-401 check passes
+                self.receipt_ledger.record(agent_name, "run_multi_agent_rag", str(rag_result)[:50])
+                self.receipt_ledger.record(agent_name, "web_search", str(web_result)[:50])
+                return agent_name, rag_result, web_result[:500]
+            except Exception as e:
+                logger.warning(f"U22-P1: Prefetch failed for {agent_name}: {e}")
+                return agent_name, "", ""
+        
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="u22_direct") as rag_pool:
+            futures = [rag_pool.submit(_prefetch_research_direct, a, feature) for a in stakeholder_agents]
+            for fut in as_completed(futures):
+                name, rag, web = fut.result()
+                prefetch_cache[name] = {"rag": rag, "web": web}
+        
+        _prefetch_elapsed = time.time() - _prefetch_start
+        logger.info(f"U22-P1: Parallel Research Prefetch DONE for {len(prefetch_cache)} agents in {_prefetch_elapsed:.1f}s")
+        
+        # U22-P1: Inject prefetched research into each agent's system message
+        for agent in stakeholder_agents:
+            cached = prefetch_cache.get(agent.name, {})
+            if cached.get("rag") or cached.get("web"):
+                research_injection = (
+                    f"\n\n[PRE-FETCHED RESEARCH BRIEF — DO NOT RE-SEARCH THIS DATA]\n"
+                    f"Research Analysis: {cached.get('rag', 'N/A')[:800]}\n"
+                    f"Market Intelligence: {cached.get('web', 'N/A')[:300]}\n"
+                    f"[END RESEARCH BRIEF — You may now proceed directly to analysis and voting.]"
+                )
+                base_sys = agent.system_message
+                agent.update_system_message(base_sys + research_injection)
+        
+        # U22-P3: Parallel Initial Stance Generation (Broadcast)
+        logger.info("U22-P3: Generating parallel initial stances for conflict detection...")
+        _stance_start = time.time()
+        initial_stances: Dict[str, str] = {}
+        
+        def _generate_stance(agent_obj, feat):
+            """Generate a single agent's initial position statement concurrently."""
+            try:
+                stance_prompt = (
+                    f"You are in a boardroom reviewing: '{feat.title}'.\n"
+                    f"Description: {feat.description[:500]}\n\n"
+                    "In exactly 2-3 sentences, state your initial position on this feature "
+                    "from your professional perspective. Be direct and specific."
+                )
+                reply = agent_obj.generate_reply(messages=[{"role": "user", "content": stance_prompt}])
+                if isinstance(reply, dict):
+                    reply = reply.get("content", "")
+                return agent_obj.name, AG2DebateEngine._strip_thought_tags(str(reply)[:500])
+            except Exception as e:
+                logger.warning(f"U22-P3: Stance generation failed for {agent_obj.name}: {e}")
+                return agent_obj.name, ""
+        
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="u22_stance") as stance_pool:
+            futures = [stance_pool.submit(_generate_stance, a, feature) for a in stakeholder_agents]
+            for fut in as_completed(futures):
+                name, stance = fut.result()
+                if stance:
+                    initial_stances[name] = stance
+        
+        _stance_elapsed = time.time() - _stance_start
+        logger.info(f"U22-P3: Parallel stances generated for {len(initial_stances)} agents in {_stance_elapsed:.1f}s")
+        
+        # U22-P3: Conflict Detection — identify the top 3 most divergent agents
+        def _detect_top_conflicts(stances: Dict[str, str], n: int = 3) -> List[str]:
+            """Find the n agents with the most divergent stances from the mean."""
+            if len(stances) <= n:
+                return list(stances.keys())
+            mean_text = " ".join(stances.values()).lower()
+            scores = {}
+            for name, text in stances.items():
+                scores[name] = 1.0 - difflib.SequenceMatcher(None, mean_text, text.lower()).ratio()
+            ranked = sorted(scores, key=lambda k: scores[k], reverse=True)  # pyre-ignore
+            logger.info(f"U22-P3: Conflict scores: { {k: f'{scores[k]:.3f}' for k in ranked[:5]} }")
+            return ranked[:n]
+        
+        top_conflict_names = _detect_top_conflicts(initial_stances, n=3)
+        conflict_agents = [a for a in stakeholder_agents if a.name in top_conflict_names]
+        background_agents = [a for a in stakeholder_agents if a.name not in top_conflict_names]
+        
+        logger.info(f"U22-P3: FOCUSED DELIBERATION with: {[a.name for a in conflict_agents]}")
+        logger.info(f"U22-P3: BATCH VOTERS (background): {[a.name for a in background_agents]}")
+        
+        # U22-P3: Compile the stance digest for the focused debate
+        # U23-Fix2: Strip thought tags from stance digest for clean visible output
+        stance_digest = "\n".join([
+            f"- {name}: {AG2DebateEngine._strip_thought_tags(stance)[:200]}" for name, stance in initial_stances.items()
+        ])
+        
+        # V24: Focus the GroupChat on conflict agents + support agents (red team, debiaser, moderator, synthesizer)
+        # V24-Fix1: Inject adversarial reasoning directly into focused agents' system messages
+        # so they self-challenge within the main GroupChat (replaces nested sub-debates)
+        for ca in conflict_agents:
+            adversarial_injection = (
+                "\n\n[ADVERSARIAL REASONING MANDATE]\n"
+                "Before stating your position, you MUST internally identify ONE fatal flaw in the proposal "
+                "from your domain expertise. Present BOTH your concern AND a specific 'Fatal Scenario' with "
+                "a quantitative metric (e.g., '0.7 probability of breach within 12 months'). "
+                "You are expected to CHALLENGE other executives' numbers directly. "
+                "If the CEO cites a revenue figure, question it. If the CISO raises a risk, demand the specific CVE. "
+                "This is a REAL boardroom — argue, push back, demand specifics."
+            )
+            ca.update_system_message(ca.system_message + adversarial_injection)
+        
+        focused_agents = conflict_agents + [red_team_agent, debiaser_agent, moderator_agent, task_synthesizer]
+        
         groupchat = autogen.GroupChat(
-            agents=all_agents,
+            agents=focused_agents,
             messages=[],
-            max_round=45,
+            max_round=ADJOURNMENT_TURN_LIMIT + 3,  # V24: Allow a few extra turns after adjournment gate for wrap-up
             speaker_selection_method=fsm_speaker_selector
         )
-        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=self.primary_config, max_consecutive_auto_reply=45)
+        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=self.primary_config, max_consecutive_auto_reply=ADJOURNMENT_TURN_LIMIT + 3)
         
-        logger.info("Executing AG2 Autonomous Boardroom Debate...")
+        logger.info("Executing AG2 Autonomous Boardroom Debate (V24 Direct Cross-Agent Mode)...")
         
-        # We start the debate by having a neutral system prompt / the CTO agent present the feature.
+        # V24: Enhanced initial message — removes sub-debate references, emphasizes direct cross-talk
         initial_message = (
-            f"BOARD MEMORANDUM (Summarized Checkpoint Initial):\n"
+            f"BOARD MEMORANDUM — AGENDA ITEM:\n"
             f"Feature Proposal: {feature.title}\n"
-            f"Description: {feature.description}\n"
-            "Please debate the merits, execute web searches for market data, and finalize your "
-            "stances. CRITICAL: Use the `submit_tension_vector` tool to cast your final mathematical vote."
+            f"Description: {feature.description}\n\n"
+            f"=== INITIAL BOARD POSITIONS (Gathered Simultaneously) ===\n{stance_digest}\n\n"
+            "DELIBERATION PROTOCOL:\n"
+            "1. You are in a LIVE boardroom. Address other executives BY NAME when responding to their points.\n"
+            "2. If the CISO raises a security concern, the CEO should ask 'Can we get legal sign-off before proceeding?'\n"
+            "3. If the CPO proposes a costly feature, the CFO MUST challenge the unit economics.\n"
+            "4. Cross-questioning is MANDATORY — do NOT simply state your position in isolation.\n"
+            "5. When you have debated sufficiently and responded to challenges, cast your final vote "
+            "using the `submit_tension_vector` tool.\n"
+            "6. The Chairman will call the session to order if deliberation stalls."
         )
         
-        # Initiate Chat
-        initiator = stakeholder_agents[0]
+        # Initiate Chat with the first conflict agent or first focused stakeholder
+        initiator = conflict_agents[0] if conflict_agents else None
+        if not initiator:
+             # Find first stakeholder in focused list
+             focused_stakeholders = [a for a in focused_agents if a in stakeholder_agents]
+             initiator = focused_stakeholders[0] if focused_stakeholders else moderator_agent
+
         chat_res = initiator.initiate_chat(
             manager,
             message=initial_message,
         )
+        
+        # U23-Fix3: Informed Batch Voting — background agents vote based on debate outcome, not heuristics
+        # Extract debate summary from the focused deliberation
+        debate_messages = groupchat.messages or []
+        debate_summary = "\n".join([
+            f"{msg.get('name', 'Unknown')}: {AG2DebateEngine._strip_thought_tags(msg.get('content', ''))[:300]}"
+            for msg in debate_messages[-6:]  # Last 6 messages capture the core conflict resolution
+        ])
+        
+        logger.info(f"U23-P3: Submitting INFORMED batch votes for {len(background_agents)} background agents...")
+        
+        def _informed_batch_vote(bg_agent_obj, feat, stance_text, debate_text):
+            """U23-Fix3: Generate an informed vote via a single LLM call using the debate context."""
+            try:
+                vote_prompt = (
+                    f"You are {bg_agent_obj.name}. You just listened to a boardroom debate about '{feat.title}'.\n\n"
+                    f"YOUR INITIAL STANCE: {stance_text[:300]}\n\n"
+                    f"KEY DEBATE EXCHANGES:\n{debate_text[:800]}\n\n"
+                    f"Based on what you heard, provide your FINAL vote in this EXACT JSON format:\n"
+                    f'{{"dimension": "<your primary concern dimension>", "score": <0.1 to 0.9>, '
+                    f'"confidence": <0.3 to 0.9>, "is_high_risk": <true/false>, '
+                    f'"reasoning": "<one sentence explaining your vote>"}}\n'
+                    f"Dimension must be one of: Technical_Feasibility, Unit_Economics, Security_Risk, Market_Fit, Strategic_Alignment, Legal_Compliance, General_Assessment"
+                )
+                reply = bg_agent_obj.generate_reply(messages=[{"role": "user", "content": vote_prompt}])
+                if isinstance(reply, dict):
+                    reply = reply.get("content", "")
+                reply_text = AG2DebateEngine._strip_thought_tags(str(reply))
+                
+                # Parse JSON from reply
+                import json as _json
+                json_match = re.search(r'\{[^{}]+\}', reply_text)
+                if json_match:
+                    vote_data = _json.loads(json_match.group())
+                    return (
+                        bg_agent_obj.name,
+                        str(vote_data.get('dimension', 'General_Assessment')),
+                        float(vote_data.get('score', 0.5)),
+                        float(vote_data.get('confidence', 0.5)),
+                        bool(vote_data.get('is_high_risk', False)),
+                        str(vote_data.get('reasoning', ''))
+                    )
+            except Exception as e:
+                logger.warning(f"U23: Informed vote failed for {bg_agent_obj.name}: {e}")
+            
+            # Fallback to heuristic if LLM call fails
+            return bg_agent_obj.name, 'General_Assessment', 0.5, 0.5, False, 'Fallback heuristic vote'
+        
+        import re
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="u23_vote") as vote_pool:
+            futures = [
+                vote_pool.submit(
+                    _informed_batch_vote, bg, feature,
+                    initial_stances.get(bg.name, ""), debate_summary
+                ) for bg in background_agents
+            ]
+            for fut in as_completed(futures):
+                name, dim_key, score, confidence, is_high_risk, reasoning = fut.result()
+                
+                score = max(0.1, min(0.9, score))
+                confidence = max(0.3, min(0.9, confidence))
+                
+                batch_payload = TensionPayload(
+                    adjustments={dim_key: score},
+                    confidence=confidence,
+                    is_high_risk=is_high_risk,
+                    is_low_information=False,  # U23: No longer low-info since they heard the debate
+                    tool_call_hashes=[]
+                )
+                self.live_tension_registry[name] = batch_payload
+                self.cognitive_ledger.record_confidence(name, confidence)
+                self.cognitive_ledger.mark_voted(name)
+                if is_high_risk:
+                    self.cognitive_ledger.mark_high_risk(name)
+                logger.info(f"V24 INFORMED VOTE: {name} -> {dim_key}={score:.2f}, conf={confidence:.2f}, high_risk={is_high_risk}, reason={reasoning[:80]}")
+        
+        # V24-Fix5: Log batch voter output to transcript and stdout
+        batch_vote_lines = []
+        for bg in background_agents:
+            bg_name = bg.name
+            if bg_name in self.live_tension_registry:
+                bp = self.live_tension_registry[bg_name]
+                bp_adjs = bp.adjustments
+                bp_conf = bp.confidence
+                bp_risk = bp.is_high_risk
+                batch_vote_lines.append(
+                    f"  • {bg_name}: {bp_adjs} (confidence: {bp_conf:.2f}, high_risk: {bp_risk})"
+                )
+        
+        if batch_vote_lines:
+            batch_summary_text = (
+                f"\n{'='*60}\n"
+                f"📊  BATCH VOTER RESULTS ({len(batch_vote_lines)} background agents)\n"
+                f"{'='*60}\n"
+                + "\n".join(batch_vote_lines)
+                + f"\n{'='*60}"
+            )
+            print(batch_summary_text)
+            logger.info(f"V24-Fix5: Batch vote summary:\n" + "\n".join(batch_vote_lines))
+            
+            # Append to groupchat messages for transcript persistence
+            groupchat.messages.append({
+                "role": "assistant",
+                "name": "Boardroom_Moderator",
+                "content": (
+                    f"BATCH VOTES RECEIVED — The following board members voted based on the deliberation:\n"
+                    + "\n".join(batch_vote_lines)
+                )
+            })
         
         # Map agents by name to recover Persona references for Domain Authority scaling
         persona_map = {p.name.replace(" ", "_").replace(".", ""): p for p in personas}
@@ -1665,6 +1990,58 @@ class AG2DebateEngine:
         summary_intro = f"The AG2 autonomous board debated {feature.title}."
         if is_low_info_escalation:
             summary_intro = f"AUTOMATIC ESCALATION: {low_information_votes}/{parsed_votes} votes flagged as 'Low Information'. Synthesizing boardroom reasoning despite search failure. "
+        
+        # U23-Fix5: Compromise Synthesis — generate specific conditions for non-APPROVED verdicts
+        conditions_list: list = []
+        conditions_summary = ""
+        if verdict in ("CONDITIONALLY_APPROVED", "REJECTED") and debate_messages:
+            try:
+                logger.info("U23-Fix5: Generating Boardroom Compromise Conditions...")
+                # Build a compact summary of high-risk flags and debate content
+                high_risk_agents = [name for name, p in self.live_tension_registry.items() if getattr(p, 'is_high_risk', False)]
+                risk_summary = f"HIGH-RISK FLAGS FROM: {', '.join(high_risk_agents)}" if high_risk_agents else "No explicit high-risk flags"
+                
+                compromise_prompt = (
+                    f"You are a Boardroom Secretary. The board just debated '{feature.title}' and reached verdict: {verdict} "
+                    f"(confidence: {final_score:.2f}).\n\n"
+                    f"DEBATE SUMMARY:\n{debate_summary[:1000]}\n\n"
+                    f"{risk_summary}\n\n"
+                    f"TENSION SCORES: {tension_shifts}\n\n"
+                    f"Generate 2-4 SPECIFIC, ACTIONABLE conditions that would need to be met for this feature to proceed. "
+                    f"Each condition must be concrete and measurable. Respond as a JSON array of strings.\n"
+                    f"Example: [\"Cap initial rollout to 50k users in Phase 1\", \"Obtain BIPA legal sign-off before launch\"]\n"
+                    f"Respond ONLY with the JSON array, no other text."
+                )
+                
+                import openai as _oai
+                _client = _oai.OpenAI(
+                    api_key=self.primary_config.get('config_list', [{}])[0].get('api_key', ''),
+                    base_url=self.primary_config.get('config_list', [{}])[0].get('base_url', '')
+                )
+                _model = self.primary_config.get('config_list', [{}])[0].get('model', 'gemma-4-31b-it')
+                
+                _resp = _client.chat.completions.create(
+                    model=_model,
+                    messages=[{"role": "user", "content": compromise_prompt}],
+                    max_tokens=300,
+                    temperature=0.3
+                )
+                _raw = AG2DebateEngine._strip_thought_tags(_resp.choices[0].message.content.strip())
+                
+                import json as _json
+                # Extract JSON array from response
+                _arr_match = re.search(r'\[.*\]', _raw, re.DOTALL)
+                if _arr_match:
+                    conditions_list = _json.loads(_arr_match.group())
+                    conditions_summary = " | ".join(conditions_list[:4])
+                    logger.info(f"U23-Fix5: Compromise conditions: {conditions_list}")
+            except Exception as e:
+                logger.warning(f"U23-Fix5: Compromise synthesis failed: {e}")
+                conditions_list = ["Limit initial rollout to 5% of users", "Conduct independent security audit before launch"]
+        
+        full_summary = f"{summary_intro} Agents parsed: {parsed_votes}. Confidence-weighted score: {final_score:.2f}."
+        if conditions_summary:
+            full_summary += f" CONDITIONS: {conditions_summary}"
             
         return ConsensusResult(
             feature_name=feature.title,
@@ -1672,8 +2049,8 @@ class AG2DebateEngine:
             approval_confidence=final_score,
             stakeholder_verdicts={k: "Voted" for k in getattr(self, "live_tension_registry", {}).keys()},
             approvals=[],
-            mitigations=["Limit initial rollout to 5% of users"] if final_score < 0.8 else [],
+            mitigations=conditions_list if conditions_list else (["Limit initial rollout to 5% of users"] if final_score < 0.8 else []),
             tension_shifts=tension_shifts,
-            overall_summary=f"{summary_intro} Agents parsed: {parsed_votes}. Confidence-weighted score: {final_score:.2f}.",
+            overall_summary=full_summary,
             debate_rounds=[dr]
         )

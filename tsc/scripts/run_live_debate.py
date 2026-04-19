@@ -16,8 +16,8 @@ if PROJECT_ROOT not in sys.path:
 
 # Use High-Fidelity Google model for the live debate
 os.environ["TSC_LLM_PROVIDER"] = "google"
-os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it" 
-os.environ["GEMINI_API_KEY"] = "AIzaSyAMtrQBzlsvUdyRhptJH57rJbKzUGl3nY8"
+os.environ["TSC_LLM_MODEL"] = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
+# os.environ["GEMINI_API_KEY"] = "AIzaSy..." # Leaked key disabled
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./live_debate_run.db"
 
 # macOS gRPC deadlock fix for Google API
