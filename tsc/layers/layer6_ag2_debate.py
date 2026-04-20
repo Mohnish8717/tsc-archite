@@ -68,6 +68,7 @@ from tsc.models.gates import GatesSummary
 from tsc.models.debate import ConsensusResult, DebatePosition, DebateRound
 from tsc.memory.zep_client import ZepMemoryClient
 from tsc.memory.fact_retriever import FactRetriever
+from tsc.memory.hindsight_memory import HindsightBoardroom
 
 class DebateState(Enum):
     OPENING    = auto()  # Initial framing, 1 turn per agent
@@ -468,6 +469,10 @@ class AG2DebateEngine:
         
         self.executor_dir = "/tmp/board_debate_scripts"
         os.makedirs(self.executor_dir, exist_ok=True)
+        
+        # V29: Hindsight persistent memory (initialized in process())
+        self.hindsight_boardroom: Optional[HindsightBoardroom] = None
+        self._evolved_agent_memories: Dict[str, dict] = {}
 
     # ── U2: Dynamic Domain Bids ──────────────────────────────────────
     ROLE_KEYWORDS: Dict[str, List[str]] = {
@@ -973,6 +978,18 @@ class AG2DebateEngine:
         # try/except around start() cannot catch it. We use our own DB persistence
         # (SimulationRun) instead.
             
+        # V29: Initialize Hindsight Persistent Memory for all agents
+        self.hindsight_boardroom = HindsightBoardroom(
+            hindsight_url=os.getenv("HINDSIGHT_URL", ""),
+            api_key=os.getenv("HINDSIGHT_API_KEY", ""),
+        )
+        self.hindsight_boardroom.initialize_agents(
+            personas=personas,
+            feature_title=feature.title,
+            feature_description=feature.description or "",
+        )
+        logger.info(f"V29: Agent memory initialized for {len(personas)} personas (mode={self.hindsight_boardroom._mode})")
+        
         # 1. Initialize Primary Stakeholder Agents and their tied Logic Critics
         stakeholder_agents = []
         
@@ -1058,7 +1075,22 @@ class AG2DebateEngine:
                 "CRITICAL 2: You MUST formalize your conclusion by invoking the `submit_tension_vector` tool representing your vote! "
                 "If the Critic rejects your confidence score as < 0.7 after 3 rounds, you MUST set `is_high_risk` to True in your payload. "
                 "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of this specific graph. You MUST call `run_multi_agent_rag` to deploy the RAG Research Department before making any factual assertions! "
-                "CRITICAL 4 (CONFIDENCE DECAY): If 3 consecutive searches fail to find a direct answer, do NOT keep searching. Fallback to 'General Principles' reasoning and explicitly set `is_low_information=True` in your final vote."
+                "CRITICAL 4 (CONFIDENCE DECAY): If 3 consecutive searches fail to find a direct answer, do NOT keep searching. Fallback to 'General Principles' reasoning and explicitly set `is_low_information=True` in your final vote.\n\n"
+                "[V28 NO-REHASH RULE] You have already READ the feature brief. DO NOT restate its contents, numbers, or architecture. "
+                "Every sentence you speak MUST contain NEW analysis, a NEW risk, a NEW number you computed, or a NEW solution "
+                "that was NOT in the original proposal. If you find yourself summarizing the brief, STOP and instead provide: "
+                "(a) a specific failure scenario with probability, (b) a quantitative estimate YOU derived, or "
+                "(c) a direct challenge to another executive's claim. Restating known facts is a SYSTEM VIOLATION.\n\n"
+                "[V28 EVIDENCE-DEMAND PROTOCOL] When ANY executive (including yourself) makes a quantitative claim "
+                "(e.g., '80% of cases are deterministic', '30-day deployment', '$X recovery'), you MUST either: "
+                "(a) Cite the data source (pilot results, industry benchmark, customer interview), OR "
+                "(b) Explicitly flag it as 'UNVALIDATED ASSUMPTION — requires [specific validation step].' "
+                "Accepting unvalidated numbers without challenge is a SYSTEM VIOLATION. Ask: 'Based on what data?'\n\n"
+                "[V28 SPECIFICITY MANDATE] Every proposal or agreement MUST include: "
+                "(a) A concrete deliverable with timeline (not 'TSD by Friday' but 'FHIR mapping spec for Epic v2024, 2 sprints'), "
+                "(b) A testable success metric (not 'it will work' but 'pilot 500 cases, measure % fully deterministic'), "
+                "(c) A failure threshold that triggers a pivot (not 'we hope' but 'if <60% deterministic, default to Tier 2'). "
+                "Philosophical agreements without specs are NOT boardroom decisions."
             )
             
             # U6: Inject historical precedent memory from Zep
@@ -1299,10 +1331,66 @@ class AG2DebateEngine:
         except Exception as e:
             logger.warning(f"Native TransformMessages missing or failed to inject: {e}")
         
-        # V26-Fix2: Content-level thought-tag handling via process_message_before_send hook
-        # V26: Instead of DISCARDING thought-tag content, EXTRACT it. When the LLM wraps
-        # its entire response in <thought> tags with nothing outside, the old logic produced
-        # empty messages. Now we strip the TAGS but preserve the CONTENT inside them.
+        # V28-Fix6: Redundancy Detection Middleware
+        # Detects when an agent is restating the original feature brief and injects a retry.
+        _feature_desc_phrases = set()
+        if feature and feature.description:
+            # Extract key phrases (4+ word blocks) from the feature description
+            _desc_words = feature.description.lower().split()
+            for i in range(len(_desc_words) - 3):
+                _feature_desc_phrases.add(' '.join(_desc_words[i:i+4]))
+        _v28_retry_count = {}  # Track retries per agent to cap at 1
+        
+        def _v28_redundancy_check(sender, message, recipient, silent):
+            """V28-Fix6: Detect and flag messages that restate the feature brief."""
+            content = message if isinstance(message, str) else (message.get('content', '') if isinstance(message, dict) else '')
+            if not content or len(content) < 100:
+                return message  # Too short to be redundant
+            
+            sender_name = getattr(sender, 'name', 'Unknown')
+            if _v28_retry_count.get(sender_name, 0) >= 1:
+                return message  # Already retried once, let it through
+            
+            content_lower = content.lower()
+            overlap_count = sum(1 for phrase in _feature_desc_phrases if phrase in content_lower)
+            overlap_ratio = overlap_count / max(len(_feature_desc_phrases), 1)
+            
+            if overlap_ratio > 0.35:  # >35% of brief phrases found in message
+                _v28_retry_count[sender_name] = _v28_retry_count.get(sender_name, 0) + 1
+                logger.warning(f"V28-Fix6: REDUNDANCY DETECTED for {sender_name} (overlap={overlap_ratio:.0%}). Injecting novelty directive.")
+                novelty_prefix = (
+                    "[SYSTEM: Your previous response restated the feature brief. The board has already read it. "
+                    "Provide ONLY new analysis: a failure scenario, a number you computed, or a challenge to another exec.] "
+                )
+                if isinstance(message, str):
+                    return novelty_prefix + content
+                elif isinstance(message, dict):
+                    message['content'] = novelty_prefix + content
+                    return message
+            return message
+        
+        # V29: Live Memory Extraction Middleware
+        # After each agent message, extract structured signals into LiveAgentMemory.
+        # Uses deterministic regex extraction — ZERO LLM calls, <1ms per message.
+        _all_agent_names = [a.name for a in stakeholder_agents]
+        _hindsight_ref = self.hindsight_boardroom  # Closure reference
+        
+        def _v29_memory_retain_hook(sender, message, recipient, silent):
+            """V29: Extract structured state from each agent message into LiveAgentMemory."""
+            logger.info(f"V29 DEBUG: Hook fired for sender={getattr(sender, 'name', 'unknown')} | type(message)={type(message)}")
+            content = message if isinstance(message, str) else (message.get('content', '') if isinstance(message, dict) else '')
+            sender_name = getattr(sender, 'name', '')
+            if content and sender_name:
+                try:
+                    logger.info(f"V29 DEBUG: Calling extract_and_retain for {sender_name}")
+                    _hindsight_ref.extract_and_retain(sender_name, content, _all_agent_names)
+                except Exception as e:
+                    logger.info(f"V29: Memory extraction failed for {sender_name}: {e}")
+            else:
+                logger.info(f"V29 DEBUG: Skipping retain. content_len={len(content) if content else 0}, sender_name={sender_name}")
+            return message
+        
+        # V26-Fix2: Content-level thought-tag handling
         import re as _re_hook
         def _strip_thoughts_before_send(sender, message, recipient, silent):
             """V26: Extract content from <thought> tags instead of discarding it."""
@@ -1322,7 +1410,6 @@ class AG2DebateEngine:
                 if outside and len(outside) > 20:
                     return outside
                 # Step 4: If ALL content was inside tags, use the extracted thought content
-                # This prevents empty messages caused by over-aggressive stripping
                 if thought_content:
                     return '\n'.join(thought_content)
                 return text  # Ultimate fallback: return original
@@ -1336,13 +1423,23 @@ class AG2DebateEngine:
                     message['content'] = cleaned
                 return message
             return message
-        
+            
+        # --- COMBINED HOOK REGISTRATION ---
+        def _unified_before_send_hook(sender, message, recipient, silent):
+            # 1. Thought tags (modifies message content)
+            msg1 = _strip_thoughts_before_send(sender, message, recipient, silent)
+            # 2. Redundancy check (injects warnings)
+            msg2 = _v28_redundancy_check(sender, msg1, recipient, silent)
+            # 3. Retain memory (observes the final transformed message)
+            _v29_memory_retain_hook(sender, msg2, recipient, silent)
+            return msg2
+            
         for ag in all_agents:
             try:
-                ag.register_hook("process_message_before_send", _strip_thoughts_before_send)
+                ag.register_hook("process_message_before_send", _unified_before_send_hook)
             except Exception:
-                pass  # Some agent types may not support hooks
-        logger.info("V26-Fix2: Content-preserving ThoughtTag handler registered on all agents.")
+                pass
+        logger.info("V30: Unified Message Hook (ThoughtTags -> Redundancy -> Retain) registered on all agents.")
             
         
         self.debate_fsm = DebateStateMachine(agent_count=len(stakeholder_agents))
@@ -1382,6 +1479,13 @@ class AG2DebateEngine:
         ADJOURNMENT_TURN_LIMIT = 40  # V26: Increased from 30→40 for full 10-agent deliberation
         _main_turn_counter = [0]  # Mutable closure for tracking turns
         _adjournment_forced = [False]  # Flag to prevent double-adjournment
+        
+        # V28-Fix4: Veto Resolution Tracking
+        # When an agent triggers is_high_risk=True, their name is added here.
+        # After another agent proposes a mitigation that references the vetoed concern,
+        # the FSM routes the next turn back to the veto-raiser for explicit re-evaluation.
+        _unresolved_vetoes = {}  # {agent_name: veto_dimension}
+        _veto_resolution_pending = [None]  # Name of veto-raiser awaiting resolution turn
         
         def fsm_speaker_selector(last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
             messages = groupchat.messages
@@ -1530,6 +1634,48 @@ class AG2DebateEngine:
             if "[SOVEREIGN ADJOURNMENT:" in last_msg or "[BOARDROOM ADJOURNED]" in last_msg:
                 self.debate_fsm.advance(override=DebateState.VOTE)
                 return moderator_agent
+            
+            # V28-Fix4: Veto Resolution Routing
+            # Step 1: Detect new vetoes from vote alerts in the transcript
+            if "High Risk Veto Triggered: True" in last_msg or "is_high_risk" in last_msg.lower():
+                # Extract the veto-raiser's name from the message
+                last_speaker_name = last_speaker.name if hasattr(last_speaker, 'name') else ''
+                # Check if this is a vote alert mentioning another agent
+                for agent in groupchat.agents:
+                    if agent in stakeholder_agents and agent.name in last_msg and agent.name != 'Boardroom_Moderator':
+                        _unresolved_vetoes[agent.name] = 'unresolved'
+                        logger.info(f"V28-Fix4: VETO TRACKED for {agent.name}")
+                        break
+                else:
+                    if last_speaker_name and last_speaker in stakeholder_agents:
+                        _unresolved_vetoes[last_speaker_name] = 'unresolved'
+                        logger.info(f"V28-Fix4: VETO TRACKED for {last_speaker_name}")
+            
+            # Step 2: If a mitigation was just proposed and there are unresolved vetoes,
+            # route to the veto-raiser for explicit re-evaluation
+            mitigation_keywords = ['resolve', 'mitigate', 'address', 'compromise', 'propose', 'solution',
+                                   'architecture', 'framework', 'safeguard', 'write-isolation', 'decoupled']
+            if _unresolved_vetoes and not _adjournment_forced[0]:
+                msg_lower = last_msg.lower()
+                has_mitigation = any(kw in msg_lower for kw in mitigation_keywords)
+                if has_mitigation and last_speaker.name not in _unresolved_vetoes:
+                    # Route to the first unresolved veto-raiser
+                    for veto_name in list(_unresolved_vetoes.keys()):
+                        veto_agent = next((a for a in groupchat.agents if a.name == veto_name), None)
+                        if veto_agent and veto_agent != last_speaker:
+                            logger.info(f"V28-Fix4: VETO RESOLUTION ROUTING → {veto_name} gets response turn after mitigation by {last_speaker.name}")
+                            # Inject resolution prompt into the veto-raiser
+                            base_sys = veto_agent.system_message.split("[VETO RESOLUTION TURN]")[0]
+                            veto_agent.update_system_message(
+                                base_sys +
+                                f"\n\n[VETO RESOLUTION TURN] A mitigation was proposed by {last_speaker.name}. "
+                                f"You previously raised a HIGH RISK veto. You MUST now explicitly: "
+                                f"(a) ACCEPT the mitigation and withdraw your veto (set is_high_risk=False in your next vote), OR "
+                                f"(b) SUSTAIN your veto with a specific reason why the mitigation is insufficient. "
+                                f"Do NOT let your veto be overridden by authority. If the fix is inadequate, say so."
+                            )
+                            del _unresolved_vetoes[veto_name]  # Remove from pending (they'll re-veto if needed)
+                            return veto_agent
             
             # V25-Fix1: Direct-address detection — if last message names a specific agent, route to them
             if not _adjournment_forced[0]:
@@ -1693,9 +1839,17 @@ class AG2DebateEngine:
             elif state.name == 'VOTE':
                 fsm_override = "\n\n[PROCEDURAL OVERRIDE: FATAL VOTING PHASE]\nYou MUST output your final mathematical vote using `submit_tension_vector`. ANY CHIT-CHAT IS A SYSTEM VIOLATION."
                 
-            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0]
-            next_selected.update_system_message(f"{base_sys}\n\n{agenda}{assertiveness}{fsm_override}")
-            print(f"\n[LEDGER INJECTION] {next_selected.name} context updated. Phase: {state.name}.")
+            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0].split("[YOUR EVOLVING MEMORY")[0]
+            
+            # V29: Inject recalled memory from HindsightBoardroom
+            memory_context = ""
+            try:
+                memory_context = self.hindsight_boardroom.recall_for_turn(next_selected.name)
+            except Exception as e:
+                logger.debug(f"V29: Memory recall failed for {next_selected.name}: {e}")
+            
+            next_selected.update_system_message(f"{base_sys}\n\n{memory_context}\n\n{agenda}{assertiveness}{fsm_override}")
+            print(f"\n[LEDGER+MEMORY INJECTION] {next_selected.name} context updated. Phase: {state.name}. Memory: {len(memory_context)} chars.")
             return next_selected
 
         # ═══════════════════════════════════════════════════════════════════
@@ -1831,8 +1985,24 @@ class AG2DebateEngine:
         
         # U22-P3: Compile the stance digest for the focused debate
         # V25: Increase truncation to 500 chars to avoid broken thought tags
+        # V28-Fix5: Clean stance digest — 2 sentences max per agent, no raw thought tags
+        def _clean_stance(text: str) -> str:
+            """Extract first 2 sentences from stance, stripping all thought tags."""
+            cleaned = AG2DebateEngine._strip_thought_tags(text)
+            # Detect stance marker (SUPPORT/OPPOSE/CONDITIONAL) if present
+            stance_marker = ''
+            for marker in ['SUPPORT', 'OPPOSE', 'CONDITIONAL']:
+                if marker in cleaned.upper():
+                    stance_marker = f'[{marker}] '
+                    break
+            # Extract first 2 sentences
+            import re as _re_stance
+            sentences = _re_stance.split(r'(?<=[.!?])\s+', cleaned.strip())
+            two_sentences = ' '.join(sentences[:2])[:300]
+            return f"{stance_marker}{two_sentences}"
+        
         stance_digest = "\n".join([
-            f"- {name}: {AG2DebateEngine._strip_thought_tags(stance)[:500]}" for name, stance in initial_stances.items()
+            f"- {name}: {_clean_stance(stance)}" for name, stance in initial_stances.items()
         ])
         
         # V25-Fix2: Feature Champion Defense — inject defense mandate into CEO/CPO/Sales
@@ -1885,20 +2055,26 @@ class AG2DebateEngine:
         
         logger.info("Executing AG2 Autonomous Boardroom Debate (V24 Direct Cross-Agent Mode)...")
         
-        # V24: Enhanced initial message — removes sub-debate references, emphasizes direct cross-talk
+        # V28-Fix7: Enhanced Deliberation Protocol — Novelty-First Board Memo
         initial_message = (
             f"BOARD MEMORANDUM — AGENDA ITEM:\n"
             f"Feature Proposal: {feature.title}\n"
-            f"Description: {feature.description}\n\n"
-            f"=== INITIAL BOARD POSITIONS (Gathered Simultaneously) ===\n{stance_digest}\n\n"
-            "DELIBERATION PROTOCOL:\n"
-            "1. You are in a LIVE boardroom. Address other executives BY NAME when responding to their points.\n"
-            "2. If the CISO raises a security concern, the CEO should ask 'Can we get legal sign-off before proceeding?'\n"
-            "3. If the CPO proposes a costly feature, the CFO MUST challenge the unit economics.\n"
-            "4. Cross-questioning is MANDATORY — do NOT simply state your position in isolation.\n"
-            "5. When you have debated sufficiently and responded to challenges, cast your final vote "
-            "using the `submit_tension_vector` tool.\n"
-            "6. The Chairman will call the session to order if deliberation stalls."
+            f"[The brief has been distributed. Do NOT restate it. Proceed directly to analysis.]\n\n"
+            f"=== INITIAL BOARD POSITIONS ===\n{stance_digest}\n\n"
+            "DELIBERATION PROTOCOL (V28 — Novelty-First):\n"
+            "1. LIVE BOARDROOM. Address executives BY NAME when responding.\n"
+            "2. NO REHASHING: The brief is read. Every statement must add NEW value — "
+            "a new risk, a new number, a new solution, or a direct challenge.\n"
+            "3. EVIDENCE DEMAND: Challenge any unvalidated number. Ask 'Based on what data?' "
+            "Flag unproven claims as 'UNVALIDATED ASSUMPTION — requires [validation step].'\n"
+            "4. CROSS-EXAMINATION is MANDATORY. Each turn, ask at least ONE specific question to another exec.\n"
+            "5. VETO OWNERSHIP: If you veto (is_high_risk=True), YOU own the resolution. "
+            "Propose your specific fix — don't just say 'no'. Other execs: if you propose a mitigation "
+            "for a veto, the veto-raiser gets the next turn to accept or sustain their veto.\n"
+            "6. BEFORE VOTING: State ONE thing you learned from this debate that CHANGED your initial position. "
+            "If nothing changed, explain specifically why the counter-arguments failed.\n"
+            "7. Vote using `submit_tension_vector` with dimensional scores.\n"
+            "8. The Chairman will adjourn if deliberation stalls."
         )
         
         # Initiate Chat with the first conflict agent or first focused stakeholder
@@ -2123,6 +2299,22 @@ class AG2DebateEngine:
 
         # Stop Runtime logging session
         autogen.runtime_logging.stop()
+        
+        # V29: Persist evolved agent memories
+        try:
+            evolved_memories = self.hindsight_boardroom.get_all_memories()
+            for agent_name, mem_dict in evolved_memories.items():
+                reflection = self.hindsight_boardroom.reflect_post_debate(agent_name)
+                mem_dict['evolved_reflection'] = reflection
+                logger.info(f"V29: Evolved memory for {agent_name}: {mem_dict.get('turn_count', 0)} turns, "
+                            f"{len(mem_dict.get('commitments', []))} commitments, "
+                            f"{len(mem_dict.get('proposals', []))} proposals")
+            # Store in instance for DB persistence downstream
+            self._evolved_agent_memories = evolved_memories
+            logger.info(f"V29: Persisted evolved memories for {len(evolved_memories)} agents.")
+        except Exception as e:
+            logger.warning(f"V29: Memory persistence failed: {e}")
+            self._evolved_agent_memories = {}
 
         # Map AG2 groupchat.messages → DebateRound for DB persistence
         import re
