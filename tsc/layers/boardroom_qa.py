@@ -105,8 +105,9 @@ def ask_the_board(boardroom: HindsightBoardroom, question: str, llm_config: Opti
     return results
 
 
-def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom):
-    """Pretty-print the board's responses."""
+def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom, qa_history: Dict[str, list] = None, question: str = ""):
+    """Pretty-print the board's responses and update ephemeral history."""
+    import re
     ROLE_EMOJI = {
         "CEO": "👔", "CTO": "⚙️", "CFO": "💰", "CISO": "🔒",
         "CPO": "🎯", "Legal": "⚖️", "CMO": "📢", "CDO": "📊",
@@ -118,9 +119,32 @@ def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom)
         role_short = memory.role_short if memory else "Other"
         emoji = ROLE_EMOJI.get(role_short, "🏢")
         
+        # Strip the Chain of Thought tags for a cleaner executive output
+        clean_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL).strip()
+        
         print(f"\n{emoji} {name} ({memory.role if memory else 'Unknown'}):")
-        print(f"   {answer}")
+        print(f"   {clean_answer}")
         print()
+        
+        # Safely update ephemeral history if enabled
+        if qa_history is not None and name in qa_history and clean_answer and not clean_answer.startswith("[Query failed"):
+            # 1. Ephemeral Context Updates (Fast local session context)
+            qa_history[name].append(f"User Question: {question}")
+            qa_history[name].append(f"Your Previous Answer: {clean_answer}")
+            
+            # 2. Actual Hindsight Memory Evolution (Permanent state change)
+            # This mutates their actual bank but does not touch the original SQLite DB of the simulation.
+            # Tagged clearly as 'post_debate_qa' to avoid corrupting debate context.
+            if boardroom._hindsight and memory.hindsight_bank_id:
+                try:
+                    qa_content = f"[POST-DEBATE USER Q&A] User explicitly asked: {question}\n{name} formally replied: {clean_answer}"
+                    boardroom._run_sync(boardroom._hindsight.retain(
+                        bank_id=memory.hindsight_bank_id,
+                        content=qa_content,
+                        tags=["post_debate_qa", "user_interaction", "evolution"]
+                    ))
+                except Exception:
+                    pass  # Fail gracefully without breaking terminal UX
 
 
 def main():
@@ -138,7 +162,11 @@ def main():
     boardroom = HindsightBoardroom()
     for name, mem_dict in raw_memories.items():
         try:
-            boardroom.memories[name] = LiveAgentMemory.from_dict(mem_dict)
+            mem = LiveAgentMemory.from_dict(mem_dict)
+            # Fix deserialization gap: Reconstruct bank ID if missing from legacy DB blob
+            if not mem.hindsight_bank_id:
+                mem.hindsight_bank_id = f"boardroom-{mem.agent_name}"
+            boardroom.memories[name] = mem
         except Exception as e:
             print(f"⚠️  Skipping {name}: {e}")
     
@@ -164,23 +192,78 @@ def main():
         return
     
     # Interactive mode
-    print(f"\n💬 Ask the entire board a question. Type 'quit' to exit.\n")
+    print("\n💬 Interactive Boardroom Session started.")
+    print("Type 'quit' at any prompt to exit.\n")
+    
+    valid_targets = boardroom.get_agent_names()
+    menu_options = ["All Agents"] + valid_targets
+    
+    # Store ephemeral QA history for this session without corrupting original memory
+    qa_history = {name: [] for name in valid_targets}
+
     while True:
+        print("\nAvailable targets:")
+        for idx, option in enumerate(menu_options):
+            print(f"  [{idx}] {option}")
+        
         try:
-            question = input("You > ").strip()
+            choice = input("\nSelect a number (or type 'quit') > ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n\n👋 Board session adjourned.")
             break
-        
+
+        if choice.lower() in ('quit', 'exit', 'q'):
+            print("\n🏛️  Board session adjourned.")
+            break
+        if not choice:
+            continue
+            
+        if not choice.isdigit() or not (0 <= int(choice) < len(menu_options)):
+            print(f"⚠️  Invalid selection. Please enter a number between 0 and {len(menu_options)-1}.")
+            continue
+
+        target_idx = int(choice)
+        is_all = (target_idx == 0)
+        target = menu_options[target_idx]
+
+        try:
+            if is_all:
+                question = input("Question for ALL agents > ").strip()
+            else:
+                question = input(f"Question for {target} > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n\n👋 Board session adjourned.")
+            break
+
         if not question:
             continue
         if question.lower() in ('quit', 'exit', 'q'):
             print("\n🏛️  Board session adjourned.")
             break
+
+        if is_all:
+            print(f"\n📣 Broadcasting to {len(valid_targets)} agents...\n")
+            # Build history-aware questions for all
+            results = {}
+            for t in valid_targets:
+                hist = "\n".join(qa_history[t])
+                full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
+                try:
+                    results[t] = boardroom.query_agent(t, full_q, llm_config)
+                    # We'll update history inside the print function or here
+                except Exception as e:
+                    results[t] = f"[Query failed: {e}]"
+        else:
+            print(f"\n📣 Asking {target}...\n")
+            hist = "\n".join(qa_history[target])
+            full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
+            try:
+                results = {target: boardroom.query_agent(target, full_q, llm_config)}
+            except Exception as e:
+                results = {target: f"[Query failed: {e}]"}
         
-        print(f"\n📣 Broadcasting to {len(boardroom.memories)} agents...\n")
-        results = ask_the_board(boardroom, question, llm_config)
-        print_board_response(results, boardroom)
+        # Print responses and update history
+        print_board_response(results, boardroom, qa_history, question)
 
 
 if __name__ == "__main__":

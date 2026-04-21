@@ -435,7 +435,10 @@ class HindsightBoardroom:
                     budget="high",
                     include_facts=True,
                 ))
-                return str(result) if result else ""
+                # Extract the clean text answer from the Pydantic object if it exists
+                if result:
+                    return getattr(result, 'answer', getattr(result, 'text', str(result)))
+                return ""
             except Exception as e:
                 logger.warning(f"V29: Hindsight reflect failed for {agent_name}: {e}")
 
@@ -470,7 +473,10 @@ class HindsightBoardroom:
                     ),
                     include_facts=True,
                 ))
-                return str(result) if result else "No reflection available."
+                # Extract the clean text answer from the Pydantic object
+                if result:
+                    return getattr(result, 'answer', getattr(result, 'text', str(result)))
+                return "No reflection available."
             except Exception as e:
                 logger.warning(f"V29: Hindsight query failed: {e}")
 
