@@ -170,6 +170,10 @@ class MarketSentimentSeries(BaseModel):
     agent_interactions: Dict[str, List[str]] = Field(default_factory=dict)
     agent_alignment: Dict[str, float] = Field(default_factory=dict)
     
+    # LLM Aggregate Analysis
+    aggregate_analysis: Optional[str] = None
+    population_size: int = 0
+    
     # Raw Data pointers
     db_snapshot_path: Optional[str] = None
     trace_log_path: Optional[str] = None

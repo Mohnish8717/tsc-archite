@@ -673,3 +673,308 @@ class HindsightBoardroom:
                 self._hindsight.close()
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OASIS MARKET FIT INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════
+
+class HindsightOASISManager:
+    """Manages persistent Hindsight memory banks for OASIS social agents.
+    
+    Implements the optimal 3-layer biomimetic memory loop:
+    
+    1. RETAIN (Structured Storage)
+       - Conversation arrays with timestamps, entities, and participant prefixes
+       - Hindsight extracts discrete facts, temporal data, and entity relationships
+    
+    2. RECALL (Hybrid Retrieval) — used for per-turn context injection
+       - 4 parallel strategies: Semantic (vector), Keyword (BM25), Graph (entity), Temporal
+       - Fast and targeted — replaces expensive reflect() for per-turn use
+    
+    3. REFLECT (Higher-Order Learning) — reserved for post-timestep synthesis
+       - Synthesizes raw experiences into Mental Models / observations
+       - Used for behavior change across timesteps
+    
+    All methods are ASYNC to avoid event loop conflicts with the Hindsight SDK.
+    """
+    def __init__(self, hindsight_url: Optional[str] = None, api_key: Optional[str] = None):
+        self._hindsight = None
+        self._mode = "EMBEDDED"
+        
+        url = hindsight_url or os.getenv("HINDSIGHT_URL", "")
+        key = api_key or os.getenv("HINDSIGHT_API_KEY", "")
+        if url:
+            try:
+                from hindsight_client import Hindsight
+                self._hindsight = Hindsight(base_url=url, api_key=key or None)
+                self._mode = "HINDSIGHT"
+                logger.info(f"OASIS: Hindsight client initialized → {url}")
+            except Exception as e:
+                # We log the error but don't set hindsight to None yet, 
+                # we will try to connect during initialize_agents.
+                logger.error(f"OASIS: Hindsight client initialization failed: {e}")
+                
+        self.simulation_id = ""
+        self.feature_title = ""
+        self._provisioned_banks: list[str] = []
+
+    async def check_connection(self) -> bool:
+        """Verify the Hindsight server is responsive."""
+        if not self._hindsight:
+            return False
+        try:
+            # list_banks is a cheap way to check auth and connectivity
+            # Correct path is .banks.list_banks()
+            await self._hindsight.banks.list_banks()
+            return True
+        except Exception as e:
+            logger.warning(f"OASIS: Hindsight connection check failed: {e}")
+            return False
+
+
+    async def initialize_agents(self, agent_profiles: list, feature_title: str, feature_description: str, simulation_id: str = "default") -> None:
+        """Create Hindsight Memory Banks + Mental Models for all Oasis agents.
+        
+        Sets up the 4-network architecture per agent:
+        - World Network: seeded with feature context
+        - Bank Network: empty, populated during simulation via structured retain
+        - Opinion Network: built via mental model auto-refresh
+        - Observation Network: populated by Hindsight's observation consolidation
+        """
+        self.feature_title = feature_title
+        self.simulation_id = simulation_id
+        logger.info(f"🏦 OASIS: Provisioning Hindsight Memory Banks for simulation '{simulation_id}' ({len(agent_profiles)} agents)...")
+        
+        # ── CONNECTION PREFLIGHT ──
+        # Ensure we can actually talk to the server before looping through agents
+        connected = False
+        for i in range(5):
+            if await self.check_connection():
+                connected = True
+                break
+            logger.warning(f"  ⏳ Hindsight connection pending... retry {i+1}/5")
+            await asyncio.sleep(2.0 * (i + 1))
+            
+        if not connected:
+            raise ConnectionError(f"OASIS: Could not establish stable connection to Hindsight at {os.getenv('HINDSIGHT_URL')}")
+
+        created_count = 0
+        for profile in agent_profiles:
+            bank_id = f"oasis-{self.simulation_id}-persona-{profile.agent_id}"
+            user_info = getattr(profile, 'user_info_dict', {})
+            agent_name = user_info.get('name', f"Agent_{profile.agent_id}")
+            
+            # Rate-limiting / Jitter to prevent overloading the gRPC pool or server
+            await asyncio.sleep(0.5)
+
+            for attempt in range(3):
+                try:
+                    # Clean slate: delete any pre-existing bank
+                    try:
+                        await self._hindsight.adelete_bank(bank_id=bank_id)
+                        logger.info(f"  🗑️  Bank deleted (clean slate): {bank_id}")
+                    except Exception:
+                        pass
+
+                    # Create the persona memory bank with retain mission
+                    result = await self._hindsight.acreate_bank(
+                        bank_id=bank_id,
+                        name=f"OASIS-{agent_name}",
+                        background=(
+                            f"OASIS Market Simulation Agent. Name: {agent_name}. "
+                            f"You represent a simulated persona evaluating: '{feature_title}'."
+                        ),
+                        retain_mission=(
+                            "Extract evolving beliefs, sentiments, objections, needs, and reactions "
+                            "to the proposed feature. Track stance changes over time."
+                        ),
+                        enable_observations=True,
+                        observations_mission=(
+                            "Synthesize the agent's evolving stance into a coherent narrative. "
+                            "Track sentiment trajectory and identify inflection points."
+                        ),
+                    )
+                    logger.info(f"  🏗️  Bank created for persona: {agent_name} ({bank_id})")
+                    
+                    # ── STRUCTURED RETAIN: Seed with feature context (World Network) ──
+                    await self._hindsight.aretain_batch(
+                        bank_id=bank_id,
+                        items=[{
+                            "content": (
+                                f"[SYSTEM]: A new feature has been proposed for evaluation: "
+                                f"'{feature_title}'. Description: {feature_description[:1000]}"
+                            ),
+                            "context": "Initial feature briefing for market simulation",
+                            "entities": [
+                                {"text": feature_title, "type": "FEATURE"},
+                                {"text": agent_name, "type": "AGENT"},
+                            ],
+                            "tags": ["world", "feature_introduction"],
+                        }],
+                    )
+                    
+                    # ── MENTAL MODEL: Auto-refreshing sentiment tracker ──
+                    try:
+                        self._hindsight.create_mental_model(
+                            bank_id=bank_id,
+                            name="feature_sentiment",
+                            source_query=(
+                                f"What is my overall assessment and current stance on "
+                                f"'{feature_title}'? Am I bullish, bearish, or neutral? Why?"
+                            ),
+                            trigger={"refresh_after_consolidation": True},
+                            max_tokens=300,
+                        )
+                    except Exception as e:
+                        logger.warning(f"  ⚠️  Mental model creation skipped for {bank_id}: {e}")
+                    
+                    self._provisioned_banks.append(bank_id)
+                    created_count += 1
+                    logger.info(f"  ✅ Bank provisioned: {bank_id} ({created_count}/{len(agent_profiles)})")
+                    break  # Success
+                    
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(f"  ⏳ Retry {attempt+1} for {bank_id} due to: {e}")
+                        await asyncio.sleep(2.0)
+                    else:
+                        logger.error(f"  ❌ OASIS: Bank creation FAILED for {agent_name} ({bank_id}) after 3 attempts: {e}")
+        
+        logger.info(f"🏦 OASIS: Finished provisioning. Total: {created_count}/{len(agent_profiles)} memory banks.")
+
+    async def structured_retain(
+        self, agent_id: str, agent_name: str, action_type: str,
+        content: str, timestep: int
+    ) -> None:
+        """LAYER 1 — Structured Retain: Store agent actions with entities and timestamps.
+        
+        Uses aretain_batch() with structured items instead of raw text blobs.
+        Hindsight extracts discrete facts, temporal data, and entity relationships.
+        """
+        if not self._hindsight:
+            return
+            
+        bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
+        try:
+            await self._hindsight.aretain_batch(
+                bank_id=bank_id,
+                items=[{
+                    "content": f"[{agent_name}]: {content[:1500]}",
+                    "timestamp": datetime.now().isoformat(),
+                    "context": (
+                        f"OASIS simulation timestep {timestep}. "
+                        f"Agent performed action: {action_type}."
+                    ),
+                    "entities": [
+                        {"text": self.feature_title, "type": "FEATURE"},
+                        {"text": agent_name, "type": "AGENT"},
+                    ],
+                    "tags": ["experience", action_type.lower(), f"timestep_{timestep}"],
+                }],
+            )
+            logger.info(f"  🧠 Memory inclusion (Timestep {timestep}): Stored '{action_type}' for {agent_name} into {bank_id}")
+        except Exception as e:
+            logger.warning(f"OASIS: Structured retain failed for {agent_name} ({bank_id}): {e}")
+
+    # Keep backward-compatible alias
+    async def extract_and_retain(self, agent_id: str, agent_name: str, action_type: str, content: str, timestep: int) -> None:
+        """Backward-compatible alias for structured_retain."""
+        return await self.structured_retain(agent_id, agent_name, action_type, content, timestep)
+
+    async def recall_for_turn(self, agent_id: str) -> str:
+        """LAYER 2 — Hybrid Recall: Fast per-turn context injection.
+        
+        Uses arecall() with 4 parallel retrieval strategies:
+        - Semantic (vector similarity)
+        - Keyword (BM25)
+        - Graph (entity relationships)  
+        - Temporal (time range)
+        
+        This is MUCH faster than areflect() and better for per-turn context.
+        """
+        if not self._hindsight:
+            return ""
+            
+        bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
+        try:
+            result = await self._hindsight.arecall(
+                bank_id=bank_id,
+                query=(
+                    f"What are my current thoughts, objections, and sentiments "
+                    f"on '{self.feature_title}'? What actions have I taken?"
+                ),
+                types=["experience", "opinion", "observation"],
+                budget="low",
+                max_tokens=500,
+                include_entities=True,
+                max_entity_tokens=200,
+            )
+            
+            # Build context from recall results
+            parts = []
+            if hasattr(result, 'results') and result.results:
+                for item in result.results:
+                    text = getattr(item, 'text', str(item))
+                    if text and len(text) > 5:
+                        parts.append(text)
+            
+            if parts:
+                context = "\n".join(parts[:5])  # Top 5 most relevant memories
+                return (
+                    "\n\nYOUR EVOLVING OPINION DATABASE (HINDSIGHT):\n"
+                    "The following memories represent your actual past experiences and beliefs. "
+                    "Treat these as ground truth when forming your next action.\n\n"
+                    f"{context}\n"
+                )
+        except Exception as e:
+            logger.warning(f"OASIS: Hybrid recall failed for {agent_id}: {e}")
+        return ""
+
+    async def synthesize_post_timestep(self, timestep: int) -> None:
+        """LAYER 3 — Post-Timestep Reflection: Higher-order learning.
+        
+        Called once per timestep AFTER all agents have acted.
+        Triggers areflect() to synthesize raw experiences into:
+        - Updated observations
+        - Evolved opinion scores  
+        - Mental model refresh
+        
+        This is the expensive operation — reserved for between-round synthesis.
+        """
+        if not self._hindsight:
+            return
+            
+        logger.info(f"🔄 OASIS: Post-timestep {timestep} reflection for {len(self._provisioned_banks)} agents...")
+        for bank_id in self._provisioned_banks:
+            # Robust retry for reflection
+            for attempt in range(3):
+                try:
+                    reflection = await self._hindsight.areflect(
+                        bank_id=bank_id,
+                        query=(
+                            f"After round {timestep} of the market simulation, "
+                            f"what is my evolved stance on '{self.feature_title}'? "
+                            f"Have I changed my mind about anything?"
+                        ),
+                        budget="mid",
+                    )
+                    ans = getattr(reflection, 'text', str(reflection))
+                    logger.info(f"  🧠 {bank_id} post-T{timestep}: {ans[:120]}...")
+                    break # Success
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(f"  ⏳ Reflect retry {attempt+1} for {bank_id}: {e}")
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                    else:
+                        logger.warning(f"  ⚠️  Reflect failed for {bank_id} after 3 attempts: {e}")
+            
+            await asyncio.sleep(0.5) # Jitter to prevent connection dropping
+
+    def close(self):
+        if self._hindsight:
+            try:
+                self._hindsight.close()
+            except Exception:
+                pass
+

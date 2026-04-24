@@ -22,7 +22,7 @@ from tsc.llm.base import LLMClient
 from tsc.llm.factory import create_llm_client
 from tsc.memory.fact_retriever import FactRetriever
 from tsc.memory.graph_store import GraphStore
-from tsc.memory.zep_client import ZepMemoryClient
+# Zep removed entirely; orchestrator will use Hindsight globally
 from tsc.models.inputs import DocumentType, InputDocument
 from tsc.models.recommendation import FinalRecommendation
 
@@ -40,11 +40,12 @@ class TSCPipeline:
         self._cfg = cfg or settings
         self._llm = llm_client or create_llm_client(settings=self._cfg)
 
-        # Memory
-        zep_key = self._cfg.zep_api_key
-        self._zep = ZepMemoryClient(api_key=zep_key) if zep_key else ZepMemoryClient(api_key="")
-        self._graph_store = GraphStore(self._zep)
-        self._fact_retriever = FactRetriever(self._zep)
+        # Memory: Transitioning to Universal Hindsight World Data Bank
+        from tsc.memory.world_bank import WorldDataBank
+        self._world_bank = WorldDataBank()
+        # GraphStore and FactRetriever will be refactored to use WorldDataBank
+        self._graph_store = GraphStore(self._world_bank)
+        self._fact_retriever = FactRetriever(self._world_bank)
 
         # Progress callback (for web UI)
         self._on_progress: Optional[Any] = None
@@ -83,8 +84,8 @@ class TSCPipeline:
             logger.info("Simulation Count Override: %d", num_simulations)
         logger.info("=" * 60)
 
-        # Initialize memory
-        await self._zep.initialize_session("tsc_eval")
+        # Initialize Universal Memory
+        await self._world_bank.initialize_session("tsc-world")
 
         # Build document list
         documents = self._build_document_list(

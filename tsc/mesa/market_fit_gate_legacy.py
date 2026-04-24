@@ -22,9 +22,6 @@ from tsc.models.graph import KnowledgeGraph
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.personas import FinalPersona
 
-from tsc.memory.memory_updater import ZepGraphMemoryUpdater
-from tsc.memory.zep_client import ZepMemoryClient
-
 logger = logging.getLogger(__name__)
 
 @dataclass

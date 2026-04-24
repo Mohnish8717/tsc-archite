@@ -53,6 +53,7 @@ from tsc.models.gates import GatesSummary
 from tsc.models.graph import KnowledgeGraph
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.personas import FinalPersona
+from tsc.models.chunks import ProblemContextBundle
 
 logger = logging.getLogger(__name__)
 
@@ -304,10 +305,6 @@ class DebateEngine:
                     "Extracted verdict: APPROVED (confidence: %.2f)", confidence
                 )
                 return "APPROVED", confidence
-                logger.debug(
-                    "Extracted verdict: REJECTED (confidence: %.2f)", confidence
-                )
-                return "REJECTED", confidence
 
         # Default: uncertain/conditional
         logger.debug(
@@ -1192,34 +1189,6 @@ class DebateEngine:
             logger.error("Sub-query generation failed: %s", e)
             return [feature.title]
 
-    async def _expand_context_with_sub_queries(
-        self, 
-        queries: list[str], 
-        zep_client: Any,
-        limit_per_query: int = 5
-    ) -> list[dict[str, Any]]:
-        """Perform parallel searches for all sub-queries and aggregate results."""
-        if not zep_client:
-            return []
-            
-        logger.info("Expanding context using %d sub-queries", len(queries))
-        tasks = [zep_client.search_facts(query, limit=limit_per_query) for query in queries]
-        search_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        aggregated_facts = []
-        seen_uuids = set()
-        
-        for result in search_results:
-            if isinstance(result, list):
-                for fact in result:
-                    uuid = fact.get("uuid") or fact.get("fact")
-                    if uuid not in seen_uuids:
-                        aggregated_facts.append(fact)
-                        seen_uuids.add(uuid)
-        
-        logger.info("Context expanded to %d unique facts", len(aggregated_facts))
-        return aggregated_facts
-
     # ── Main Process ─────────────────────────────────────────────────
 
     async def process(
@@ -1227,9 +1196,9 @@ class DebateEngine:
         feature: FeatureProposal,
         company: CompanyContext,
         graph: KnowledgeGraph,
+        bundle: ProblemContextBundle,
         personas: list[FinalPersona],
         gates_summary: GatesSummary,
-        zep_client: Optional[Any] = None, # MiroFish Optimization: Allow Zep client injection
     ) -> ConsensusResult:
         """Run debate with full validation integration."""
         t0 = time.time()
@@ -1259,18 +1228,6 @@ class DebateEngine:
 
         top_entities = self._get_top_entities(graph)
         
-        # MiroFish Optimization: Sub-Query Reasoning (InsightForge)
-        if zep_client:
-            sub_queries = await self._generate_sub_queries(feature)
-            expanded_facts = await self._expand_context_with_sub_queries(sub_queries, zep_client)
-            # Merge with top entities (keeping top 20 total for context limits)
-            for fact in expanded_facts[:10]:
-                top_entities.append({
-                    "name": "Fact",
-                    "type": "GROUNDING",
-                    "mentions": 1,
-                    "average_urgency": 5.0,
-                    "summary": fact.get("fact", "")
                 })
 
         if self._parallel:

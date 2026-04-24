@@ -166,6 +166,12 @@ class DatabaseConnection:
         """Check if database schema has been initialized."""
         return self._initialized
 
+    @classmethod
+    def reset(cls):
+        """Reset the global database instance (for testing/isolation)."""
+        global _db_instance
+        _db_instance = None
+
 
 # Singleton-like instance management
 _db_instance: Optional[DatabaseConnection] = None

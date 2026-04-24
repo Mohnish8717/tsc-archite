@@ -66,13 +66,12 @@ from tsc.models.personas import FinalPersona
 from tsc.models.graph import KnowledgeGraph
 from tsc.models.gates import GatesSummary
 from tsc.models.debate import ConsensusResult, DebatePosition, DebateRound
-from tsc.memory.zep_client import ZepMemoryClient
 from tsc.memory.fact_retriever import FactRetriever
 from tsc.memory.hindsight_memory import HindsightBoardroom
 
 class DebateState(Enum):
     OPENING    = auto()  # Initial framing, 1 turn per agent
-    RESEARCH   = auto()  # Mandatory RAG phase before any stance
+    RESEARCH   = auto()  # Mandatory Discovery phase before any stance
     CHALLENGE  = auto()  # Red team + contrarian adversarial phase
     MITIGATION = auto()  # Proposed solutions and risk mitigations
     VOTE       = auto()  # Final vote collection, no new arguments
@@ -428,7 +427,7 @@ class AG2DebateEngine:
         self._embedder_loaded = False
         
         # U16: Reasoning-First Mode (LLM Logic Priority)
-        # If True, suppress 'Low Information' escalations and prioritize LLM logic over RAG.
+        # If True, suppress 'Low Information' escalations and prioritize LLM logic over external retrieval.
         self.reasoning_only = os.getenv("TSC_REASONING_ONLY", "false").lower() == "true"
 
         # We will use heterogeneous models
@@ -645,13 +644,13 @@ class AG2DebateEngine:
                     f"  Recommendation: {'PROCEED WITH EXTREME CAUTION' if margin < 50 else 'RISK IS WITHIN ACCEPTABLE BOUNDS'}"
                 )
             
-        def run_multi_agent_rag(query: str) -> str:
+        def run_multi_agent_discovery(query: str) -> str:
             """
-            Multi-Agent RAG 'Research Department'.
+            Multi-Agent Discovery 'Research Department'.
             Invoke this tool to perform deep, multi-step research and reasoning across the internal Knowledge Graph and Memory.
             It spins up a team of a Planner, Retriever, Critic, and Synthesizer to guarantee high-fidelity context.
             """
-            logger.info(f"Spinning up Multi-Agent RAG for query: {query}")
+            logger.info(f"Spinning up Multi-Agent Discovery for query: {query}")
             
             def _internal_search_memory(q: str) -> str:
                 if hasattr(self, 'fact_retriever') and self.fact_retriever:
@@ -672,103 +671,101 @@ class AG2DebateEngine:
                 return "GRAPH QUERY RESULTS:\n" + "\n".join(results[:10])
 
             planner = autogen.AssistantAgent(
-                name="RAG_Planner",
-                system_message="You are the RAG Planner. Analyze the query and break it down into 2-3 specific search tasks for the Retriever. Output exactly what the Retriever needs to search for.",
+                name="Discovery_Planner",
+                system_message="You are the Discovery Planner. Analyze the query and break it down into 2-3 specific search tasks for the Retriever. Output exactly what the Retriever needs to search for.",
                 llm_config=self.primary_config,
             )
             
             retriever = autogen.AssistantAgent(
-                name="RAG_Retriever",
+                name="Discovery_Retriever",
                 system_message=(
-                    "You are the RAG Retriever. You MUST use your `_internal_search_memory` and `_internal_search_graph` tools. "
-                    "If search fails twice or returns empty, DO NOT keep retrying the same queries. "
-                    "Report 'NO DATA FOUND' and provide a logical hypothesis based on the corporate context."
+                    "You are the Discovery Retriever. You MUST use your `_internal_search_memory` and `_internal_search_graph` tools. "
+                    "You receive exact search strings from the Planner. Execute the searches and return the raw output logs."
                 ),
                 llm_config=self.primary_config,
             )
+            
             critic = autogen.AssistantAgent(
-                name="RAG_Critic",
-                system_message="You are the RAG Critic. Review the Retriever's findings against the original user query. If the data fully answers the query with facts, output [CRITIC_APPROVED]. If answers are hallucinated or missing, output [CRITIC_REJECTED] and tell the Planner what else to search.",
-                llm_config=self.critic_config,
+                name="Discovery_Critic",
+                system_message="You are the Discovery Critic. Review the Retriever's findings against the original user query. If the data fully answers the query with facts, output [CRITIC_APPROVED]. If answers are hallucinated or missing, output [CRITIC_REJECTED] and tell the Planner what else to search.",
+                llm_config=self.primary_config,
             )
             
             synthesizer = autogen.AssistantAgent(
-                name="RAG_Synthesizer",
+                name="Discovery_Synthesizer",
                 system_message=(
-                    "You are the RAG Synthesizer. Speak after [CRITIC_APPROVED] or [FORCE_LOGICAL_DEDUCTION] is seen. "
-                    "Synthesize findings into an Intelligence Brief. If no facts were found, perform a 'Logical Deduction' "
-                    "based on organizational patterns and business logic. Output [FINAL_BRIEF] followed by the organized response."
+                    "You are the Discovery Synthesizer. Speak after [CRITIC_APPROVED] or [FORCE_LOGICAL_DEDUCTION] is seen. "
+                    "Combine all findings into a high-density, factual summary answering the query. Ensure the exact source `memory_hash` values are cited. End your message with [FINAL_SYNTHESIS]."
                 ),
                 llm_config=self.primary_config,
             )
+            
+            # Register tools to ALL Discovery agents to prevent "Function not found" if they autonomously try to search
+            discovery_agents = [planner, retriever, critic, synthesizer]
+            for r_agent in discovery_agents:
+                self._register_tools_to_agent(r_agent, {
+                    "_internal_search_memory": _internal_search_memory,
+                    "_internal_search_graph": _internal_search_graph
+                })
 
-            # Register tools to ALL RAG agents to prevent "Function not found" if they autonomously try to search
-            rag_agents = [planner, retriever, critic, synthesizer]
-            for r_agent in rag_agents:
-                self._register_tools_to_agent(r_agent, {"_internal_search_memory": _internal_search_memory, "_internal_search_graph": _internal_search_graph})
-            
-            def is_term(msg):
-                return "[FINAL_BRIEF]" in msg.get("content", "")
-            synthesizer.is_termination_msg = is_term
-            
-            _rag_rejection_count = [0]
-            def rag_speaker_selector(last_speaker, groupchat):
-                messages = groupchat.messages
-                last_msg_dict = messages[-1] if messages else {}
-                last_msg = last_msg_dict.get("content", "") if isinstance(last_msg_dict, dict) else ""
+            # Custom speaker selection
+            _discovery_rejection_count = [0]
+            def discovery_speaker_selector(last_speaker, groupchat):
+                msgs = groupchat.messages
+                if not msgs: return planner
+                last_msg = msgs[-1].get("content", "")
                 
-                # FSM Tool Override: Ensure agents can execute their own tools
-                if isinstance(last_msg_dict, dict):
-                    if "tool_calls" in last_msg_dict or last_msg_dict.get("role") == "tool" or ("_internal_search" in str(last_msg_dict.get("name", ""))):
-                        return last_speaker
+                if "[FINAL_SYNTHESIS]" in last_msg:
+                    return None # Terminate
                 
                 if last_speaker == planner:
                     return retriever
-                if last_speaker == retriever:
+                elif last_speaker == retriever:
                     return critic
-                if last_speaker == critic:
+                elif last_speaker == critic:
                     if "[CRITIC_APPROVED]" in last_msg:
                         return synthesizer
                     else:
-                        _rag_rejection_count[0] += 1
-                        if _rag_rejection_count[0] >= 2:
-                            # ESCAPE HATCH: Too many failures, force logical deduction
-                            groupchat.append({
-                                "role": "system",
-                                "content": "SYSTEM ALERT: RAG knowledge retrieval exhausted. [FORCE_LOGICAL_DEDUCTION] triggered. Synthesizer, proceed with reasoning."
+                        _discovery_rejection_count[0] += 1
+                        if _discovery_rejection_count[0] >= 2:
+                            # Prevent infinite loops in data-poor environments
+                            msgs.append({
+                                "role": "system", 
+                                "name": "System", 
+                                "content": "SYSTEM ALERT: Discovery knowledge retrieval exhausted. [FORCE_LOGICAL_DEDUCTION] triggered. Synthesizer, proceed with reasoning."
                             })
                             return synthesizer
                         return planner
-                return planner
+                
+                return None
 
-            rag_group = autogen.GroupChat(
-                agents=[planner, retriever, critic, synthesizer],
+            discovery_group = autogen.GroupChat(
+                agents=discovery_agents,
                 messages=[],
                 max_round=12,
-                speaker_selection_method=rag_speaker_selector
+                speaker_selection_method=discovery_speaker_selector
             )
-            rag_manager = autogen.GroupChatManager(groupchat=rag_group, llm_config=self.primary_config)
+            discovery_manager = autogen.GroupChatManager(groupchat=discovery_group, llm_config=self.primary_config)
             
             initiator = autogen.UserProxyAgent(
-                name="RAG_Initiator",
+                name="Discovery_Initiator",
+                human_input_mode="NEVER",
                 code_execution_config=False,
-                human_input_mode="NEVER"
             )
             
             try:
-                res = initiator.initiate_chat(
-                    rag_manager,
-                    message=f"ORIGINAL QUERY: {query}\nPlanner, please break this down.",
+                chat_res = initiator.initiate_chat(
+                    discovery_manager,
+                    message=f"We need definitive facts for this query: '{query}'. Planner, what are your search vectors?",
                     summary_method="last_msg"
                 )
-                final_summary = getattr(res, "summary", "") or ""
+                final_summary = chat_res.summary if chat_res else ""
                 if not final_summary:
-                    final_summary = "RAG Department failed to produce a synthesis."
-                return final_summary.replace("[FINAL_BRIEF]", "").strip()
+                    final_summary = "Discovery Department failed to produce a synthesis."
+                return final_summary
             except Exception as e:
-                logger.error(f"Multi-Agent RAG failed: {e}")
-                return "RAG SYSTEM ERROR: Fallback to general reasoning."
-            
+                logger.error(f"Multi-Agent Discovery failed: {e}")
+                return "DISCOVERY SYSTEM ERROR: Fallback to general reasoning."
 
         def generate_vision_mockup(prompt: str) -> str:
             """Generates a UI/UX mockup visualization for board review."""
@@ -841,18 +838,20 @@ class AG2DebateEngine:
         def pin_conflict_to_blackboard(key: str, conflict_summary: str, memory_hash: str) -> str:
             """
             Shared Workspace Tool. Pin facts that contradict previous assertions.
-            MUST include the exact memory_hash from the `run_multi_agent_rag` result to prevent Logical Orphanage.
+            MUST include the exact memory_hash from the `run_multi_agent_discovery` result to prevent Logical Orphanage.
             """
             if not memory_hash:
                 return "ERROR: Logical Orphanage detected. You MUST provide the memory_hash."
             
-            if not hasattr(self, '_fact_verifier'):
-                self._fact_verifier = autogen.AssistantAgent(
-                    name='FactVerifierAgent',
-                    system_message='You receive a CLAIM and a SOURCE_HASH. You must use web_search or run_multi_agent_rag with a DIFFERENT query to find a second independent source that either confirms or refutes the claim. Output: VERIFIED:[claim] or REFUTED:[reason] or INCONCLUSIVE:[reason]. Do NOT accept the original source as verification of itself.',
-                    llm_config=self.critic_config,
-                )
-            self._register_tools_to_agent(self._fact_verifier, {"web_search": web_search, "run_multi_agent_rag": run_multi_agent_rag})
+            # 3. Fact Verify (Can recurse into sub-discovery)
+            if not self.reasoning_only:
+                if not hasattr(self, "_fact_verifier"):
+                    self._fact_verifier = autogen.AssistantAgent(
+                        name='FactVerifierAgent',
+                        system_message='You receive a CLAIM and a SOURCE_HASH. You must use web_search or run_multi_agent_discovery with a DIFFERENT query to find a second independent source that either confirms or refutes the claim. Output: VERIFIED:[claim] or REFUTED:[reason] or INCONCLUSIVE:[reason]. Do NOT accept the original source as verification of itself.',
+                        llm_config=self.critic_config,
+                    )
+                    self._register_tools_to_agent(self._fact_verifier, {"web_search": web_search, "run_multi_agent_discovery": run_multi_agent_discovery})
             
             verification = self._fact_verifier.generate_reply(
                 messages=[{'role': 'user', 'content': f'CLAIM: {conflict_summary}\nSOURCE_HASH: {memory_hash}'}]
@@ -897,7 +896,7 @@ class AG2DebateEngine:
 
         tools["web_search"] = web_search
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
-        tools["run_multi_agent_rag"] = run_multi_agent_rag
+        tools["run_multi_agent_discovery"] = run_multi_agent_discovery
         tools["pin_conflict_to_blackboard"] = pin_conflict_to_blackboard
         tools["generate_vision_mockup"] = generate_vision_mockup
         tools["submit_tension_vector"] = submit_tension_vector
@@ -955,15 +954,12 @@ class AG2DebateEngine:
         company: CompanyContext,
         graph: KnowledgeGraph,
         personas: list[FinalPersona],
-        gates_summary: GatesSummary,
-        zep_client: Optional[ZepMemoryClient] = None,
+        gates_summary: GatesSummary
     ) -> ConsensusResult:
         """Run the comprehensive high-reasoning debate."""
         logger.info(f"AG2 Layer 6: Starting debate with {len(personas)} stakeholders.")
         self.feature = feature
         self.graph = graph
-        if zep_client:
-            self.fact_retriever = FactRetriever(zep_client)
             
         # Refinement: OpenTelemetry Tracing enablement
         if start_tracing and os.getenv("ENABLE_OTEL_TRACING", "0") == "1":
@@ -1074,7 +1070,7 @@ class AG2DebateEngine:
                 "CRITICAL 1: There is a BOARDROOM AGENDA tracking this debate. A Background Synthesizer will automatically monitor your consensus and update the Task Ledger. "
                 "CRITICAL 2: You MUST formalize your conclusion by invoking the `submit_tension_vector` tool representing your vote! "
                 "If the Critic rejects your confidence score as < 0.7 after 3 rounds, you MUST set `is_high_risk` to True in your payload. "
-                "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of this specific graph. You MUST call `run_multi_agent_rag` to deploy the RAG Research Department before making any factual assertions! "
+                "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of this specific graph. You MUST call `run_multi_agent_discovery` to deploy the Discovery Department before making any factual assertions! "
                 "CRITICAL 4 (CONFIDENCE DECAY): If 3 consecutive searches fail to find a direct answer, do NOT keep searching. Fallback to 'General Principles' reasoning and explicitly set `is_low_information=True` in your final vote.\n\n"
                 "[V28 NO-REHASH RULE] You have already READ the feature brief. DO NOT restate its contents, numbers, or architecture. "
                 "Every sentence you speak MUST contain NEW analysis, a NEW risk, a NEW number you computed, or a NEW solution "
@@ -1093,7 +1089,7 @@ class AG2DebateEngine:
                 "Philosophical agreements without specs are NOT boardroom decisions."
             )
             
-            # U6: Inject historical precedent memory from Zep
+            # U6: Inject historical precedent memory
             historical_ctx = self._load_persona_history(persona, getattr(self, 'fact_retriever', None))
             if historical_ctx:
                 public_msg += historical_ctx

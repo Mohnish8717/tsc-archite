@@ -63,7 +63,6 @@ async def main():
             context=context,
             market_context=market_context,
             base_dir=base_dir,
-            zep_client=None,
         )
 
         result_path = payload_path.replace(".json", "_result.json")
