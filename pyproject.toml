@@ -34,6 +34,8 @@ dependencies = [
 
     # Memory (Zep Cloud)
     "zep-cloud>=2.0",
+    # Hindsight Agent Memory (self-hosted)
+    "hindsight-client>=0.5",
 
     # Data processing
     "pdfplumber>=0.10",

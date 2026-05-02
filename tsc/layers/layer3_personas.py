@@ -45,7 +45,7 @@ from tsc.llm.prompts import (
     EXTERNAL_PERSONA_SYSTEM,
     EXTERNAL_PERSONA_USER,
 )
-from tsc.memory.graph_store import GraphStore
+
 from tsc.repositories.persona_repository import PersonaRepository
 from tsc.caching.lru_cache import PersonaCache
 from tsc.db.models import InternalPersona, ExternalPersona
@@ -154,7 +154,7 @@ class PersonaGenerator:
     def __init__(
         self,
         llm_client: LLMClient,
-        graph_store: GraphStore,
+        graph_store: Any,
         persona_repo: Optional[PersonaRepository] = None,
         persona_cache: Optional[PersonaCache] = None
     ) -> None:

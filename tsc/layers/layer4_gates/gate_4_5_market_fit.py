@@ -17,6 +17,12 @@ from tsc.oasis.models import OASISSimulationConfig, MarketSentimentSeries
 from tsc.oasis.simulation_runner import SimulationRunner
 from tsc.oasis.clustering import PerformBehavioralClustering, DetectConsensus
 
+try:
+    from hindsight import HindsightClient
+    HINDSIGHT_AVAILABLE = True
+except ImportError:
+    HINDSIGHT_AVAILABLE = False
+
 # Legacy Fallback
 from tsc.mesa.simulation import RunMesaSimulation
 
@@ -49,7 +55,7 @@ class MarketFitGate(BaseGate):
         self.mode = mode
         self.num_agents = num_agents
         self.enable_parallel = enable_parallel
-        self._zep_client = graph_store # Store Zep client for simulation sync
+        # (Zep completely removed — transitioning to Hindsight World Bank)
         self.config = OASISSimulationConfig(
             simulation_name=simulation_name,
             num_agents=num_agents,
@@ -131,6 +137,42 @@ class MarketFitGate(BaseGate):
                     sentiment_series.consensus_type = consensus_type
                     sentiment_series.convergence_reached = is_consensus
                     
+                    # Base Score derived from adoption score and consensus
+                    raw_score = (strength * 0.3) + (sentiment_series.final_adoption_score * 0.7)
+
+                    # --- HINDSIGHT REFLECT EVALUATION ---
+                    hindsight_modifier = 1.0
+                    hindsight_reasoning = ""
+                    if HINDSIGHT_AVAILABLE:
+                        try:
+                            # Use World Data Bank to cross-reference market transcript!
+                            client = HindsightClient()
+                            
+                            # Compile transcript for the gate
+                            transcript = "\\n".join([f"[{r.timestep}] {r.agent_name} ({r.action_type}): {r.content}" for r in getattr(sentiment_series, "raw_responses", [])[-30:]])
+                            
+                            logger.info("Executing Hindsight Mathematical Reflection over Oasis Transcript...")
+                            reflection = await asyncio.to_thread(
+                                client.reflect,
+                                bank_id="tsc-world", # the global world data bank
+                                query=f"Review this simulated market sentiment transcript against all foundational world data. Does this market reaction align with our strategic facts? Transcript:\\n{transcript}\\nReturn a reflection summarizing strategic alignment."
+                            )
+                            hx_ans = str(reflection.answer) if hasattr(reflection, 'answer') else str(reflection)
+                            
+                            # Mathematical modification based on Hindsight cross-reference
+                            if "align" in hx_ans.lower() or "positive" in hx_ans.lower() or "true" in hx_ans.lower():
+                                hindsight_modifier = 1.15
+                                hindsight_reasoning = f"(Hindsight World Bank validated alignment: {hx_ans[:200]}...)"
+                            elif "misalign" in hx_ans.lower() or "false" in hx_ans.lower() or "conflict" in hx_ans.lower() or "risk" in hx_ans.lower():
+                                hindsight_modifier = 0.8
+                                hindsight_reasoning = f"(Hindsight World Bank detected misalignments: {hx_ans[:200]}...)"
+                            else:
+                                hindsight_reasoning = f"(Hindsight World Bank note: {hx_ans[:200]}...)"
+                        except Exception as hx_err:
+                            logger.error(f"Hindsight Market Fit reflection failed: {hx_err}")
+
+                    score = raw_score * hindsight_modifier
+                    
                     oasis_result = {
                         "sentiment": sentiment_series.consensus_verdict,
                         "adoption_score": sentiment_series.final_adoption_score,
@@ -138,15 +180,14 @@ class MarketFitGate(BaseGate):
                         "consensus_type": consensus_type,
                         "segment_count": len(clusters),
                         "objections": sentiment_series.key_objections,
+                        "hindsight_modifier": hindsight_modifier,
                         "status": "SUCCESS"
                     }
                     
-                    # Score derived from adoption score and consensus
-                    score = (strength * 0.3) + (sentiment_series.final_adoption_score * 0.7)
                     verdict = GateVerdict.STRONG_FIT if score > 0.75 else GateVerdict.PASS
                     if score < 0.4: verdict = GateVerdict.RISKY
                     
-                    reasoning = f"Actual OASIS simulation reached {consensus_type} consensus with {sentiment_series.final_adoption_score*100:.1f}% positive market sentiment. Key objections: {', '.join(sentiment_series.key_objections[:3]) if sentiment_series.key_objections else 'None'}."
+                    reasoning = f"OASIS reached {consensus_type} consensus ({sentiment_series.final_adoption_score*100:.1f}% adoption, modified by {hindsight_modifier}x). {hindsight_reasoning}"
                     
                 except Exception as e:
                     logger.error(f"OASIS Simulation failed: {e}", exc_info=True)

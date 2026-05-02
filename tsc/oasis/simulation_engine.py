@@ -249,11 +249,110 @@ async def RunOASISSimulation(
         for a in social_agents
     }
 
-    # ── 8. Establishing 'Follow' relationships to proposer ──
+    # ── 8. Social Network Topology (Preferential Attachment + Homophily) ────
+    # Instead of a fake "Star Graph" where everyone only follows the proposer,
+    # we build a realistic social network where agents form peer-to-peer
+    # connections. This enables viral contagion, echo chambers, and emergence.
+    #
+    # Strategy:
+    #   Layer 1: Everyone follows the proposer (ensures seed post visibility).
+    #   Layer 2: Each agent follows 3-6 peers, weighted by:
+    #            - influence_strength (preferential attachment — popular get more)
+    #            - agent_type match (homophily — same type = 2x follow weight)
+    #   Layer 3: 30% reciprocity (if A→B, 30% chance B→A back)
+    # ─────────────────────────────────────────────────────────────────────────
     proposer_id = agent_profiles[0].agent_id if agent_profiles else 0
-    logger.info(f"Establishing 'Follow' relationships to proposer (Agent {proposer_id})")
+    num_agents = len(agent_profiles)
+
+    # Layer 1: Universal follow to proposer (guarantees seed post reaches everyone)
+    logger.info(f"🕸️  Building Social Network Topology ({num_agents} agents)...")
     for profile in agent_profiles:
-        await platform_obj.follow(agent_id=int(profile.agent_id), followee_id=int(proposer_id))
+        if int(profile.agent_id) != int(proposer_id):
+            await platform_obj.follow(agent_id=int(profile.agent_id), followee_id=int(proposer_id))
+
+    # Layer 2: Peer-to-peer preferential attachment with homophily
+    follow_edges: set = set()  # Track (follower, followee) to avoid duplicates
+    MIN_PEERS = 3
+    MAX_PEERS = min(6, max(2, num_agents - 1))  # Scale with population
+
+    for profile in agent_profiles:
+        agent_id = int(profile.agent_id)
+
+        # Build weighted candidate pool (exclude self and proposer already followed)
+        candidates = []
+        weights = []
+        for other in agent_profiles:
+            other_id = int(other.agent_id)
+            if other_id == agent_id:
+                continue
+
+            # Base weight = other agent's influence (popular agents attract followers)
+            w = max(0.1, getattr(other, 'influence_strength', 0.5))
+
+            # Homophily bonus: same agent_type gets 2x weight
+            if getattr(profile, 'agent_type', '') == getattr(other, 'agent_type', ''):
+                w *= 2.0
+
+            # Receptiveness of the follower modulates how many connections they form
+            receptiveness = max(0.3, getattr(profile, 'receptiveness', 0.5))
+            w *= receptiveness
+
+            candidates.append(other_id)
+            weights.append(w)
+
+        if not candidates:
+            continue
+
+        # Normalize weights to probabilities
+        total_w = sum(weights)
+        probs = [w / total_w for w in weights]
+
+        # Sample peer count based on agent receptiveness
+        receptiveness = max(0.3, getattr(profile, 'receptiveness', 0.5))
+        num_peers = min(len(candidates), random.randint(MIN_PEERS, MAX_PEERS))
+
+        # Weighted sampling without replacement
+        chosen = set()
+        for _ in range(num_peers):
+            # Rebuild available probs excluding already chosen
+            avail = [(c, p) for c, p in zip(candidates, probs) if c not in chosen]
+            if not avail:
+                break
+            avail_ids, avail_probs = zip(*avail)
+            total_p = sum(avail_probs)
+            avail_probs = [p / total_p for p in avail_probs]
+
+            # Weighted random choice
+            r = random.random()
+            cumulative = 0.0
+            pick = avail_ids[0]
+            for cid, cp in zip(avail_ids, avail_probs):
+                cumulative += cp
+                if r <= cumulative:
+                    pick = cid
+                    break
+            chosen.add(pick)
+
+        # Execute follow calls
+        for followee_id in chosen:
+            edge = (agent_id, followee_id)
+            if edge not in follow_edges:
+                follow_edges.add(edge)
+                await platform_obj.follow(agent_id=agent_id, followee_id=followee_id)
+
+    # Layer 3: Stochastic reciprocity (30% chance of follow-back)
+    reciprocal_edges = set()
+    for (follower, followee) in list(follow_edges):
+        reverse = (followee, follower)
+        if reverse not in follow_edges and reverse not in reciprocal_edges:
+            if random.random() < 0.30:
+                reciprocal_edges.add(reverse)
+                await platform_obj.follow(agent_id=followee, followee_id=follower)
+
+    total_edges = len(follow_edges) + len(reciprocal_edges) + (num_agents - 1)  # peers + reciprocal + proposer
+    avg_degree = total_edges / max(1, num_agents)
+    logger.info(f"🕸️  Network Topology Built: {total_edges} edges, avg degree {avg_degree:.1f} "
+                f"(peers: {len(follow_edges)}, reciprocal: {len(reciprocal_edges)}, hub: {num_agents - 1})")
 
     # ── 8.1 Seed Platform with Feature Proposal ───────────────────────────────
     logger.info(f"Seeding platform with proposal: {feature.title}")

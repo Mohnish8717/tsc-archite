@@ -4,10 +4,13 @@ import faulthandler
 import asyncio
 import logging
 from unittest.mock import MagicMock, patch
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── 0. Diagnostic Readiness ────────────────────────────────────────────────
 faulthandler.enable()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', force=True)
 logger = logging.getLogger(__name__)
 
 # ── 1. macOS Deadlock Immunity (Absolute Shadowing) ────────────────────────
@@ -58,7 +61,11 @@ MOCK_CONFIG = OASISSimulationConfig(
     simulation_name=sim_id,
     population_size=N_AGENTS,
     num_timesteps=N_ROUNDS,
-    platform_type="reddit"
+    platform_type="reddit",
+    interview_prompts=[
+        "Reflect on the discussions so far. What concerns or excitement do you have about this feature? How has your perspective evolved through the conversation?",
+        "What specific use cases would you want tested before adopting this? What risks worry you most?"
+    ]
 )
 
 MOCK_FEATURE = FeatureProposal(
@@ -160,9 +167,9 @@ MOCK_PROFILES = [
         user_info_dict={
             "name": name,
             "profile": {
-                "user_profile": f"{role} with {mbti} profile. CRITICAL: You are participating in a group review of a technical proposal. STAY ON TOPIC. Do not start unrelated threads. Focus your analysis on the 'Absolute Shadowing' feature.",
+                "user_profile": f"{role} with {mbti} profile. {goal} \nCRITICAL: You are participating in a group review of a technical proposal. STAY ON TOPIC. Do not start unrelated threads. Focus your analysis on the 'Ash Social' feature.",
                 "mbti": mbti,
-                "other_info": {"role": role, "goal": f"Analyze the provided feature from the perspective of a {role}. {goal}"}
+                "other_info": {"role": role, "predicted_stance": "UNKNOWN"}
             }
         }
     )
@@ -217,6 +224,24 @@ async def run_sim():
                     cuid_int = int(cuid)
                     c_agent_name = next((p.name for p in MOCK_PROFILES if p.agent_id == cuid_int), f"Agent_{cuid}")
                     print(f"   └─ [{c_agent_name}]: {ccontent}")
+            
+            # Perspective Evolution from Interviews
+            print("\n── PERSPECTIVE EVOLUTION (HINDSIGHT-BACKED) ──")
+            print("-" * 60)
+            for entry in series.raw_responses:
+                agent_id = entry.get("agent_id")
+                agent_name = "Unknown"
+                for p in MOCK_PROFILES:
+                    if str(p.agent_id) == str(agent_id):
+                        agent_name = p.user_info_dict['name']
+                        break
+                
+                print(f"\n🧑 {agent_name}:")
+                for resp in entry.get("responses", []):
+                    prompt_text = resp.get('prompt', resp.get('question', ''))
+                    print(f"  Q: {prompt_text[:100]}")
+                    print(f"  A: {resp.get('content', 'No response')}")
+
             print("\n" + "═" * 80)
 
         # Analysis

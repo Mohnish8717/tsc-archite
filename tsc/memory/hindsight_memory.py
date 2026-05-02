@@ -65,6 +65,67 @@ DISPOSITION_MAP = {
     "HR":     {"skepticism": 45, "literalism": 50, "empathy": 90},
 }
 
+# ─── Runtime LLM Provider Resolution ─────────────────────────────────────
+# Reads HINDSIGHT_LLM_PROVIDER from .env and resolves the active config.
+# This is for LOGGING/DIAGNOSTICS only — the actual provider config is
+# passed to the Hindsight Docker container via start_hindsight_local.sh.
+
+HINDSIGHT_PROVIDER_MAP = {
+    "gemini": {
+        "env_key": "HINDSIGHT_GEMINI_API_KEY",
+        "env_model": "HINDSIGHT_GEMINI_MODEL",
+        "default_model": "gemini-2.5-flash",
+        "label": "Google Gemini (Cloud)",
+    },
+    "ollama": {
+        "env_key": None,  # No API key needed
+        "env_model": "HINDSIGHT_OLLAMA_MODEL",
+        "default_model": "gemma3:12b",
+        "label": "Ollama (Local, Free)",
+    },
+    "groq": {
+        "env_key": "HINDSIGHT_GROQ_API_KEY",
+        "env_model": "HINDSIGHT_GROQ_MODEL",
+        "default_model": "llama-3.3-70b-versatile",
+        "label": "Groq (Cloud, Fast)",
+    },
+    "llamacpp": {
+        "env_key": None,
+        "env_model": None,
+        "default_model": "gemma-4-e2b-it",
+        "label": "llama.cpp (Local, Built-in)",
+    },
+}
+
+
+def get_hindsight_provider_info() -> Dict[str, str]:
+    """Resolve the active Hindsight LLM provider from environment.
+    
+    Returns a dict with keys: provider, model, label, has_key.
+    Used for logging and diagnostics — the actual server config is
+    set via Docker environment variables.
+    """
+    provider = os.getenv("HINDSIGHT_LLM_PROVIDER", "gemini").lower()
+    config = HINDSIGHT_PROVIDER_MAP.get(provider, HINDSIGHT_PROVIDER_MAP["gemini"])
+    
+    model = "unknown"
+    if config["env_model"]:
+        model = os.getenv(config["env_model"], config["default_model"])
+    else:
+        model = config["default_model"]
+    
+    has_key = True
+    if config["env_key"]:
+        has_key = bool(os.getenv(config["env_key"], ""))
+    
+    return {
+        "provider": provider,
+        "model": model,
+        "label": config["label"],
+        "has_key": str(has_key),
+    }
+
+
 # ─── EMBEDDED-ONLY Fallback Extractors ───────────────────────────────────
 # These regex patterns are a DEGRADED FALLBACK used ONLY when no Hindsight
 # server is connected. They are brittle and miss natural language variations
@@ -169,6 +230,7 @@ class HindsightBoardroom:
         self._lock = threading.RLock()
         self._hindsight = None
         self._mode = "EMBEDDED"
+        self._provider_info = get_hindsight_provider_info()
 
         # Try to connect to Hindsight server
         url = hindsight_url or os.getenv("HINDSIGHT_URL", "")
@@ -176,9 +238,13 @@ class HindsightBoardroom:
         if url:
             try:
                 from hindsight_client import Hindsight
-                self._hindsight = Hindsight(base_url=url, api_key=key or None)
+                # Empty API key = local self-hosted mode (no auth required)
+                self._hindsight = Hindsight(base_url=url, api_key=key if key else None)
                 self._mode = "HINDSIGHT"
-                logger.info(f"V29: Hindsight CONNECTED at {url}")
+                logger.info(
+                    f"V29: Hindsight CONNECTED at {url} "
+                    f"[LLM: {self._provider_info['label']} → {self._provider_info['model']}]"
+                )
             except Exception as e:
                 logger.warning(f"V29: Hindsight connection failed ({e}). Falling back to EMBEDDED (degraded).")
         else:
@@ -701,15 +767,20 @@ class HindsightOASISManager:
     def __init__(self, hindsight_url: Optional[str] = None, api_key: Optional[str] = None):
         self._hindsight = None
         self._mode = "EMBEDDED"
+        self._provider_info = get_hindsight_provider_info()
         
         url = hindsight_url or os.getenv("HINDSIGHT_URL", "")
         key = api_key or os.getenv("HINDSIGHT_API_KEY", "")
         if url:
             try:
                 from hindsight_client import Hindsight
-                self._hindsight = Hindsight(base_url=url, api_key=key or None)
+                # Empty API key = local self-hosted mode (no auth required)
+                self._hindsight = Hindsight(base_url=url, api_key=key if key else None)
                 self._mode = "HINDSIGHT"
-                logger.info(f"OASIS: Hindsight client initialized → {url}")
+                logger.info(
+                    f"OASIS: Hindsight client initialized → {url} "
+                    f"[LLM: {self._provider_info['label']} → {self._provider_info['model']}]"
+                )
             except Exception as e:
                 # We log the error but don't set hindsight to None yet, 
                 # we will try to connect during initialize_agents.
@@ -717,6 +788,7 @@ class HindsightOASISManager:
                 
         self.simulation_id = ""
         self.feature_title = ""
+        self.feature_description = ""
         self._provisioned_banks: list[str] = []
 
     async def check_connection(self) -> bool:
@@ -734,20 +806,12 @@ class HindsightOASISManager:
 
 
     async def initialize_agents(self, agent_profiles: list, feature_title: str, feature_description: str, simulation_id: str = "default") -> None:
-        """Create Hindsight Memory Banks + Mental Models for all Oasis agents.
-        
-        Sets up the 4-network architecture per agent:
-        - World Network: seeded with feature context
-        - Bank Network: empty, populated during simulation via structured retain
-        - Opinion Network: built via mental model auto-refresh
-        - Observation Network: populated by Hindsight's observation consolidation
-        """
+        """Create Hindsight Memory Banks + Mental Models for all Oasis agents."""
         self.feature_title = feature_title
+        self.feature_description = feature_description
         self.simulation_id = simulation_id
-        logger.info(f"🏦 OASIS: Provisioning Hindsight Memory Banks for simulation '{simulation_id}' ({len(agent_profiles)} agents)...")
         
         # ── CONNECTION PREFLIGHT ──
-        # Ensure we can actually talk to the server before looping through agents
         connected = False
         for i in range(5):
             if await self.check_connection():
@@ -759,87 +823,79 @@ class HindsightOASISManager:
         if not connected:
             raise ConnectionError(f"OASIS: Could not establish stable connection to Hindsight at {os.getenv('HINDSIGHT_URL')}")
 
-        created_count = 0
-        for profile in agent_profiles:
-            bank_id = f"oasis-{self.simulation_id}-persona-{profile.agent_id}"
-            user_info = getattr(profile, 'user_info_dict', {})
-            agent_name = user_info.get('name', f"Agent_{profile.agent_id}")
+        # ─── CONCURRENT PROVISIONING ───
+        logger.info(f"🏦 OASIS: Provisioning Hindsight Memory Banks for {len(agent_profiles)} agents...")
+        
+        async def _provision_one(profile):
+            agent_id = str(profile.agent_id)
+            agent_name = profile.user_info_dict.get("name", f"Agent_{agent_id}")
+            bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
             
-            # Rate-limiting / Jitter to prevent overloading the gRPC pool or server
-            await asyncio.sleep(0.5)
-
             for attempt in range(3):
                 try:
                     # Clean slate: delete any pre-existing bank
                     try:
                         await self._hindsight.adelete_bank(bank_id=bank_id)
-                        logger.info(f"  🗑️  Bank deleted (clean slate): {bank_id}")
                     except Exception:
                         pass
 
-                    # Create the persona memory bank with retain mission
-                    result = await self._hindsight.acreate_bank(
+                    # Create the persona memory bank
+                    await self._hindsight.acreate_bank(
                         bank_id=bank_id,
                         name=f"OASIS-{agent_name}",
                         background=(
                             f"OASIS Market Simulation Agent. Name: {agent_name}. "
-                            f"You represent a simulated persona evaluating: '{feature_title}'."
+                            f"You represent a simulated persona evaluating: '{self.feature_title}'."
                         ),
                         retain_mission=(
-                            "Extract evolving beliefs, sentiments, objections, needs, and reactions "
-                            "to the proposed feature. Track stance changes over time."
+                            "Extract evolving beliefs, sentiments, objections, and needs. "
+                            "Track stance changes over time."
                         ),
                         enable_observations=True,
-                        observations_mission=(
-                            "Synthesize the agent's evolving stance into a coherent narrative. "
-                            "Track sentiment trajectory and identify inflection points."
-                        ),
                     )
-                    logger.info(f"  🏗️  Bank created for persona: {agent_name} ({bank_id})")
                     
-                    # ── STRUCTURED RETAIN: Seed with feature context (World Network) ──
+                    # Seed with feature context
                     await self._hindsight.aretain_batch(
                         bank_id=bank_id,
                         items=[{
                             "content": (
                                 f"[SYSTEM]: A new feature has been proposed for evaluation: "
-                                f"'{feature_title}'. Description: {feature_description[:1000]}"
+                                f"'{self.feature_title}'. Description: {self.feature_description[:1000]}"
                             ),
                             "context": "Initial feature briefing for market simulation",
                             "entities": [
-                                {"text": feature_title, "type": "FEATURE"},
+                                {"text": self.feature_title, "type": "FEATURE"},
                                 {"text": agent_name, "type": "AGENT"},
                             ],
                             "tags": ["world", "feature_introduction"],
                         }],
                     )
                     
-                    # ── MENTAL MODEL: Auto-refreshing sentiment tracker ──
+                    # Create Mental Model (Non-blocking)
                     try:
                         self._hindsight.create_mental_model(
                             bank_id=bank_id,
                             name="feature_sentiment",
-                            source_query=(
-                                f"What is my overall assessment and current stance on "
-                                f"'{feature_title}'? Am I bullish, bearish, or neutral? Why?"
-                            ),
+                            source_query=f"What is my current stance on '{self.feature_title}'?",
                             trigger={"refresh_after_consolidation": True},
-                            max_tokens=300,
+                            max_tokens=250,
                         )
                     except Exception as e:
-                        logger.warning(f"  ⚠️  Mental model creation skipped for {bank_id}: {e}")
+                        logger.warning(f"  ⚠️  Mental model skip for {bank_id}: {e}")
                     
                     self._provisioned_banks.append(bank_id)
-                    created_count += 1
-                    logger.info(f"  ✅ Bank provisioned: {bank_id} ({created_count}/{len(agent_profiles)})")
-                    break  # Success
-                    
+                    logger.info(f"  ✅ Bank provisioned: {bank_id}")
+                    return True
                 except Exception as e:
                     if attempt < 2:
-                        logger.warning(f"  ⏳ Retry {attempt+1} for {bank_id} due to: {e}")
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(2.0 * (attempt + 1))
                     else:
-                        logger.error(f"  ❌ OASIS: Bank creation FAILED for {agent_name} ({bank_id}) after 3 attempts: {e}")
+                        logger.error(f"  ❌ OASIS: Bank creation FAILED for {agent_name}: {e}")
+            return False
+
+        # Execute all in parallel using gather
+        results = await asyncio.gather(*[_provision_one(p) for p in agent_profiles])
+        created_count = sum(1 for r in results if r)
         
         logger.info(f"🏦 OASIS: Finished provisioning. Total: {created_count}/{len(agent_profiles)} memory banks.")
 
