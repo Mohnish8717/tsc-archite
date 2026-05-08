@@ -7,7 +7,7 @@
 [![AG2](https://img.shields.io/badge/AG2-(AutoGen)-orange?style=for-the-badge)](https://microsoft.github.io/autogen/)
 [![CAMEL OASIS](https://img.shields.io/badge/Simulation-OASIS-purple?style=for-the-badge)](https://github.com/camel-ai/oasis)
 [![Docker](https://img.shields.io/badge/Docker-Enabled-blue?style=for-the-badge&logo=docker)](https://www.docker.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=for-the-badge)](https://www.gnu.org/licenses/agpl-3.0)
 
 **Validate product-market fit, predict regulatory friction, and generate technical specifications before writing a single line of code.**
 
