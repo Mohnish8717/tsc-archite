@@ -1,6 +1,6 @@
 # Layer 3 Deep Dive: Grounded Persona Generator
 
-Layer 3 is the "Social Core" of MiroFish. It transforms raw evidentiary facts and graph entities into high-fidelity, psychologically consistent personas that act as agents in downstream simulations (Gates and Debate).
+Layer 3 is the "Social Core" of the engine. It transforms raw evidentiary facts and graph entities into high-fidelity, psychologically consistent personas that act as agents in downstream simulations (Gates and Debate).
 
 ---
 
@@ -37,7 +37,7 @@ The system uses the **MBTI** framework as a baseline for cognitive style, but ma
 ---
 
 ## ✅ 3. Validation & Grounding Verification
-To prevent LLM hallucination, MiroFish employs a multi-step validation engine.
+To prevent LLM hallucination, the system employs a multi-step validation engine.
 
 ### Regex-Based Citation Check (`_validate_grounding`)
 - **Mechanism**: The LLM is instructed to use a `[Fact: <snippet>]` notation for every claim.

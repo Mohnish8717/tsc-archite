@@ -95,7 +95,7 @@ class MarketFitGate(BaseGate):
                         context=company,
                         config=self.config,
                         kg=graph,
-                        market_context=bundle.market_context # MiroFish: Ground agents in market context
+                        market_context=getattr(bundle, 'market_context', None)  # v3.0: field removed, data now in Hindsight
                     )
 
                     # 2. Run Actual OASIS (Process Isolated via SimulationRunner)

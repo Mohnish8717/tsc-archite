@@ -1,19 +1,15 @@
-"""Layer 1: Contextual Ingestor.
+"""Layer 1: Contextual Ingestor (v3.0 Streamlined).
 
-Ingests raw input documents, normalizes, chunks semantically,
-enriches with NLP metadata, and creates a unified ProblemContextBundle.
+Ingests raw input documents, normalizes, chunks semantically via LLM,
+enriches with LLM-driven NLP, stores full data in Hindsight, and creates
+a unified ProblemContextBundle.
 
-Critical fixes applied:
-  1. Input validation layer (3-5 docs, required types)
-  2. Chunk deduplication (cosine similarity threshold 0.9)
-  3. Enrichment quality gates (coverage and confidence checks)
-  4. Better error logging for embeddings
-
-Optimizations applied:
-  1. Lazy-loaded NLP models with timing
-  2. Batch embedding encoding (batch_size=32)
-  3. Parallel file loading (ThreadPoolExecutor for 3+ docs)
-  4. Embedding cache by sentence hash
+v3.0 Changes:
+  - Full data preservation: raw documents stored in Hindsight before chunking
+  - Enriched chunk metadata persisted to Hindsight after processing
+  - Removed: spaCy local NLP, embedding-based chunking, keyword classifiers
+  - Removed: hardcoded persona extraction, dead market context extraction
+  - Single enrichment path: LLM-only (more accurate, fewer dependencies)
 """
 
 from __future__ import annotations
@@ -26,12 +22,11 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
+
 
 from tsc.llm.base import LLMClient
 from tsc.llm.prompts import (
@@ -76,14 +71,16 @@ class ValidationError(Exception):
 
 
 class ContextualIngestor:
-    """Layer 1: Load, normalize, chunk, enrich, and bundle input documents."""
+    """Layer 1: Load, normalize, chunk, enrich, and bundle input documents.
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    v3.0: Stores full raw data in Hindsight before processing to prevent
+    data loss. Uses LLM-only enrichment (spaCy removed).
+    """
+
+    def __init__(self, llm_client: LLMClient, session: Any = None) -> None:
         self._llm = llm_client
-        self._nlp = None  # Will be loaded on first use
-        self._embedder = None  # Will be loaded on first use
-        self._embedding_cache: dict[int, np.ndarray] = {}
-        logger.info("ContextualIngestor initialized (models lazy-loaded)")
+        self._session = session  # HindsightSessionManager for data retention
+        logger.info("ContextualIngestor initialized (LLM-only enrichment)")
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -97,18 +94,13 @@ class ContextualIngestor:
         """
         t0 = time.time()
 
-        # Step 0: VALIDATE (CRITICAL FIX #1)
+        # Step 0: VALIDATE
         self._validate_inputs(documents)
         logger.info("✓ Validated %d documents", len(documents))
 
-        # Step 1.1: Load files (OPT-3: disabled parallel for small sets to avoid macOS mutex locks)
-        if len(documents) > 100:
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                loaded = list(executor.map(self._load_file, documents))
-            logger.info("✓ Loaded %d files (in parallel)", len(loaded))
-        else:
-            loaded = [self._load_file(doc) for doc in documents]
-            logger.info("✓ Loaded %d files", len(loaded))
+        # Step 1.1: Load files
+        loaded = [self._load_file(doc) for doc in documents]
+        logger.info("✓ Loaded %d files", len(loaded))
 
         # Step 1.2: Normalize
         normalized = [self._normalize(doc) for doc in loaded]
@@ -117,27 +109,24 @@ class ContextualIngestor:
         # Extract structured data
         feature = self._extract_feature_proposal(normalized)
         company = self._extract_company_context(normalized)
-        persona_ctx = self._extract_persona_context(normalized)
-        market_ctx = self._extract_market_context(normalized)
         logger.info(
             "✓ Extracted feature: %s, company: %s",
             feature.title,
             company.company_name,
         )
 
-        # Step 1.3: SOTA-1: Semantic chunking (Gemini 3 Flash)
+        # ── DATA PRESERVATION: Store full raw documents in Hindsight ──
+        await self._retain_raw_documents(normalized)
+
+        # Step 1.3: LLM Semantic Chunking
         chunks = await self._semantic_chunk_v2(normalized)
-        logger.info("✓ Created %d SOTA chunks (before dedup)", len(chunks))
+        logger.info("✓ Created %d chunks", len(chunks))
 
-        # CRITICAL FIX #2: Deduplicate (preserved for overlap/redundancy)
-        chunks = self._deduplicate_chunks(chunks)
-        logger.info("✓ Deduplicated to %d chunks", len(chunks))
-
-        # Step 1.4: NLP Enrichment
+        # Step 1.4: LLM Enrichment
         enriched = await self._enrich_chunks(chunks)
         logger.info("✓ Enriched %d chunks", len(enriched))
 
-        # CRITICAL FIX #3: Validate quality
+        # Quality gate
         quality = self._validate_enrichment_quality(enriched)
         logger.info(
             "✓ Quality check: %.1f%% with entities, %.1f%% with metrics, "
@@ -147,8 +136,11 @@ class ContextualIngestor:
             quality.get("avg_entity_confidence", 0),
         )
 
+        # ── DATA PRESERVATION: Store enriched chunks in Hindsight ──
+        await self._retain_enriched_chunks(enriched)
+
         # Step 1.5: Bundle
-        bundle = self._create_bundle(enriched, time.time() - t0, persona_ctx, market_ctx)
+        bundle = self._create_bundle(enriched, time.time() - t0)
         logger.info(
             "✓ Layer 1 complete: %d chunks, %d entities, %.1fs",
             bundle.statistics.total_chunks,
@@ -169,28 +161,32 @@ class ContextualIngestor:
         if not documents:
             raise ValidationError("No documents provided")
 
-        if len(documents) < 3:
+        if len(documents) < 1:
             raise ValidationError(
-                f"Need 3+ documents, got {len(documents)}"
+                "At least one input document is required"
             )
 
         types_present = {d.type for d in documents}
 
+        # Feature proposal is now OPTIONAL — Feature Discovery layer handles it
         if DocumentType.FEATURE_PROPOSAL not in types_present:
-            raise ValidationError("Missing FEATURE_PROPOSAL document")
+            logger.info("No FEATURE_PROPOSAL provided — Feature Discovery will generate one")
 
         if DocumentType.COMPANY_CONTEXT not in types_present:
-            raise ValidationError("Missing COMPANY_CONTEXT document")
+            logger.warning("No COMPANY_CONTEXT provided — using defaults")
 
+        # At minimum, we need either customer data OR a feature proposal
         content_types = {
             DocumentType.INTERVIEWS,
             DocumentType.SUPPORT_TICKETS,
             DocumentType.ANALYTICS,
         }
-        if not any(t in types_present for t in content_types):
+        has_content = any(t in types_present for t in content_types)
+        has_proposal = DocumentType.FEATURE_PROPOSAL in types_present
+        if not has_content and not has_proposal:
             raise ValidationError(
-                "Need at least one content document "
-                "(interviews, support_tickets, or analytics)"
+                "Need at least one input: customer data "
+                "(interviews, support_tickets, analytics) or a feature_proposal"
             )
 
         for doc in documents:
@@ -198,75 +194,86 @@ class ContextualIngestor:
             if not path.exists():
                 raise ValidationError(f"File not found: {doc.file_path}")
 
-    # ── CRITICAL FIX #2: Chunk Deduplication ─────────────────────────
+    # ── v3.0: Hindsight Data Retention ──────────────────────────────
 
-    def _deduplicate_chunks(
-        self,
-        chunks: list[EnrichedChunk],
-        similarity_threshold: float = 0.9,
-    ) -> list[EnrichedChunk]:
-        """Remove near-duplicate chunks by embedding cosine similarity.
+    async def _retain_raw_documents(
+        self, normalized: list[NormalizedContent]
+    ) -> None:
+        """Store complete raw documents in Hindsight BEFORE chunking.
 
-        Args:
-            chunks: List of chunks (may contain embeddings).
-            similarity_threshold: Chunks above this similarity to the
-                first occurrence are discarded.
-
-        Returns:
-            De-duplicated chunk list preserving original order.
+        Ensures zero data loss — even if chunking drops content (small
+        sentences, malformed paragraphs), the full text is always available
+        for downstream layers to query.
         """
-        if len(chunks) < 2:
-            return chunks
+        if not self._session:
+            return
 
-        # Skip if no embeddings available
-        if not any(c.embedding for c in chunks):
-            logger.info("No embeddings available, skipping deduplication")
-            return chunks
+        for norm in normalized:
+            doc_type = norm.document_type.value
+            full_text = norm.normalized_text
+            if not full_text:
+                continue
 
-        # Detect all-zero embeddings (mock mode) — skip dedup entirely
-        sample_embs = [c.embedding for c in chunks if c.embedding]
-        if sample_embs:
-            first_norm = np.linalg.norm(np.array(sample_embs[0]))
-            if first_norm < 1e-9:
-                logger.warning(
-                    "All-zero embeddings detected (mock mode) — "
-                    "skipping chunk deduplication to prevent false positives"
+            # Store complete document text — NO truncation
+            await self._session.retain("world", full_text, metadata={
+                "type": "full_document",
+                "document_type": doc_type,
+                "word_count": len(full_text.split()),
+            })
+
+            # Store structured JSON if available (company context, proposals)
+            if norm.json_parsed:
+                await self._session.retain(
+                    "world",
+                    json.dumps(norm.json_parsed, indent=2),
+                    metadata={
+                        "type": "structured_data",
+                        "document_type": doc_type,
+                    },
                 )
-                return chunks
 
-        keep_indices: set[int] = set(range(len(chunks)))
+        logger.info("✓ Retained %d raw documents in Hindsight", len(normalized))
 
-        for i in range(len(chunks)):
-            if i not in keep_indices:
-                continue
-            if not chunks[i].embedding:
-                continue
+    async def _retain_enriched_chunks(
+        self, chunks: list[EnrichedChunk]
+    ) -> None:
+        """Store enriched chunks with full metadata in Hindsight.
 
-            emb_i = np.array(chunks[i].embedding)
+        Unlike the previous approach (which only stored chunk.text),
+        this preserves entities, sentiment, urgency, topics, and metrics
+        so downstream layers can query enrichment results.
+        """
+        if not self._session:
+            return
 
-            for j in range(i + 1, len(chunks)):
-                if j not in keep_indices:
-                    continue
-                if not chunks[j].embedding:
-                    continue
+        for chunk in chunks:
+            sent_label = (
+                chunk.sentiment.label.value
+                if hasattr(chunk.sentiment.label, "value")
+                else str(chunk.sentiment.label)
+            )
+            topic_val = (
+                chunk.topic_category.value
+                if hasattr(chunk.topic_category, "value")
+                else str(chunk.topic_category)
+            )
 
-                emb_j = np.array(chunks[j].embedding)
-                sim = self._cosine_similarity(emb_i, emb_j)
+            await self._session.retain("world", chunk.text, metadata={
+                "type": "enriched_chunk",
+                "chunk_id": chunk.chunk_id,
+                "source_type": chunk.source_type,
+                "sentiment": sent_label,
+                "urgency": chunk.urgency,
+                "topic": topic_val,
+                "entity_count": len(chunk.entities),
+                "metric_count": len(chunk.metrics),
+                "entities": [
+                    {"text": e.text, "type": e.type if isinstance(e.type, str) else e.type.value}
+                    for e in chunk.entities[:10]
+                ],
+            })
 
-                if sim > similarity_threshold:
-                    keep_indices.discard(j)
-
-        deduplicated = [chunks[i] for i in sorted(keep_indices)]
-        removed_count = len(chunks) - len(deduplicated)
-
-        logger.info(
-            "Deduplication: %d chunks → %d chunks (removed %d duplicates)",
-            len(chunks),
-            len(deduplicated),
-            removed_count,
-        )
-
-        return deduplicated
+        logger.info("✓ Retained %d enriched chunks in Hindsight", len(chunks))
 
     # ── CRITICAL FIX #3: Enrichment Quality Gates ────────────────────
 
@@ -305,7 +312,7 @@ class ContextualIngestor:
 
         if confidences:
             stats["avg_entity_confidence"] = round(
-                float(np.mean(confidences)), 3
+                sum(confidences) / len(confidences), 3
             )
 
         # Convert to percentages
@@ -487,7 +494,7 @@ class ContextualIngestor:
             word_count = len(norm.normalized_text.split())
             if word_count < 500:
                 logger.info("Skipping LLM chunking for small document (%s)", norm.document_type.value)
-                doc_chunks = self._semantic_chunk([norm])
+                doc_chunks = self._simple_chunk_fallback(norm)
                 for c in doc_chunks:
                    c.chunk_id = f"chunk_{global_idx:04d}"
                    global_idx += 1
@@ -514,7 +521,7 @@ class ContextualIngestor:
                 elif response_text.startswith("```"):
                     response_text = response_text[3:-3].strip()
                 
-                raw_chunks = json.loads(response_text)
+                raw_chunks = self.llm._parse_json_response(response_text)
                 
                 if not isinstance(raw_chunks, list):
                     raise ValueError(f"Expected JSON list, got {type(raw_chunks)}")
@@ -546,7 +553,7 @@ class ContextualIngestor:
                     
             except Exception as e:
                 logger.error("SOTA-1: Gemini chunking failed, falling back: %s", e, exc_info=True)
-                fallback = self._semantic_chunk([norm])
+                fallback = self._simple_chunk_fallback(norm)
                 for c in fallback:
                     c.chunk_id = f"chunk_{global_idx:04d}"
                     global_idx += 1
@@ -554,332 +561,74 @@ class ContextualIngestor:
 
         return all_chunks
 
-    def _semantic_chunk(
-        self,
-        normalized: list[NormalizedContent],
-        similarity_threshold: float = 0.5,
-        max_tokens: int = 8000,
-        min_tokens: int = 50,
+    def _simple_chunk_fallback(
+        self, norm: NormalizedContent
     ) -> list[EnrichedChunk]:
+        """Simple paragraph-based chunking fallback when LLM fails.
+
+        Replaces the previous 115-line embedding-based chunker.
+        Splits on double newlines and groups small paragraphs together.
+        """
         chunks: list[EnrichedChunk] = []
-        chunk_idx = 0
+        text = norm.normalized_text
+        if not text:
+            return chunks
 
-        for norm in normalized:
-            if not norm.normalized_text:
-                continue
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
 
-            # Split into sentences
-            sentences = self._split_sentences(norm.normalized_text)
-            if not sentences:
-                continue
+        current_text: list[str] = []
+        current_words = 0
+        target_words = 800
 
-            # Try embedding-based chunking, fall back to size-based
-            embeddings = self._get_embeddings(sentences)
+        for para in paragraphs:
+            para_words = len(para.split())
 
-            # Detect zero-embedding (mock) mode
-            use_similarity = False
-            if embeddings is not None:
-                sample_norms = np.linalg.norm(
-                    embeddings[:min(5, len(embeddings))], axis=1
-                )
-                use_similarity = bool(np.any(sample_norms > 1e-9))
-                if not use_similarity:
-                    logger.warning(
-                        "Zero embeddings — falling back to token-size chunking only "
-                        "(document: %s)", norm.document_type.value
-                    )
+            if current_words + para_words > target_words and current_text:
+                chunks.append(EnrichedChunk(
+                    chunk_id=f"chunk_{len(chunks):04d}",
+                    text="\n\n".join(current_text),
+                    tokens=current_words,
+                    source_file=norm.file_type.value,
+                    source_type=norm.document_type.value,
+                    sequence=len(chunks),
+                ))
+                current_text = [para]
+                current_words = para_words
+            else:
+                current_text.append(para)
+                current_words += para_words
 
-            # Clamp min_tokens
-            effective_min_tokens = max(1, min_tokens)
-
-            current_chunk_sents: list[str] = []
-            current_chunk_emb: Optional[np.ndarray] = None
-
-            for i, sent in enumerate(sentences):
-                sent_tokens = len(sent.split())
-                if sent_tokens < 3:
-                    continue
-
-                if not current_chunk_sents:
-                    current_chunk_sents.append(sent)
-                    if use_similarity and embeddings is not None:
-                        current_chunk_emb = embeddings[i]
-                    continue
-
-                # Check similarity
-                should_merge = True
-                if use_similarity and embeddings is not None and current_chunk_emb is not None:
-                    sim = self._cosine_similarity(current_chunk_emb, embeddings[i])
-                    should_merge = sim > similarity_threshold
-
-                current_tokens = sum(len(s.split()) for s in current_chunk_sents)
-
-                if should_merge and current_tokens + sent_tokens <= max_tokens:
-                    current_chunk_sents.append(sent)
-                    if use_similarity and embeddings is not None:
-                        # Update chunk embedding as running average
-                        n = len(current_chunk_sents)
-                        current_chunk_emb = (
-                            current_chunk_emb * (n - 1) + embeddings[i]
-                        ) / n
-                else:
-                    # Flush current chunk — only if we have enough tokens
-                    if current_chunk_sents and current_tokens >= effective_min_tokens:
-                        chunk_text = " ".join(current_chunk_sents)
-                        chunks.append(
-                            EnrichedChunk(
-                                chunk_id=f"chunk_{chunk_idx:04d}",
-                                text=chunk_text,
-                                tokens=current_tokens,
-                                embedding=(
-                                    current_chunk_emb.tolist()
-                                    if current_chunk_emb is not None
-                                    else None
-                                ),
-                                source_file=norm.file_type.value,
-                                source_type=norm.document_type.value,
-                                sequence=chunk_idx,
-                            )
-                        )
-                        chunk_idx += 1
-
-                    current_chunk_sents = [sent]
-                    if use_similarity and embeddings is not None:
-                        current_chunk_emb = embeddings[i]
-
-            # Flush remainder
-            remaining_tokens = sum(len(s.split()) for s in current_chunk_sents)
-            if current_chunk_sents:
-                chunk_text = " ".join(current_chunk_sents)
-                chunks.append(
-                    EnrichedChunk(
-                        chunk_id=f"chunk_{chunk_idx:04d}",
-                        text=chunk_text,
-                        tokens=remaining_tokens,
-                        embedding=(
-                            current_chunk_emb.tolist()
-                            if current_chunk_emb is not None
-                            else None
-                        ),
-                        source_file=norm.file_type.value,
-                        source_type=norm.document_type.value,
-                        sequence=chunk_idx,
-                    )
-                )
-                chunk_idx += 1
+        if current_text:
+            chunks.append(EnrichedChunk(
+                chunk_id=f"chunk_{len(chunks):04d}",
+                text="\n\n".join(current_text),
+                tokens=current_words,
+                source_file=norm.file_type.value,
+                source_type=norm.document_type.value,
+                sequence=len(chunks),
+            ))
 
         return chunks
-
-    def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences using regex."""
-        # Split on sentence terminators followed by whitespace and capital letter
-        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
-        # Also split on newlines that seem like paragraph breaks
-        result: list[str] = []
-        for s in sentences:
-            parts = s.split("\n\n")
-            result.extend(p.strip() for p in parts if p.strip())
-        return result
-
-    # ── CRITICAL FIX #4 + OPT-2 + OPT-4: Embeddings ────────────────
-
-    def _get_embeddings(self, sentences: list[str]) -> Optional[np.ndarray]:
-        """Get sentence embeddings using sentence-transformers.
-
-        Includes:
-        - Embedding cache by sentence hash (OPT-4)
-        - Batch encoding with batch_size=32 (OPT-2)
-        - Proper error-level logging (CRITICAL FIX #4)
-        """
-        # Separate cached vs uncached sentences
-        cached_indices: dict[int, np.ndarray] = {}
-        uncached_indices: list[int] = []
-        uncached_sents: list[str] = []
-
-        for i, sent in enumerate(sentences):
-            sent_hash = hash(sent)
-            if sent_hash in self._embedding_cache:
-                cached_indices[i] = self._embedding_cache[sent_hash]
-            else:
-                uncached_indices.append(i)
-                uncached_sents.append(sent)
-
-
-        # Optimization: Try FastEmbed first (lighter, better for macOS)
-        try:
-            if self._embedder is None:
-                from fastembed import TextEmbedding
-                logger.info("Loading FastEmbed model (BAAI/bge-small-en-v1.5)...")
-                t0 = time.time()
-                self._embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-                logger.info("FastEmbed model loaded in %.2fs", time.time() - t0)
-
-            # FastEmbed.embed returns a generator of numpy arrays
-            if uncached_sents:
-                new_embeddings_gen = self._embedder.embed(uncached_sents)
-                new_embeddings = np.array(list(new_embeddings_gen))
-                
-                # Cache results
-                for idx, sent, emb in zip(uncached_indices, uncached_sents, new_embeddings):
-                    sent_hash = hash(sent)
-                    self._embedding_cache[sent_hash] = emb
-                
-                # Enforce cache size limit
-                if len(self._embedding_cache) > 10000:
-                    keys_to_remove = list(self._embedding_cache.keys())[:len(self._embedding_cache) - 10000]
-                    for k in keys_to_remove:
-                        del self._embedding_cache[k]
-
-            # Reconstruct full embedding array
-            if not cached_indices and not uncached_sents:
-                return None
-            
-            sample_emb = next(iter(self._embedding_cache.values()))
-            emb_dim = sample_emb.shape[0]
-            
-            result = np.zeros((len(sentences), emb_dim))
-            for i, sent in enumerate(sentences):
-                sent_hash = hash(sent)
-                result[i] = self._embedding_cache[sent_hash]
-
-            logger.info(
-                "Embedding (FastEmbed): %d cached, %d new, cache size: %d",
-                len(cached_indices), len(uncached_sents), len(self._embedding_cache)
-            )
-            return result
-
-        except ImportError:
-            logger.debug("fastembed not installed, falling back to sentence-transformers")
-        except Exception as e:
-            logger.warning("FastEmbed failed: %s, trying sentence-transformers", e)
-
-        # Fallback to SentenceTransformers (original behavior)
-        try:
-            if self._embedder is None or not hasattr(self._embedder, "encode"):
-                from sentence_transformers import SentenceTransformer
-                logger.info("Loading sentence-transformers model...")
-                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
-            new_embeddings = None
-            if uncached_sents:
-                new_embeddings = self._embedder.encode(
-                    uncached_sents, show_progress_bar=False, batch_size=32
-                )
-                for idx, sent, emb in zip(uncached_indices, uncached_sents, new_embeddings):
-                    self._embedding_cache[hash(sent)] = emb
-
-            sample_emb = next(iter(self._embedding_cache.values()))
-            result = np.zeros((len(sentences), sample_emb.shape[0]))
-            for i, sent in enumerate(sentences):
-                result[i] = self._embedding_cache[hash(sent)]
-            return result
-        except Exception as e:
-            logger.error("All embedding methods failed: %s", e)
-            # macOS Stability Fix: Last resort mock
-            if os.environ.get("TSC_MOCK_EMBEDDINGS") == "1" or True:
-                logger.warning("Returning Mock Zeros (Last Resort)")
-                return np.zeros((len(sentences), 384))
-            return None
-
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        dot = np.dot(a, b)
-        norm = np.linalg.norm(a) * np.linalg.norm(b)
-        return float(dot / norm) if norm > 1e-9 else 0.0
 
     # ── Step 1.4: NLP Enrichment ─────────────────────────────────────
 
     async def _enrich_chunks(
         self, chunks: list[EnrichedChunk]
     ) -> list[EnrichedChunk]:
-        """Enrich chunks with NER, sentiment, urgency, topics."""
-        # Try local NLP first, fall back to LLM
-        try:
-            return self._enrich_local(chunks)
-        except Exception as e:
-            logger.info("Local NLP not available (%s), using LLM enrichment", e)
-            return await self._enrich_with_llm(chunks)
-
-    def _enrich_local(self, chunks: list[EnrichedChunk]) -> list[EnrichedChunk]:
-        """Enrich using local spaCy + transformers."""
-        # OPT-1: Lazy load with timing
-        if self._nlp is None:
-            logger.info("Loading spaCy model (first use)...")
-            import spacy
-
-            t0 = time.time()
-            self._nlp = spacy.load("en_core_web_sm")
-            logger.info("spaCy model loaded in %.2fs", time.time() - t0)
-
-        for chunk in chunks:
-            # Segment-aware enrichment (GAP 4)
-            if chunk.source_type == "interviews":
-                chunk.is_customer_perspective = True
-            elif chunk.source_type == "company_context":
-                chunk.is_customer_perspective = False
-                
-            doc = self._nlp(chunk.text)
-
-            # NER
-            entities: list[ChunkEntity] = []
-            for ent in doc.ents:
-                etype = self._map_spacy_entity(ent.label_)
-                entities.append(
-                    ChunkEntity(
-                        text=ent.text,
-                        type=etype,
-                        confidence=0.85,
-                    )
-                )
-            chunk.entities = entities
-
-            # Regex-based metric extraction (expanded patterns)
-            chunk.metrics = self._extract_metrics(chunk.text)
-
-            # Urgency from keywords
-            chunk.urgency = self._estimate_urgency(chunk.text)
-
-            # Simple sentiment from keyword analysis
-            chunk.sentiment = self._simple_sentiment(chunk.text)
-
-            # Topic classification from keywords
-            chunk.topic_category, chunk.topic_confidence = self._classify_topic(
-                chunk.text
-            )
-
-            # PA-8 fix: Synthesize PAIN_POINT entities from negative sentiment + high urgency
-            if (
-                chunk.sentiment.label == SentimentLabel.NEGATIVE
-                and chunk.urgency >= 4
-            ):
-                # Extract a concise pain point description from the chunk
-                pain_text = chunk.text[:120].strip()
-                # Avoid duplicating existing PAIN_POINT entities
-                existing_pain = {e.text for e in chunk.entities if e.type == EntityType.PAIN_POINT}
-                if pain_text not in existing_pain:
-                    chunk.entities.append(
-                        ChunkEntity(
-                            text=pain_text,
-                            type=EntityType.PAIN_POINT,
-                            confidence=min(0.85, chunk.sentiment.score),
-                            sentiment=chunk.sentiment.label,
-                        )
-                    )
-
-            chunk.enrichment_timestamp = datetime.utcnow()
-
-        return chunks
+        """Enrich chunks with NER, sentiment, urgency, topics via LLM."""
+        return await self._enrich_with_llm(chunks)
 
     async def _enrich_with_llm(
         self, chunks: list[EnrichedChunk]
     ) -> list[EnrichedChunk]:
-        """Enrich using LLM when local NLP is unavailable."""
+        """Enrich using LLM — primary and only enrichment path (v3.0)."""
         for chunk in chunks:
-            # Segment-aware enrichment (GAP 4)
+            # Segment-aware enrichment
             if chunk.source_type == "interviews":
                 chunk.is_customer_perspective = True
             elif chunk.source_type == "company_context":
                 chunk.is_customer_perspective = False
-                
+
             try:
                 prompt = ENRICHMENT_USER.render(
                     text=chunk.text,
@@ -895,13 +644,9 @@ class ContextualIngestor:
                 self._apply_llm_enrichment(chunk, result)
             except Exception as e:
                 logger.warning("LLM enrichment failed for %s: %s", chunk.chunk_id, e)
-                # Apply basic enrichment
+                # Minimal fallback: regex metrics + keyword urgency
                 chunk.metrics = self._extract_metrics(chunk.text)
                 chunk.urgency = self._estimate_urgency(chunk.text)
-                chunk.sentiment = self._simple_sentiment(chunk.text)
-                chunk.topic_category, chunk.topic_confidence = self._classify_topic(
-                    chunk.text
-                )
 
             # Hybrid pass: if general enrichment yielded 0 metrics, try dedicated LLM metric extraction
             if not chunk.metrics:
@@ -973,20 +718,6 @@ class ContextualIngestor:
                 merged.append(m)
         chunk.metrics = merged
 
-    def _map_spacy_entity(self, label: str) -> str:
-        mapping = {
-            "PERSON": "PERSON",
-            "ORG": "ORG",
-            "PRODUCT": "PRODUCT",
-            "GPE": "ORG",
-            "CARDINAL": "METRIC",
-            "PERCENT": "METRIC",
-            "MONEY": "METRIC",
-            "QUANTITY": "METRIC",
-            "PAIN_POINT": "PAIN_POINT",
-            "CONSTRAINT": "CONSTRAINT",
-        }
-        return mapping.get(label, "PRODUCT")
 
     def _extract_metrics(self, text: str) -> list[ExtractedMetric]:
         """Extract numeric metrics using expanded regex patterns."""
@@ -1115,75 +846,13 @@ Only return valid JSON, no markdown."""
             return 2
         return 1
 
-    def _simple_sentiment(self, text: str) -> SentimentResult:
-        text_lower = text.lower()
-        pos = sum(
-            1
-            for w in ("great", "love", "excellent", "happy", "awesome", "improve")
-            if w in text_lower
-        )
-        neg = sum(
-            1
-            for w in (
-                "crash",
-                "bug",
-                "broken",
-                "frustrat",
-                "pain",
-                "fail",
-                "error",
-                "problem",
-            )
-            if w in text_lower
-        )
-        if neg > pos:
-            return SentimentResult(
-                label=SentimentLabel.NEGATIVE, score=min(0.9, 0.5 + neg * 0.1)
-            )
-        elif pos > neg:
-            return SentimentResult(
-                label=SentimentLabel.POSITIVE, score=min(0.9, 0.5 + pos * 0.1)
-            )
-        return SentimentResult(label=SentimentLabel.NEUTRAL, score=0.5)
-
-    def _classify_topic(self, text: str) -> tuple[TopicCategory, float]:
-        text_lower = text.lower()
-        scores = {
-            TopicCategory.FEATURE_REQUEST: sum(
-                1
-                for w in ("feature", "request", "add", "would like", "need", "want")
-                if w in text_lower
-            ),
-            TopicCategory.BUG_REPORT: sum(
-                1
-                for w in ("bug", "crash", "error", "broken", "fail", "issue")
-                if w in text_lower
-            ),
-            TopicCategory.QUESTION: sum(
-                1
-                for w in ("how", "what", "why", "when", "?")
-                if w in text_lower
-            ),
-            TopicCategory.FEEDBACK: sum(
-                1
-                for w in ("feedback", "suggest", "opinion", "think", "feel")
-                if w in text_lower
-            ),
-            TopicCategory.CONSTRAINT: sum(
-                1
-                for w in ("constraint", "limit", "cannot", "impossible", "blocker")
-                if w in text_lower
-            ),
-        }
-        best = max(scores, key=lambda k: scores[k])
-        total = sum(scores.values()) or 1
-        return best, round(scores[best] / total, 2)
 
     # ── Step 1.5: Bundle Creation ────────────────────────────────────
 
     def _create_bundle(
-        self, chunks: list[EnrichedChunk], processing_time: float, persona_ctx: dict[str, Any], market_ctx: dict[str, Any]
+        self, chunks: list[EnrichedChunk], processing_time: float
     ) -> ProblemContextBundle:
+        """Create the unified ProblemContextBundle from enriched chunks."""
         # Build indices
         by_chunk_id: dict[str, Any] = {c.chunk_id: c.model_dump() for c in chunks}
         by_entity: dict[str, list[str]] = defaultdict(list)
@@ -1196,7 +865,6 @@ Only return valid JSON, no markdown."""
         sentiment_counter: Counter = Counter()
         urgency_sum = 0
 
-        # Helper for Enum value extraction
         def get_val(v):
             return v.value if hasattr(v, "value") else str(v)
 
@@ -1204,13 +872,13 @@ Only return valid JSON, no markdown."""
             for ent in chunk.entities:
                 by_entity[ent.text].append(chunk.chunk_id)
                 entity_counter[ent.text] += 1
-            
+
             tcat = get_val(chunk.topic_category)
             by_topic[tcat].append(chunk.chunk_id)
             topic_counter[tcat] += 1
-            
+
             by_urgency[str(chunk.urgency)].append(chunk.chunk_id)
-            
+
             slabel = get_val(chunk.sentiment.label)
             by_sentiment[slabel].append(chunk.chunk_id)
             sentiment_counter[slabel] += 1
@@ -1246,11 +914,6 @@ Only return valid JSON, no markdown."""
                 sentiment_distribution=dict(sentiment_counter),
                 average_urgency=round(urgency_sum / max(len(chunks), 1), 1),
             ),
-            external_persona_facts=persona_ctx.get("external_facts", {}),
-            internal_stakeholder_facts=persona_ctx.get("internal_facts", {}),
-            customer_segments_identified=persona_ctx.get("segments", []),
-            customer_pain_points=persona_ctx.get("pain_points", {}),
-            market_context=market_ctx,
             processing_stats={
                 "total_files": len(sources),
                 "total_chunks": len(chunks),
@@ -1305,85 +968,3 @@ Only return valid JSON, no markdown."""
                 )
         return CompanyContext()
 
-    def _extract_persona_context(
-        self, normalized: list[NormalizedContent]
-    ) -> dict[str, Any]:
-        """Extract facts for internal and external personas."""
-        external_facts: dict[str, list[str]] = defaultdict(list)
-        internal_facts: dict[str, list[str]] = defaultdict(list)
-        segments: set[str] = set()
-        pain_points: dict[str, list[str]] = defaultdict(list)
-        
-        for n in normalized:
-            if n.document_type == DocumentType.COMPANY_CONTEXT and n.json_parsed:
-                data = n.json_parsed
-                for sh in data.get("stakeholders", []):
-                    name = sh.get("name", "Unknown")
-                    facts = sh.get("facts", [])
-                    internal_facts[name].extend(facts)
-            
-            # Simulated parsing from text for interviews if json isn't available
-            if n.document_type == DocumentType.INTERVIEWS and n.normalized_text:
-                text = n.normalized_text
-                sentences = self._split_sentences(text)
-                for sent in sentences:
-                    lower_sent = sent.lower()
-                    if "technician" in lower_sent or "tech" in lower_sent:
-                        segments.add("Field Technician")
-                        external_facts["Field Technician"].append(sent)
-                        if "pain" in lower_sent or "frustrat" in lower_sent or "issue" in lower_sent:
-                            pain_points["Field Technician"].append(sent)
-                    elif "manager" in lower_sent:
-                        segments.add("Manager")
-                        external_facts["Manager"].append(sent)
-                        if "pain" in lower_sent or "frustrat" in lower_sent or "issue" in lower_sent:
-                            pain_points["Manager"].append(sent)
-                    elif "power user" in lower_sent:
-                        segments.add("Power User")
-                        external_facts["Power User"].append(sent)
-                        if "pain" in lower_sent or "frustrat" in lower_sent or "issue" in lower_sent:
-                            pain_points["Power User"].append(sent)
-                        
-        return {
-            "external_facts": dict(external_facts),
-            "internal_facts": dict(internal_facts),
-            "segments": list(segments),
-            "pain_points": dict(pain_points),
-        }
-
-    def _extract_market_context(
-        self, normalized: list[NormalizedContent]
-    ) -> dict[str, Any]:
-        """Extract market conditions for Monte Carlo simulation."""
-        pricing_tiers: list[str] = []
-        competitors: list[str] = []
-        connectivity_patterns: dict[str, str] = {}
-        customer_geography: list[str] = []
-        usage_patterns: dict[str, str] = {}
-        
-        for n in normalized:
-            if n.document_type == DocumentType.COMPANY_CONTEXT and n.json_parsed:
-                data = n.json_parsed
-                pricing_tiers.extend(data.get("pricing_tiers", []))
-                competitors.extend(data.get("competitors", []))
-            
-            if n.document_type == DocumentType.ANALYTICS and n.json_parsed:
-                data = n.json_parsed
-                geo = data.get("geography", [])
-                customer_geography.extend(geo)
-                conn = data.get("connectivity_patterns", {})
-                connectivity_patterns.update(conn)
-                
-            if n.document_type == DocumentType.SUPPORT_TICKETS:
-                pass
-        
-        if not customer_geography:
-            customer_geography = ["Urban", "Suburban"]
-        
-        return {
-            "pricing_tiers": pricing_tiers,
-            "competitors": competitors,
-            "connectivity_patterns": connectivity_patterns,
-            "geography": customer_geography,
-            "usage_patterns": usage_patterns,
-        }

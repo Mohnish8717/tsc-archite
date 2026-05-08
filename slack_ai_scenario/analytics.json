@@ -1,0 +1,29 @@
+{
+  "user_engagement": {
+    "daily_active_users_millions": 32.5,
+    "weekly_active_users_millions": 45.0,
+    "average_time_spent_minutes": 95,
+    "messages_sent_daily_billions": 1.5
+  },
+  "feature_usage": {
+    "search_queries_daily_millions": 85,
+    "channel_recommendations_clicked_pct": 12.5,
+    "slack_ai_summaries_generated_daily": 450000
+  },
+  "geography": [
+    "North America",
+    "Europe",
+    "Asia Pacific",
+    "Latin America"
+  ],
+  "connectivity_patterns": {
+    "mobile_only_users_pct": 15,
+    "desktop_heavy_users_pct": 75,
+    "cross_device_users_pct": 10
+  },
+  "recent_trends": {
+    "support_ticket_volume_increase_pct": 350,
+    "twitter_sentiment_score_change": -0.65,
+    "enterprise_grid_cancellation_requests_last_7_days": 14
+  }
+}

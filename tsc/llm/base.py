@@ -100,9 +100,21 @@ class LLMClient(ABC):
             return json.loads(text)
         except json.JSONDecodeError as exc:
             logger.warning("JSON parse failed, attempting repair: %s", exc)
-            # Try to find the first { and last } to extract JSON
-            start = text.find("{")
-            end = text.rfind("}") + 1
+            # Try to find the first {/} or [/] to extract JSON
+            start_dict = text.find("{")
+            end_dict = text.rfind("}") + 1
+            start_list = text.find("[")
+            end_list = text.rfind("]") + 1
+            
+            start = -1
+            end = -1
+            if start_dict >= 0 and (start_list == -1 or start_dict < start_list):
+                start = start_dict
+                end = end_dict
+            elif start_list >= 0:
+                start = start_list
+                end = end_list
+                
             if start >= 0 and end > start:
                 try:
                     return json.loads(text[start:end])

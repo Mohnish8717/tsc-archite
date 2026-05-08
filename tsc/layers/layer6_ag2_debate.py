@@ -64,9 +64,16 @@ except ImportError:
 from tsc.models.inputs import FeatureProposal, CompanyContext
 from tsc.models.personas import FinalPersona
 from tsc.models.graph import KnowledgeGraph
-from tsc.models.gates import GatesSummary
+# Gates removed from pipeline in v3.0 — import kept for backward compat only
+try:
+    from tsc.models.gates import GatesSummary
+except ImportError:
+    GatesSummary = None
 from tsc.models.debate import ConsensusResult, DebatePosition, DebateRound
-from tsc.memory.fact_retriever import FactRetriever
+try:
+    from tsc.memory.fact_retriever import FactRetriever
+except ImportError:
+    FactRetriever = None
 from tsc.memory.hindsight_memory import HindsightBoardroom
 
 class DebateState(Enum):
@@ -174,6 +181,18 @@ INCENTIVE_GOALS = {
     'CPO': 'You have pre-committed to this feature in a public roadmap announcement. A rejection damages your credibility. You must find a path to approval.',
     'CEO': 'You have a board-level directive to show a new revenue stream this quarter. Rejecting this feature may trigger a board inquiry into strategic drift.',
 }
+
+# ── Anti-Sycophancy: Contrarian Mandate ──────────────────────────────────
+# Injected into agent system prompts during CHALLENGE state to prevent
+# generic agreement and force identification of specific failure modes.
+CONTRARIAN_MANDATE = (
+    "\n[CONTRARIAN MANDATE]\n"
+    "You MUST identify at least ONE fatal flaw in the current proposal "
+    "that no other board member has raised. Generic agreement is PROHIBITED. "
+    "If you agree with the majority, you must explain the specific conditions "
+    "under which this proposal would FAIL, with concrete metrics, thresholds, "
+    "and timelines. Vague philosophical statements are not acceptable.\n"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -767,23 +786,7 @@ class AG2DebateEngine:
                 logger.error(f"Multi-Agent Discovery failed: {e}")
                 return "DISCOVERY SYSTEM ERROR: Fallback to general reasoning."
 
-        def generate_vision_mockup(prompt: str) -> str:
-            """Generates a UI/UX mockup visualization for board review."""
-            res = f"[Generated Image Saved at: /tmp/mockups/{int(time.time())}.png] Prompt: {prompt}"
-            return res
-            
-        def web_search(query: str) -> str:
-            """Perform a live web search for market data, competitor analysis, and industry benchmarks."""
-            # Mirroring actual TavilySearchTool behavior
-            res = (
-                f"TAVILY SEARCH RESULTS for '{query}':\n"
-                "1. [Source: Gartner] Brain-Computer Interface (BCI) projects have a 62% failure rate in R&D phase.\n"
-                "2. [Source: FDA] Recent Phase 1 trials for neural modulation show 20% regulatory rejection rate.\n"
-                "3. [Source: Reuters] Competitor 'NeuralPath' burned $45M before folding in 2025.\n"
-                "4. [Source: MarketAnalysis] TAM for direct-to-brain sync is estimated at $4.2B by 2030."
-            )
-            return res
-            
+
         def submit_tension_vector(agent_name: str, payload: TensionPayload) -> str:
             """
             Required Tool: Submits your formalized board vote to the Shared Ledger.
@@ -891,19 +894,53 @@ class AG2DebateEngine:
                 self.debate_fsm.advance(override=DebateState.VOTE)
             return "CHAIRMAN OVERRIDE: Advancing debate immediately to the VOTE state."
 
-        # The manual task management tools `add_micro_task` and `update_task_status` 
-        # have been completely removed in favor of the Background TaskSynthesizer.
+        # v3.0: Hindsight-grounded evidence tools for debate agents
+        _session_ref = getattr(self, '_session', None)
 
-        tools["web_search"] = web_search
+        def query_customer_data(query: str) -> str:
+            """Query raw customer interviews and usage data from Hindsight for evidence-based arguments. Use this to cite specific customer quotes and pain points."""
+            if _session_ref:
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            result = executor.submit(asyncio.run, _session_ref.recall("world", query)).result()
+                    else:
+                        result = loop.run_until_complete(_session_ref.recall("world", query))
+                    return str(result)[:2000] if result else "No customer data found for this query."
+                except Exception as e:
+                    return f"Customer data query failed: {e}"
+            return "Customer data not available — no Hindsight session connected."
+
+        def query_simulation(query: str) -> str:
+            """Query behavioral simulation results from OASIS — what simulated users said about their needs and product usage patterns."""
+            if _session_ref:
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        from concurrent.futures import ThreadPoolExecutor
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            result = executor.submit(asyncio.run, _session_ref.recall("simulation", query)).result()
+                    else:
+                        result = loop.run_until_complete(_session_ref.recall("simulation", query))
+                    return str(result)[:2000] if result else "No simulation data found for this query."
+                except Exception as e:
+                    return f"Simulation query failed: {e}"
+            return "Simulation data not available — no Hindsight session connected."
+
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
         tools["run_multi_agent_discovery"] = run_multi_agent_discovery
         tools["pin_conflict_to_blackboard"] = pin_conflict_to_blackboard
-        tools["generate_vision_mockup"] = generate_vision_mockup
         tools["submit_tension_vector"] = submit_tension_vector
         tools["calculate_financials"] = calculate_financials
         tools["executive_veto"] = executive_veto
         tools["request_to_defer"] = request_to_defer
         tools["force_vote"] = force_vote
+        tools["query_customer_data"] = query_customer_data
+        tools["query_simulation"] = query_simulation
         return tools
         
     def _register_tools_to_agent(self, agent: autogen.ConversableAgent, tools: Dict[str, Any]):
@@ -939,27 +976,24 @@ class AG2DebateEngine:
                     description=func.__doc__ or f"Execute {name}"
                 )
             
-        # Register Native TavilySearchTool if available natively
-        if TavilySearchTool is not None:
-            try:
-                tavily_tool = TavilySearchTool()
-                tavily_tool.register_for_llm(agent)
-                tavily_tool.register_for_execution(agent)
-            except Exception as e:
-                logger.warning(f"Failed to register strict native TavilySearchTool: {e}")
+        # Web search tooling has been intentionally removed to prevent hallucination.
 
     async def process(
         self,
         feature: FeatureProposal,
         company: CompanyContext,
-        graph: KnowledgeGraph,
         personas: list[FinalPersona],
-        gates_summary: GatesSummary
+        graph: Any = None,  # v3.0: KnowledgeGraph removed from default path
+        gates_summary: Any = None,  # v3.0: gates removed, kept for backward compat
+        simulation_results: Any = None,  # MarketSentimentSeries from OASIS
+        session: Any = None,  # HindsightSessionManager for cross-layer data access
     ) -> ConsensusResult:
         """Run the comprehensive high-reasoning debate."""
         logger.info(f"AG2 Layer 6: Starting debate with {len(personas)} stakeholders.")
         self.feature = feature
         self.graph = graph
+        self._session = session  # v3.0: Hindsight session for cross-layer data
+        self._simulation_results = simulation_results  # v3.0: OASIS behavioral data
             
         # Refinement: OpenTelemetry Tracing enablement
         if start_tracing and os.getenv("ENABLE_OTEL_TRACING", "0") == "1":
@@ -1070,7 +1104,7 @@ class AG2DebateEngine:
                 "CRITICAL 1: There is a BOARDROOM AGENDA tracking this debate. A Background Synthesizer will automatically monitor your consensus and update the Task Ledger. "
                 "CRITICAL 2: You MUST formalize your conclusion by invoking the `submit_tension_vector` tool representing your vote! "
                 "If the Critic rejects your confidence score as < 0.7 after 3 rounds, you MUST set `is_high_risk` to True in your payload. "
-                "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of this specific graph. You MUST call `run_multi_agent_discovery` to deploy the Discovery Department before making any factual assertions! "
+                "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of user feedback or simulation results. You MUST call `query_simulation` to retrieve actual social market simulation data before making any factual assertions about user sentiment, NPS, or adoption risk! "
                 "CRITICAL 4 (CONFIDENCE DECAY): If 3 consecutive searches fail to find a direct answer, do NOT keep searching. Fallback to 'General Principles' reasoning and explicitly set `is_low_information=True` in your final vote.\n\n"
                 "[V28 NO-REHASH RULE] You have already READ the feature brief. DO NOT restate its contents, numbers, or architecture. "
                 "Every sentence you speak MUST contain NEW analysis, a NEW risk, a NEW number you computed, or a NEW solution "
@@ -1829,7 +1863,7 @@ class AG2DebateEngine:
             if state.name == 'RESEARCH':
                 fsm_override = "\n\n[PROCEDURAL OVERRIDE: RESEARCH PHASE]\nDo NOT reach conclusions yet. Propose questions, gather facts, build context."
             elif state.name == 'CHALLENGE':
-                fsm_override = "\n\n[PROCEDURAL OVERRIDE: CHALLENGE PHASE]\nYou MUST aggressively attack the proposal. Find mathematical or logical flaws. DO NOT AGREE."
+                fsm_override = "\n\n[PROCEDURAL OVERRIDE: CHALLENGE PHASE]\nYou MUST aggressively attack the proposal. Find mathematical or logical flaws. DO NOT AGREE." + CONTRARIAN_MANDATE
             elif state.name == 'MITIGATION':
                 fsm_override = "\n\n[PROCEDURAL OVERRIDE: MITIGATION PHASE]\nPropose strict boundaries, conditions, and SLA solutions to the flaws found."
             elif state.name == 'VOTE':

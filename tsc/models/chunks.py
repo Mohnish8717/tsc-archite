@@ -106,14 +106,5 @@ class ProblemContextBundle(BaseModel):
     indices: dict[str, dict[str, Any]] = Field(default_factory=dict)
     statistics: GlobalStatistics = Field(default_factory=GlobalStatistics)
     
-    # External persona generation context
-    external_persona_facts: dict[str, list[str]] = Field(default_factory=dict)
-    internal_stakeholder_facts: dict[str, list[str]] = Field(default_factory=dict)
-    customer_segments_identified: list[str] = Field(default_factory=list)
-    customer_pain_points: dict[str, list[str]] = Field(default_factory=dict)
-    
-    # Market context for Monte Carlo
-    market_context: dict[str, Any] = Field(default_factory=dict)
-    
     created_at: datetime = Field(default_factory=datetime.utcnow)
     processing_stats: dict[str, Any] = Field(default_factory=dict)

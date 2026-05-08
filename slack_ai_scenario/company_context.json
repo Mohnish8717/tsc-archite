@@ -1,0 +1,39 @@
+{
+  "company_name": "Slack (Salesforce)",
+  "industry": "Enterprise Collaboration Software",
+  "company_size": "Enterprise",
+  "business_model": "B2B SaaS",
+  "target_audience": ["Knowledge Workers", "Enterprise IT Admins", "Developers"],
+  "core_products": ["Slack App", "Slack Connect", "Slack AI"],
+  "tech_stack": ["AWS", "Machine Learning", "LLMs"],
+  "current_priorities": [
+    "Increase AI feature adoption",
+    "Maintain enterprise trust and security compliance",
+    "Improve search relevance through ML"
+  ],
+  "competitors": ["Microsoft Teams", "Google Workspace", "Discord"],
+  "constraints": [
+    "GDPR and CCPA compliance",
+    "Strict enterprise data residency requirements",
+    "Public relations sensitivity regarding AI data usage"
+  ],
+  "stakeholders": [
+    {
+      "name": "Chief Product Officer",
+      "facts": "Wants aggressive AI feature rollout to stay ahead of Microsoft Teams."
+    },
+    {
+      "name": "Chief Information Security Officer",
+      "facts": "Highly concerned about enterprise data leaks and compliance violations."
+    },
+    {
+      "name": "VP of Public Relations",
+      "facts": "Fearful of negative press regarding AI scraping user data without consent."
+    }
+  ],
+  "market_context": {
+    "pricing_tiers": ["Pro", "Business+", "Enterprise Grid"],
+    "industry_vertical": "technology",
+    "deployment_preference": "cloud"
+  }
+}

@@ -1,0 +1,39 @@
+Ticket #10442: "Urgent: Opt out of ML training"
+Severity: High
+Message: "Hi, I am the Org Owner for acmecorp.slack.com. We deal with protected health information (PHI). We demand to be opted out of all ML/AI global model training immediately. Why is there no toggle for this in the workspace settings?"
+
+Ticket #10445: "Privacy Policy Clarification"
+Severity: Medium
+Message: "Your updated privacy principles say you read our messages to train AI. Is this Generative AI? Are my messages going to show up in someone else's Slack AI summaries? Please clarify before I escalate to our CTO."
+
+Ticket #10450: "Cannot find opt-out button"
+Severity: Low
+Message: "Hi team, I saw on Reddit that we have to opt-out of data scraping. Where is the button for this? Thanks."
+
+Ticket #10455: "Opt-out confirmation requested"
+Severity: High
+Message: "I sent an email to feedback@slack.com three days ago requesting an opt-out for global ML training. I haven't received a confirmation. Has our data been excluded yet? I need written proof for our compliance audit."
+
+Ticket #10462: "How to find Org Owner"
+Severity: Medium
+Message: "We want to opt out of the AI training, but the article says the Org Owner has to do it. The user who created our Slack left the company. How do we transfer ownership so we can send this email?"
+
+Ticket #10468: "GDPR Violation Concern"
+Severity: Critical
+Message: "We are an EU-based company. Automatically opting us into data processing for ML training without explicit consent violates GDPR Article 6. Consider this an official data processing objection. Cease all training on our workspace data."
+
+Ticket #10471: "Is Slack AI different?"
+Severity: Low
+Message: "We pay for the Slack AI add-on. If we opt out of this global ML training thing, will Slack AI stop working? The documentation is very confusing."
+
+Ticket #10480: "Enterprise Grid Opt-Out"
+Severity: High
+Message: "We manage 50 different workspaces under our Enterprise Grid. Do I have to send 50 separate emails to opt out, or can I just send one email with the Grid ID? This process is ridiculously manual."
+
+Ticket #10485: "Data deletion request"
+Severity: Critical
+Message: "We are opting out of ML training. Furthermore, we demand that any models already trained using our historical data be immediately retrained to exclude our contributions, or destroyed. Please confirm when this is complete."
+
+Ticket #10492: "Cancel subscription"
+Severity: High
+Message: "Because of the recent news regarding data scraping for AI, we are migrating to Teams. Please cancel our annual renewal and provide instructions for data export."

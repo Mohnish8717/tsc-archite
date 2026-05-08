@@ -243,7 +243,7 @@ async def InitializeOASISAgents(
         if edge_case:
             edge_cases_triggered.append(f"{persona.name}:{edge_case}")
             
-        # MiroFish Optimization: Enrich bio with market context before mapping
+        # Optimization: Enrich bio with market context before mapping
         original_bio = persona.psychological_profile.full_profile_text
         grounding_context = ""
         if market_context:
@@ -255,7 +255,7 @@ async def InitializeOASISAgents(
             if market_context.get("pricing_tiers"):
                 grounding_context += f"- Current Pricing Tiers: {', '.join(market_context['pricing_tiers'])}\n"
             
-            # MiroFish Integration: Add company priorities
+            # Integration: Add company priorities
             if context and context.current_priorities:
                 grounding_context += f"- Company Priorities: {', '.join(context.current_priorities)}\n"
             

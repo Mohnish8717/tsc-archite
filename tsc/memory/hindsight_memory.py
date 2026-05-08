@@ -791,6 +791,28 @@ class HindsightOASISManager:
         self.feature_description = ""
         self._provisioned_banks: list[str] = []
 
+        # ── Memory Lifecycle Optimization (Free Tier) ──────────────────
+        # Dirty-flag: only reflect agents that produced content this timestep
+        self._dirty_agents: set = set()
+        # Timestep counter for adaptive reflect frequency
+        self._timestep_counter: int = 0
+        # Free-tier budget config — minimize token usage
+        _tier = os.getenv("HINDSIGHT_TIER", "free").lower()
+        self._budget = {
+            "free":  {"recall_budget": "low", "reflect_budget": "low",
+                      "recall_max_tokens": 300, "reflect_max_tokens": 200,
+                      "reflect_every_n": 3, "max_entity_tokens": 100},
+            "pro":   {"recall_budget": "low", "reflect_budget": "mid",
+                      "recall_max_tokens": 500, "reflect_max_tokens": 400,
+                      "reflect_every_n": 2, "max_entity_tokens": 200},
+            "scale": {"recall_budget": "mid", "reflect_budget": "high",
+                      "recall_max_tokens": 800, "reflect_max_tokens": 600,
+                      "reflect_every_n": 1, "max_entity_tokens": 300},
+        }.get(_tier, {"recall_budget": "low", "reflect_budget": "low",
+                      "recall_max_tokens": 300, "reflect_max_tokens": 200,
+                      "reflect_every_n": 3, "max_entity_tokens": 100})
+        logger.info(f"OASIS: Memory budget tier='{_tier}' → reflect_every={self._budget['reflect_every_n']}")
+
     async def check_connection(self) -> bool:
         """Verify the Hindsight server is responsive."""
         if not self._hindsight:
@@ -930,6 +952,8 @@ class HindsightOASISManager:
                 }],
             )
             logger.info(f"  🧠 Memory inclusion (Timestep {timestep}): Stored '{action_type}' for {agent_name} into {bank_id}")
+            # Mark agent as dirty — needs reflection this timestep
+            self._dirty_agents.add(bank_id)
         except Exception as e:
             logger.warning(f"OASIS: Structured retain failed for {agent_name} ({bank_id}): {e}")
 
@@ -961,10 +985,10 @@ class HindsightOASISManager:
                     f"on '{self.feature_title}'? What actions have I taken?"
                 ),
                 types=["experience", "opinion", "observation"],
-                budget="low",
-                max_tokens=500,
+                budget=self._budget["recall_budget"],
+                max_tokens=self._budget["recall_max_tokens"],
                 include_entities=True,
-                max_entity_tokens=200,
+                max_entity_tokens=self._budget["max_entity_tokens"],
             )
             
             # Build context from recall results
@@ -990,42 +1014,110 @@ class HindsightOASISManager:
     async def synthesize_post_timestep(self, timestep: int) -> None:
         """LAYER 3 — Post-Timestep Reflection: Higher-order learning.
         
-        Called once per timestep AFTER all agents have acted.
-        Triggers areflect() to synthesize raw experiences into:
-        - Updated observations
-        - Evolved opinion scores  
-        - Mental model refresh
-        
-        This is the expensive operation — reserved for between-round synthesis.
+        Optimized for free tier with three cost-saving mechanisms:
+        1. DIRTY-FLAG: Only reflect agents that produced content this timestep
+        2. ADAPTIVE FREQUENCY: Reflect every N timesteps (configurable by tier)
+        3. BELIEF EVOLUTION: Store reflection output back as a new memory
+           so subsequent recalls include the evolved stance
         """
         if not self._hindsight:
             return
-            
-        logger.info(f"🔄 OASIS: Post-timestep {timestep} reflection for {len(self._provisioned_banks)} agents...")
-        for bank_id in self._provisioned_banks:
-            # Robust retry for reflection
-            for attempt in range(3):
+        
+        self._timestep_counter += 1
+        reflect_every = self._budget["reflect_every_n"]
+        
+        # Adaptive frequency gate — skip reflection on non-reflect timesteps
+        if self._timestep_counter % reflect_every != 0:
+            logger.info(
+                f"⏭️  OASIS: Skipping reflection at timestep {timestep} "
+                f"(next reflect at timestep {timestep + (reflect_every - self._timestep_counter % reflect_every)})"
+            )
+            self._dirty_agents.clear()
+            return
+        
+        # Only reflect agents that actually spoke this round
+        active_banks = [b for b in self._provisioned_banks if b in self._dirty_agents]
+        skipped = len(self._provisioned_banks) - len(active_banks)
+        
+        logger.info(
+            f"🔄 OASIS: Post-timestep {timestep} reflection — "
+            f"{len(active_banks)} active, {skipped} silent (skipped)"
+        )
+        
+        for bank_id in active_banks:
+            for attempt in range(2):  # Reduced retries for free tier
                 try:
                     reflection = await self._hindsight.areflect(
                         bank_id=bank_id,
                         query=(
                             f"After round {timestep} of the market simulation, "
                             f"what is my evolved stance on '{self.feature_title}'? "
-                            f"Have I changed my mind about anything?"
+                            f"Have I changed my mind about anything? "
+                            f"What specific concerns or support do I now have?"
                         ),
-                        budget="mid",
+                        budget=self._budget["reflect_budget"],
                     )
-                    ans = getattr(reflection, 'text', str(reflection))
+                    ans = getattr(reflection, 'answer',
+                                  getattr(reflection, 'text', str(reflection)))
                     logger.info(f"  🧠 {bank_id} post-T{timestep}: {ans[:120]}...")
-                    break # Success
+                    
+                    # CRITICAL: Store reflection back as evolved_belief memory
+                    # This closes the Act→Retain→Reflect→Store→Recall→Act loop
+                    if ans and len(ans) > 10:
+                        try:
+                            await self._hindsight.aretain_batch(
+                                bank_id=bank_id,
+                                items=[{
+                                    "content": (
+                                        f"[EVOLVED BELIEF after round {timestep}]: "
+                                        f"{ans[:600]}"
+                                    ),
+                                    "tags": ["opinion", "evolved_belief",
+                                             f"post_timestep_{timestep}"],
+                                    "context": (
+                                        "This is my synthesized belief after "
+                                        "reflecting on this round of discussion."
+                                    ),
+                                }],
+                            )
+                        except Exception:
+                            pass  # Non-critical — reflection itself succeeded
+                    break  # Success
                 except Exception as e:
-                    if attempt < 2:
-                        logger.warning(f"  ⏳ Reflect retry {attempt+1} for {bank_id}: {e}")
-                        await asyncio.sleep(1.0 * (attempt + 1))
+                    if attempt < 1:
+                        logger.warning(f"  ⏳ Reflect retry for {bank_id}: {e}")
+                        await asyncio.sleep(1.5)
                     else:
-                        logger.warning(f"  ⚠️  Reflect failed for {bank_id} after 3 attempts: {e}")
+                        logger.warning(f"  ⚠️  Reflect failed for {bank_id}: {e}")
             
-            await asyncio.sleep(0.5) # Jitter to prevent connection dropping
+            await asyncio.sleep(0.3)  # Jitter
+        
+        # Reset dirty set for next timestep
+        self._dirty_agents.clear()
+
+    async def cleanup_banks(self) -> int:
+        """Delete all Hindsight banks provisioned during this simulation run.
+        
+        Called when a NEW simulation starts (not after each run) to preserve
+        data for post-simulation forensic analysis.
+        
+        Works for both local Docker and cloud Hindsight.
+        """
+        if not self._hindsight:
+            return 0
+        
+        deleted = 0
+        for bank_id in list(self._provisioned_banks):
+            try:
+                await self._hindsight.adelete_bank(bank_id=bank_id)
+                deleted += 1
+                logger.debug(f"  🧹 Deleted bank: {bank_id}")
+            except Exception as e:
+                logger.debug(f"  ⚠️  Could not delete {bank_id}: {e}")
+        
+        self._provisioned_banks.clear()
+        logger.info(f"🧹 OASIS: Purged {deleted} Hindsight banks")
+        return deleted
 
     def close(self):
         if self._hindsight:
@@ -1033,4 +1125,5 @@ class HindsightOASISManager:
                 self._hindsight.close()
             except Exception:
                 pass
+
 

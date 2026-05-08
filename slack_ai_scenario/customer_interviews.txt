@@ -1,0 +1,29 @@
+Interview with Hacker News User "sysadmin_throwaway":
+"I just saw the updated privacy policy. To opt out, you have to have your workspace owner send an email to feedback@slack.com with the subject line 'Slack global model opt-out request'. That is the definition of a dark pattern. Why is there no toggle in the workspace settings? They are hoping people are too lazy to send the email."
+
+Interview with Reddit User /u/EnterpriseArchitect:
+"We sign massive DPAs (Data Processing Agreements) with Salesforce/Slack. To find out via a viral tweet that they've been opting us in by default to train their global ML models on our messages is a massive breach of trust. My legal team is already drafting a formal objection. We are halting our Grid expansion."
+
+Interview with Twitter User @DevOpsDave:
+"Friendly reminder to all engineers: do NOT paste API keys, customer PII, or proprietary code into Slack. They just admitted they use message data to train their ML models by default. Even if they say it doesn't 'memorize' data, the risk is too high. Opt your orgs out immediately."
+
+Interview with Slack Community Forum Member:
+"Slack’s PR response saying this isn't for 'Generative AI' but just 'Traditional ML' is splitting hairs. To the end user, scraping our private DMs to build models without explicit consent is wrong. The opt-out process requires an email that hasn't even been acknowledged by their support team in 4 days. This is completely unacceptable."
+
+Interview with CISO (Tech Startup):
+"If they don't reverse this silent opt-in policy by Friday, we are migrating our 500-person org to Microsoft Teams. We literally cannot be compliant with our own SOC2 policies if our vendor is using our data for ML training without explicit, auditable consent."
+
+Interview with Reddit User /u/PrivacyNow:
+"The burden shouldn't be on the customer to opt out. It should be opt-in. Period. Slack is a B2B communication tool where highly sensitive corporate data lives. Treating it like a consumer social network where you can just scrape everything to build your next feature is a fundamental misunderstanding of their product."
+
+Interview with Workspace Admin (Small Business):
+"I tried to send the email to opt out, but they rejected it because I'm just an 'Admin' and not the 'Primary Org Owner'. The person who set up our Slack left the company 3 years ago and their email is dead. So now we can't opt out? What kind of ridiculous process is this?"
+
+Interview with Hacker News User "data_skeptic":
+"Even if they promise that data doesn't leak across workspaces, why should I trust them? They already tried to quietly slip this policy past us. The fact that they made the opt-out process so archaic (sending an email) proves they want to collect the data more than they care about our privacy."
+
+Interview with Legal Operations Director:
+"We are an EU-based company. Automatically opting us into data processing for ML training without explicit consent violates GDPR Article 6. Consider this an official data processing objection. Cease all training on our workspace data immediately."
+
+Interview with Long-time Developer:
+"I've defended Slack against Teams for years because the UX is better. But this? This makes it really hard to defend them. Just put a toggle in the admin panel. The email requirement just screams 'we want to make this as difficult as possible'."

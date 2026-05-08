@@ -1,4 +1,4 @@
-# MiroFish SOTA Implementation Walkthrough
+# SOTA Implementation Walkthrough
 
 **Objective**: Enhance persona grounding, adversarial debate quality, and local embedding performance on macOS.
 
@@ -34,4 +34,4 @@
 - **Grounded Profiling**: Logs confirm personas citing source evidence consistently.
 
 ---
-*MiroFish Pipeline repaired and enhanced for enterprise-grade social simulation.*
+*Pipeline repaired and enhanced for enterprise-grade social simulation.*

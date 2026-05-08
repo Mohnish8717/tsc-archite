@@ -1,0 +1,9 @@
+{
+  "title": "Global ML Model Training Opt-In Default",
+  "description": "To power intelligent features like search relevance, channel recommendations, and emoji suggestions, we will use customer messaging data to train global, non-generative machine learning models. By default, all workspaces will be opted-in to this data collection. Users cannot opt-out individually; instead, Org Owners must email feedback@slack.com to request an opt-out. Note: This data is NOT used for Generative AI (Slack AI) features.",
+  "target_persona": "Enterprise IT Admins",
+  "expected_impact": "Will significantly improve the accuracy of Slack's global ML models by maximizing the training data pool, leading to better search and recommendations for all users.",
+  "technical_complexity": "Low (Policy & Config change)",
+  "dependencies": ["Update Privacy Principles documentation", "Customer Experience team email workflow for opt-outs"],
+  "success_metrics": ["ML model accuracy increase", "Opt-out rate < 5%"]
+}

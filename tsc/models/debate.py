@@ -87,6 +87,12 @@ class ConsensusResult(BaseModel):
     tension_shifts: dict[str, float] = Field(default_factory=dict)
     overall_summary: str = ""
 
+    # Simulation grounding (populated from OASIS behavioral analysis)
+    simulation_adoption_score: float = 0.0
+    simulation_consensus: str = ""
+    simulation_key_quotes: list[str] = Field(default_factory=list)
+    behavioral_insights: list[str] = Field(default_factory=list)
+
     debate_rounds: list[DebateRound] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 

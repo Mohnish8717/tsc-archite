@@ -1,6 +1,6 @@
 # Layer 4 Deep Dive: The 8 Specialized Evaluation Gates
 
-Layer 4 acts as the "Analytical Filter" of the MiroFish pipeline. It transforms a refined proposal into a risk-weighted scorecard by running 8 specialized gates. These gates use a combination of **High-Temperature LLM Reasoning** (Groq/Llama-3.1) and **Stochastic Agent-Based Modeling** (Mesa).
+Layer 4 acts as the "Analytical Filter" of the pipeline. It transforms a refined proposal into a risk-weighted scorecard by running 8 specialized gates. These gates use a combination of **High-Temperature LLM Reasoning** (Groq/Llama-3.1) and **Stochastic Agent-Based Modeling** (Mesa).
 
 ---
 

@@ -315,3 +315,131 @@ Output ONLY a valid JSON object:
     print(f"📊 Global Resonance Score: {avg_alignment:.2f}")
     print("═" * 60 + "\n")
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# PREDICTIVE REALITY ENGINE: Dynamic Segment Discovery
+# ═══════════════════════════════════════════════════════════════════════
+
+async def ClusterOnBehavioralState(journals: list) -> List[Dict[str, Any]]:
+    """Cluster Decision Journals by behavioral state vectors.
+    
+    Uses K-Means on [satisfaction, frustration, trust, urgency, advocacy]
+    then LLM-names each cluster dynamically based on signal patterns.
+    
+    Returns list of segment dicts for PredictionReport.
+    """
+    if not journals or len(journals) < 2:
+        return []
+    
+    import numpy as np
+    
+    # Build feature matrix from state vectors
+    feature_matrix = np.array([j.state_vector() for j in journals])
+    
+    # Dynamic cluster count: 1 per ~15 agents, min 2, max 8
+    num_clusters = max(2, min(len(journals) // 15, 8))
+    if len(journals) < num_clusters:
+        num_clusters = len(journals)
+    
+    try:
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=num_clusters, n_init='auto', random_state=42)
+        labels = kmeans.fit_predict(feature_matrix)
+    except Exception as e:
+        logger.error(f"K-Means clustering failed: {e}")
+        return _fallback_behavioral_segments(journals)
+    
+    # Build segments
+    segments = []
+    
+    # Try to get LLM for naming
+    llm_client = None
+    try:
+        from tsc.llm.factory import create_llm_client
+        from tsc.config import LLMProvider
+        llm_client = create_llm_client(provider=LLMProvider.GROQ, model="llama-3.1-8b-instant")
+    except Exception:
+        pass
+    
+    for k in range(num_clusters):
+        members = [journals[i] for i, lbl in enumerate(labels) if lbl == k]
+        if not members:
+            continue
+        
+        n = len(members)
+        avg_sat = round(sum(j.satisfaction for j in members) / n, 3)
+        avg_fru = round(sum(j.frustration for j in members) / n, 3)
+        avg_trust = round(sum(j.trust for j in members) / n, 3)
+        avg_urg = round(sum(j.urgency for j in members) / n, 3)
+        avg_adv = round(sum(j.advocacy for j in members) / n, 3)
+        
+        # Collect signal types for this cluster
+        cluster_signals = Counter([s["type"] for j in members for s in j.signals if s["type"] != "neutral"])
+        top_signals = cluster_signals.most_common(5)
+        
+        # Dynamic naming via LLM
+        segment_name = f"Segment {k+1}"
+        if llm_client and top_signals:
+            try:
+                naming_prompt = (
+                    f"Name this user segment in 2-4 words based on their behavioral signals.\n"
+                    f"State: satisfaction={avg_sat:.2f}, frustration={avg_fru:.2f}, trust={avg_trust:.2f}\n"
+                    f"Top signals: {', '.join([f'{s[0]} ({s[1]}x)' for s in top_signals])}\n"
+                    f"Segment roles: {', '.join(set(j.segment_source for j in members if j.segment_source)[:5])}\n"
+                    f"Output ONLY the segment name, nothing else. Examples: 'Frustrated Compliance Officers', "
+                    f"'Enthusiastic Early Adopters', 'Privacy-Conscious Resistors', 'Cautious Evaluators'"
+                )
+                name_resp = await llm_client.generate("You name user segments.", naming_prompt)
+                segment_name = name_resp.strip().strip('"').strip("'")[:60]
+            except Exception:
+                pass
+        
+        # Count decision events in this cluster
+        cluster_decisions = [d for j in members for d in j.decisions]
+        
+        segments.append({
+            "name": segment_name,
+            "size": n,
+            "pct": round(n / len(journals), 2),
+            "avg_satisfaction": avg_sat,
+            "avg_frustration": avg_fru,
+            "avg_trust": avg_trust,
+            "avg_urgency": avg_urg,
+            "avg_advocacy": avg_adv,
+            "top_signals": [{"type": s[0], "count": s[1]} for s in top_signals],
+            "decision_events": len(cluster_decisions),
+            "member_ids": [j.agent_id for j in members],
+        })
+    
+    # Sort by frustration (highest risk first)
+    segments.sort(key=lambda s: s["avg_frustration"], reverse=True)
+    
+    logger.info(f"🎯 Discovered {len(segments)} dynamic segments from behavioral state vectors")
+    for seg in segments:
+        logger.info(f"   [{seg['size']} agents] {seg['name']} — "
+                     f"sat={seg['avg_satisfaction']:.2f}, fru={seg['avg_frustration']:.2f}")
+    
+    return segments
+
+
+def _fallback_behavioral_segments(journals: list) -> List[Dict[str, Any]]:
+    """Fallback when K-Means is unavailable: simple threshold-based grouping."""
+    high_risk = [j for j in journals if j.frustration > 0.5]
+    moderate = [j for j in journals if 0.3 <= j.frustration <= 0.5]
+    positive = [j for j in journals if j.frustration < 0.3]
+    
+    segments = []
+    for name, group in [("High-Risk Users", high_risk), ("Moderate Users", moderate), ("Positive Users", positive)]:
+        if group:
+            n = len(group)
+            segments.append({
+                "name": name, "size": n, "pct": round(n / len(journals), 2),
+                "avg_satisfaction": round(sum(j.satisfaction for j in group) / n, 3),
+                "avg_frustration": round(sum(j.frustration for j in group) / n, 3),
+                "avg_trust": round(sum(j.trust for j in group) / n, 3),
+                "avg_urgency": round(sum(j.urgency for j in group) / n, 3),
+                "avg_advocacy": round(sum(j.advocacy for j in group) / n, 3),
+                "top_signals": [], "decision_events": 0,
+                "member_ids": [j.agent_id for j in group],
+            })
+    return segments

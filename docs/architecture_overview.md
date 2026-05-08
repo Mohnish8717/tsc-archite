@@ -1,11 +1,11 @@
-# MiroFish — System Architecture: Enterprise-Grade Social Simulation
+# System Architecture: Enterprise-Grade Social Simulation
 
-MiroFish is a multi-agent decision-support platform designed to evaluate feature proposals by simulating their impact on a virtual market of grounded, evidence-backed personas. It employs a sophisticated 8-layer pipeline that transforms raw qualitative data into actionable, risk-aware technical specifications.
+This system is a multi-agent decision-support platform designed to evaluate feature proposals by simulating their impact on a virtual market of grounded, evidence-backed personas. It employs a sophisticated 8-layer pipeline that transforms raw qualitative data into actionable, risk-aware technical specifications.
 
 ---
 
 ## 1. System Philosophy: Grounded Intelligence
-Unlike traditional RAG systems that perform simple vector lookups, MiroFish enforces **strict evidentiary grounding**:
+Unlike traditional RAG systems that perform simple vector lookups, the system enforces **strict evidentiary grounding**:
 - **Facts over Hallucinations**: Every agent trait or simulation parameter must cite a source snippet (quote/fact) from the original documents.
 - **Adversarial Pressure**: Stakeholders do not just "collaborate"—they are programmed to hunt for risks and critique internal inconsistencies.
 - **Stochastic Realism**: Market adoption is modeled using Monte Carlo simulations (Mesa), not just static LLM predictions.
@@ -76,4 +76,4 @@ Stakeholders engage in a 3-round adversarial cycle:
 - **Caching**: Redis/LRU Cache (LLM and Persona deduplication).
 
 ---
-*MiroFish: Grounded social simulation for evidence-based decision making.*
+*Grounded social simulation for evidence-based decision making.*

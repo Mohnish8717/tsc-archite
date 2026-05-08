@@ -40,12 +40,16 @@ async def run_production_flow():
     data_dir = PROJECT_ROOT / "production_data"
     
     try:
+        # Check if proposal exists, if not we will run in pure Feature Discovery mode
+        proposal_path = data_dir / "feature_proposal.json"
+        has_proposal = proposal_path.exists()
+        
         recommendation = await pipeline.evaluate(
             interviews=str(data_dir / "customer_interviews.txt"),
             support=str(data_dir / "support_tickets.txt"),
             context=str(data_dir / "company_context.json"),
-            proposal=str(data_dir / "feature_proposal.json"),
-            num_simulations=300 # Use our optimized Monte Carlo
+            proposal=str(proposal_path) if has_proposal else None,
+            num_simulations=10  # Number of OASIS agents in the behavioral simulation
         )
         
         logger.info("="*40)

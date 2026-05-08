@@ -1,4 +1,4 @@
-"""Pipeline orchestrator: runs all 8 layers sequentially."""
+"""Pipeline orchestrator: runs all layers of the Predictive Reality Engine pipeline."""
 
 from __future__ import annotations
 
@@ -11,18 +11,17 @@ from typing import Any, Optional
 from tsc.config import Settings, settings
 from tsc.layers.layer1_ingestor import ContextualIngestor
 from tsc.layers.layer2_graph import KnowledgeGraphBuilder
-from tsc.layers.layer3_personas import PersonaGenerator
-from tsc.layers.layer4_gates import GateExecutor
-from tsc.layers.layer5_refinement import RefinementEngine
-from tsc.layers.layer6_debate import DebateEngine
+from tsc.layers.layer2_discovery import FeatureDiscoveryEngine
+from tsc.layers.boardroom_personas import BoardroomPersonaFactory
 from tsc.layers.layer6_ag2_debate import AG2DebateEngine
 from tsc.layers.layer7_spec import SpecGenerator
 from tsc.layers.layer8_handoff import HandoffGenerator
 from tsc.llm.base import LLMClient
 from tsc.llm.factory import create_llm_client
-from tsc.memory.fact_retriever import FactRetriever
 from tsc.memory.graph_store import GraphStore
-# Zep removed entirely; orchestrator will use Hindsight globally
+from tsc.memory.hindsight_session import HindsightSessionManager
+from tsc.oasis.oasis_persona_gen import OASISUserPersonaGenerator
+from tsc.oasis.simulation_engine import RunOASISSimulation, OASISSimulationConfig
 from tsc.models.inputs import DocumentType, InputDocument
 from tsc.models.recommendation import FinalRecommendation
 
@@ -30,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class TSCPipeline:
-    """Orchestrates the full 8-layer TSC evaluation pipeline."""
+    """Orchestrates the autonomous product management pipeline."""
 
     def __init__(
         self,
@@ -40,12 +39,8 @@ class TSCPipeline:
         self._cfg = cfg or settings
         self._llm = llm_client or create_llm_client(settings=self._cfg)
 
-        # Memory: Transitioning to Universal Hindsight World Data Bank
-        from tsc.memory.world_bank import WorldDataBank
-        self._world_bank = WorldDataBank()
-        # GraphStore and FactRetriever will be refactored to use WorldDataBank
-        self._graph_store = GraphStore(self._world_bank)
-        self._fact_retriever = FactRetriever(self._world_bank)
+        # Memory: Universal Hindsight Session Backbone
+        self._session = HindsightSessionManager()
 
         # Progress callback (for web UI)
         self._on_progress: Optional[Any] = None
@@ -62,8 +57,9 @@ class TSCPipeline:
         context: Optional[str] = None,
         proposal: Optional[str] = None,
         num_simulations: Optional[int] = None,
+        use_legacy_personas: bool = False,
     ) -> FinalRecommendation:
-        """Run the full pipeline.
+        """Run the full Predictive Reality Engine pipeline.
 
         Args:
             interviews: Path to customer interviews file.
@@ -71,21 +67,25 @@ class TSCPipeline:
             analytics: Path to analytics data file.
             context: Path to company context JSON.
             proposal: Path to feature proposal JSON.
-            num_simulations: Optional override for Monte Carlo simulation count.
+            num_simulations: Number of OASIS simulation agents.
+            use_legacy_personas: If True, uses the full Layer 3 LLM-driven
+                PersonaGenerator pipeline instead of BoardroomPersonaFactory.
+                Default is False (static boardroom personas).
 
         Returns:
             FinalRecommendation with verdict, spec, and monitoring plan.
         """
         t0 = time.time()
+        session_id = f"run-{int(t0)}"
         logger.info("=" * 60)
-        logger.info("TSC v2.0 PIPELINE — STARTING EVALUATION")
+        logger.info("PREDICTIVE REALITY ENGINE PIPELINE — STARTING")
         logger.info("LLM: %s (%s)", self._llm.__class__.__name__, self._llm.model)
         if num_simulations:
-            logger.info("Simulation Count Override: %d", num_simulations)
+            logger.info("Simulation Count: %d", num_simulations)
         logger.info("=" * 60)
 
-        # Initialize Universal Memory
-        await self._world_bank.initialize_session("tsc-world")
+        # Initialize Universal Memory Sessions
+        await self._session.initialize(session_id)
 
         # Build document list
         documents = self._build_document_list(
@@ -93,88 +93,137 @@ class TSCPipeline:
         )
         logger.info("Input: %d documents", len(documents))
 
-        # Layer 1: Ingest
-        self._emit_progress(1, "Contextual Ingestor", "running")
-        ingestor = ContextualIngestor(self._llm)
+        # Layer 1: Ingest (Extract customer data & initial context)
+        self._emit_progress(1, "Contextual Ingest", "running")
+        ingestor = ContextualIngestor(self._llm, session=self._session)
         bundle, feature, company = await ingestor.process(documents)
-        self._emit_progress(1, "Contextual Ingestor", "done", {
+
+        self._emit_progress(1, "Contextual Ingest", "done", {
             "chunks": bundle.statistics.total_chunks,
-            "entities": bundle.statistics.unique_entities,
         })
 
-        # Layer 2: Knowledge Graph
-        self._emit_progress(2, "Knowledge Graph Builder", "running")
-        graph_builder = KnowledgeGraphBuilder(self._llm, self._graph_store)
-        graph = await graph_builder.process(bundle)
-        self._emit_progress(2, "Knowledge Graph Builder", "done", {
-            "nodes": graph.metadata.total_nodes,
-            "edges": graph.metadata.total_edges,
-        })
-
-        # Layer 3: Personas
-        self._emit_progress(3, "Persona Generation", "running")
-        persona_gen = PersonaGenerator(self._llm, self._graph_store)
-        personas = await persona_gen.process(feature, company, graph, bundle)
-        self._emit_progress(3, "Persona Generation", "done", {
-            "personas": len(personas),
-        })
-
-        # Layer 4: Gates
-        self._emit_progress(4, "Gate Evaluation", "running")
-        gate_executor = GateExecutor(self._llm)
-        gates_summary = await gate_executor.process(
-            feature, company, graph, bundle, personas, num_simulations
-        )
-        self._emit_progress(4, "Gate Evaluation", "done", {
-            "passed": len(gates_summary.results) - len(gates_summary.failed_gates),
-            "total": len(gates_summary.results),
-            "score": gates_summary.overall_score,
-        })
-
-        # Layer 5: Refinement
-        self._emit_progress(5, "Iterative Refinement", "running")
-        refinement = RefinementEngine(self._llm, self._cfg.gate_fail_threshold)
-        gates_summary = await refinement.process(
-            gates_summary, feature, company, graph, bundle, personas
-        )
-        self._emit_progress(5, "Iterative Refinement", "done")
-
-        # Layer 6: Debate
-        self._emit_progress(6, "Stakeholder Debate", "running")
+        # Layer 2: OASIS Behavioral Analysis (Social Simulation)
+        self._emit_progress(2, "Behavioral Analysis (OASIS)", "running")
         
-        import os
-        if os.getenv("DEBATE_ENGINE_TYPE", "ag2").lower() == "ag2":
-            logger.info("Using deep-thinking AG2 Debate Engine")
-            debate = AG2DebateEngine(self._llm)
-        else:
-            logger.info("Using legacy Debate Engine")
-            debate = DebateEngine(self._llm)
-            
-        consensus = await debate.process(
-            feature, company, graph, personas, gates_summary
+        # Generate product-user personas grounded in customer interview data
+        oasis_gen = OASISUserPersonaGenerator(self._llm, self._session)
+        profiles = await oasis_gen.generate(
+            company=company,
+            num_agents=num_simulations or 10,
+            feature=feature if proposal else None,
+            raw_chunks=bundle.chunks,
         )
-        self._emit_progress(6, "Stakeholder Debate", "done", {
-            "verdict": consensus.overall_verdict,
-            "confidence": consensus.approval_confidence,
+        logger.info("Generated %d OASIS user personas from customer data", len(profiles))
+        
+        # Log all created personas to ensure diversity is visible
+        logger.info("=" * 60)
+        logger.info("PERSONAS CREATED FOR SIMULATION")
+        logger.info("=" * 60)
+        for i, p in enumerate(profiles):
+            info = p.user_info_dict
+            other = info.get("profile", {}).get("other_info", {})
+            logger.info(f"[{i+1}/{len(profiles)}] Agent ID: {p.agent_id}")
+            logger.info(f"  Name: {info.get('name', 'Unknown')}")
+            logger.info(f"  Segment: {other.get('role', info.get('description', 'Unknown'))}")
+            logger.info(f"  Description: {info.get('description', '')[:100]}...")
+            logger.info(f"  Influence: {p.influence_strength:.2f} | Receptiveness: {p.receptiveness:.2f}")
+            logger.info("-" * 40)
+        
+        sim_config = OASISSimulationConfig(
+            simulation_name=session_id,
+            num_agents=len(profiles),
+        )
+        behavioral_results = await RunOASISSimulation(
+            config=sim_config,
+            agent_profiles=profiles,
+            feature=feature if proposal else None,
+            context=company,
+            mode="behavioral",
+            session=self._session,
+        )
+        self._emit_progress(2, "Behavioral Analysis", "done", {
+            "agents": len(profiles),
+            "interactions": len(behavioral_results.agent_interactions),
         })
 
-        # Layer 7: Specification
-        self._emit_progress(7, "Specification Generation", "running")
+        # Layer 3: Feature Discovery Engine
+        self._emit_progress(3, "Feature Discovery", "running")
+        discovery = FeatureDiscoveryEngine(self._llm, self._session)
+        discovered_features = await discovery.process(
+            company=company,
+            behavioral_results=behavioral_results,
+            existing_proposal=feature if proposal else None,
+            raw_chunks=bundle.chunks
+        )
+        feature = discovered_features[0]  # Take top ranked feature
+        self._emit_progress(3, "Feature Discovery", "done", {
+            "selected_feature": feature.title
+        })
+
+        # Layer 4: Boardroom Personas
+        self._emit_progress(4, "Boardroom Assembly", "running")
+        
+        graph = None
+        if use_legacy_personas:
+            # Opt-in: Full LLM-driven persona generation pipeline (Layer 3)
+            logger.info("Using LEGACY Layer 3 PersonaGenerator (user opt-in)")
+            from tsc.layers.layer2_graph import KnowledgeGraphBuilder
+            from tsc.layers.layer3_personas import PersonaGenerator
+            from tsc.memory.world_bank import WorldDataBank
+            from tsc.memory.graph_store import GraphStore
+            
+            # Init legacy memory just for this run
+            wb = WorldDataBank()
+            await wb.initialize_session(session_id)
+            gs = GraphStore(wb)
+            
+            graph_builder = KnowledgeGraphBuilder(self._llm, gs)
+            graph = await graph_builder.process(bundle)
+            persona_gen = PersonaGenerator(self._llm, gs)
+            personas = await persona_gen.process(feature, company, graph, bundle)
+        else:
+            # Default: Static boardroom personas adapted to company context
+            personas = BoardroomPersonaFactory.create_boardroom(
+                company=company, feature=feature
+            )
+        
+        self._emit_progress(4, "Boardroom Assembly", "done", {
+            "personas": len(personas),
+            "mode": "legacy_llm" if use_legacy_personas else "static_boardroom",
+        })
+
+        # Layer 5: AG2 Stakeholder Debate
+        self._emit_progress(5, "Stakeholder Debate", "running")
+        debate = AG2DebateEngine(self._llm)
+        consensus = await debate.process(
+            feature=feature, 
+            company=company, 
+            personas=personas, 
+            graph=graph, 
+            simulation_results=behavioral_results,
+            session=self._session
+        )
+        self._emit_progress(5, "Stakeholder Debate", "done", {
+            "verdict": consensus.overall_verdict,
+        })
+
+        # Layer 6: Specification Generation
+        self._emit_progress(6, "Specification Generation", "running")
         spec_gen = SpecGenerator(self._llm)
         spec = await spec_gen.process(
-            feature, company, graph, personas, gates_summary, consensus
+            feature, company, consensus
         )
-        self._emit_progress(7, "Specification Generation", "done", {
-            "word_count": len(spec.specification_markdown.split()),
+        self._emit_progress(6, "Specification Generation", "done", {
+            "tasks": len(spec.development_tasks),
         })
 
-        # Layer 8: Handoff
-        self._emit_progress(8, "Handoff & Monitoring", "running")
+        # Layer 7: Handoff
+        self._emit_progress(7, "Handoff & Monitoring", "running")
         handoff = HandoffGenerator(self._llm)
         recommendation = await handoff.process(
-            feature, company, personas, gates_summary, consensus, spec, t0
+            feature, company, personas, consensus, spec, behavioral_results, t0
         )
-        self._emit_progress(8, "Handoff & Monitoring", "done")
+        self._emit_progress(7, "Handoff & Monitoring", "done")
 
         total = time.time() - t0
         logger.info("=" * 60)
@@ -216,7 +265,7 @@ class TSCPipeline:
         status: str,
         details: Optional[dict] = None,
     ) -> None:
-        logger.info("Layer %d/%d: %s — %s", layer, 8, name, status)
+        logger.info("Layer %d/%d: %s — %s", layer, 7, name, status)
         if self._on_progress:
             try:
                 self._on_progress(layer, name, status, details or {})

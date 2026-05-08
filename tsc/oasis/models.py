@@ -131,7 +131,7 @@ class OASISSimulationConfig(BaseModel):
     simulation_name: str
     platform_type: str = "reddit" # "twitter" | "reddit"
     num_agents: int = 150
-    num_timesteps: int = 24 # 1 timestep = 1 hour usually in MiroFish
+    num_timesteps: int = 10 # 1 timestep = 1 hour usually
     simulation_speed: int = 60 # Clock magnification
     
     db_path: str = ":memory:"
@@ -286,3 +286,168 @@ class SimulationRunState(BaseModel):
         self.updated_at = datetime.utcnow()
         if self.total_timesteps > 0:
             self.percent_complete = round((action.timestep + 1) / self.total_timesteps * 100, 2)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PREDICTIVE REALITY ENGINE: Decision Journal + Prediction Report
+# ═══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class DecisionJournal:
+    """Per-agent behavioral state machine that evolves across timesteps.
+    
+    Accumulates Game Master signals into a running state vector.
+    When thresholds are crossed, decision events are triggered.
+    All labels are DYNAMIC — discovered from simulation data, not hardcoded.
+    """
+    agent_id: str
+    agent_name: str
+    segment_source: str = ""  # From persona profile (e.g. occupation)
+    
+    # ── Running State Vector (updated by GM signals) ──
+    # Generic dimensions that work for ANY product/feature:
+    satisfaction: float = 0.5     # Product satisfaction (0=hate, 1=love)
+    frustration: float = 0.0     # Accumulated friction
+    trust: float = 0.5           # Trust in the company/product
+    urgency: float = 0.0         # How urgently they want to act
+    advocacy: float = 0.0        # Would they recommend? (NPS proxy)
+    
+    # ── Signal History (append-only log) ──
+    signals: list = field(default_factory=list)
+    # Each: {"timestep": 2, "type": "exit_intent", "intensity": -0.8,
+    #         "quote": "I'm switching to Teams", "factors": ["privacy"]}
+    
+    # ── Decision Events (threshold-triggered) ──
+    decisions: list = field(default_factory=list)
+    # Each: {"timestep": 3, "decision": "HIGH_RISK", "confidence": 0.85,
+    #         "trigger": "frustration > 0.75", "factors": [...]}
+    
+    # ── Telemetry (from persona profile — grounding) ──
+    tenure_months: int = 0
+    team_size: int = 1
+    monthly_spend: float = 0.0
+    
+    def update_from_signal(self, signal: dict):
+        """Apply a GM signal to the state vector."""
+        self.signals.append(signal)
+        intensity = signal.get("intensity", 0.0)
+        
+        # State vector update rules (domain-agnostic)
+        if intensity < -0.3:
+            self.frustration = min(1.0, self.frustration + abs(intensity) * 0.3)
+            self.satisfaction = max(0.0, self.satisfaction + intensity * 0.2)
+            self.trust = max(0.0, self.trust + intensity * 0.15)
+        elif intensity > 0.3:
+            self.satisfaction = min(1.0, self.satisfaction + intensity * 0.2)
+            self.advocacy = min(1.0, self.advocacy + intensity * 0.15)
+            self.frustration = max(0.0, self.frustration - intensity * 0.1)
+        
+        # Urgency tracks magnitude of recent signals
+        recent = self.signals[-3:] if len(self.signals) >= 3 else self.signals
+        self.urgency = min(1.0, sum(abs(s.get("intensity", 0)) for s in recent) / 3.0)
+        
+        # Threshold-based decision events
+        ts = signal.get("timestep", 0)
+        if self.frustration > 0.75 and not self._has_decision("HIGH_RISK"):
+            self.decisions.append({
+                "timestep": ts, "decision": "HIGH_RISK",
+                "confidence": round(self.frustration, 2),
+                "trigger": f"frustration={self.frustration:.2f}",
+                "factors": list({s["type"] for s in self.signals[-5:]}),
+            })
+        if self.satisfaction > 0.75 and self.advocacy > 0.5 and not self._has_decision("CHAMPION"):
+            self.decisions.append({
+                "timestep": ts, "decision": "CHAMPION",
+                "confidence": round(self.satisfaction, 2),
+                "trigger": f"satisfaction={self.satisfaction:.2f}, advocacy={self.advocacy:.2f}",
+                "factors": list({s["type"] for s in self.signals[-5:]}),
+            })
+    
+    def _has_decision(self, decision_type: str) -> bool:
+        return any(d["decision"] == decision_type for d in self.decisions)
+    
+    def state_vector(self) -> list:
+        """Return numerical state for clustering."""
+        return [self.satisfaction, self.frustration, self.trust, self.urgency, self.advocacy]
+    
+    def prompt_summary(self) -> str:
+        """Generate a compact summary for injection into agent prompt."""
+        trend_sat = "↓" if len(self.signals) > 2 and self.satisfaction < 0.4 else "↑" if self.satisfaction > 0.6 else "→"
+        trend_fru = "↑" if self.frustration > 0.5 else "→"
+        
+        lines = [
+            f"\nYOUR DECISION JOURNAL (internal state):",
+            f"  Satisfaction: {self.satisfaction:.2f} ({trend_sat})",
+            f"  Frustration:  {self.frustration:.2f} ({trend_fru})",
+            f"  Trust:        {self.trust:.2f}",
+        ]
+        if self.signals:
+            recent_types = [s["type"] for s in self.signals[-3:]]
+            lines.append(f"  Recent signals: {', '.join(recent_types)}")
+        if self.frustration > 0.6:
+            lines.append(f"  ⚠️ Your frustration is HIGH. Consider what you would ACTUALLY do as a real user.")
+        if self.advocacy > 0.6:
+            lines.append(f"  ✅ You are becoming an advocate. Would you recommend this to colleagues?")
+        return "\n".join(lines)
+    
+    def to_dict(self) -> dict:
+        """Serialize for JSON output."""
+        return {
+            "agent_id": self.agent_id, "agent_name": self.agent_name,
+            "segment_source": self.segment_source,
+            "state": {"satisfaction": round(self.satisfaction, 3),
+                      "frustration": round(self.frustration, 3),
+                      "trust": round(self.trust, 3),
+                      "urgency": round(self.urgency, 3),
+                      "advocacy": round(self.advocacy, 3)},
+            "signal_count": len(self.signals),
+            "signals": self.signals[-10:],  # Last 10 for forensics
+            "decisions": self.decisions,
+            "telemetry": {"tenure_months": self.tenure_months,
+                          "team_size": self.team_size,
+                          "monthly_spend": self.monthly_spend},
+        }
+
+
+class PredictionReport(BaseModel):
+    """Quantitative output from the Predictive Reality Engine.
+    
+    All metrics are COMPUTED from simulation data — no hardcoded labels.
+    Segments are discovered dynamically via clustering.
+    """
+    simulation_id: str
+    feature_title: str = ""
+    population_size: int = 0
+    timesteps_completed: int = 0
+    
+    # ── Dynamic Segments (from clustering) ──
+    segments: List[Dict[str, Any]] = Field(default_factory=list)
+    # Each: {"name": "LLM-generated", "size": 12, "pct": 0.24,
+    #         "avg_satisfaction": 0.3, "avg_frustration": 0.7, ...}
+    
+    # ── Risk Distribution ──
+    risk_distribution: Dict[str, float] = Field(default_factory=dict)
+    # {"HIGH_RISK": 0.23, "MODERATE": 0.45, "LOW_RISK": 0.32}
+    
+    # ── Time-Series Curves ──
+    satisfaction_curve: List[float] = Field(default_factory=list)
+    frustration_curve: List[float] = Field(default_factory=list)
+    trust_curve: List[float] = Field(default_factory=list)
+    
+    # ── Derived Business Metrics ──
+    net_promoter_score: float = 0.0
+    churn_velocity: float = 0.0       # Rate of frustration increase
+    adoption_momentum: float = 0.0    # Rate of satisfaction increase
+    
+    # ── Decision Events ──
+    decision_events: List[Dict[str, Any]] = Field(default_factory=list)
+    
+    # ── Top Risk Factors ──
+    top_risk_factors: List[Dict[str, Any]] = Field(default_factory=list)
+    # [{"factor": "privacy", "frequency": 0.34}, ...]
+    
+    # ── LLM Executive Summary ──
+    executive_summary: str = ""
+    
+    # ── Per-Agent Journals ──
+    agent_journals: List[Dict[str, Any]] = Field(default_factory=list)

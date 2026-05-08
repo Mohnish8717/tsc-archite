@@ -14,8 +14,21 @@ from tsc.models.debate import (
     StakeholderApproval,
     SuccessCriteria,
 )
-from tsc.models.gates import GateResult, RiskEntry
 from tsc.models.spec import DevelopmentTask, FeatureSpecification
+
+# RiskEntry inlined here to decouple from gates (gates removed from pipeline in v3.0)
+# Original source: tsc.models.gates.RiskEntry
+
+
+class RiskEntry(BaseModel):
+    """A single identified risk with mitigation."""
+
+    risk_category: str = ""
+    description: str = ""
+    probability: float = 0.0
+    impact: str = ""
+    weighted_score: float = 0.0
+    mitigation: str = ""
 
 
 class PillarVerdict(BaseModel):

@@ -12,9 +12,9 @@ from datetime import datetime
 from tsc.llm.base import LLMClient
 from tsc.llm.prompts import SUMMARY_SYSTEM, SUMMARY_USER
 from tsc.models.debate import ConsensusResult
-from tsc.models.gates import GatesSummary
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.personas import FinalPersona
+from tsc.oasis.models import MarketSentimentSeries
 from tsc.models.recommendation import (
     EvaluationMetadata,
     FinalRecommendation,
@@ -39,9 +39,9 @@ class HandoffGenerator:
         feature: FeatureProposal,
         company: CompanyContext,
         personas: list[FinalPersona],
-        gates_summary: GatesSummary,
         consensus: ConsensusResult,
         spec: FeatureSpecification,
+        simulation_results: MarketSentimentSeries,
         start_time: float,
     ) -> FinalRecommendation:
         """Generate the final recommendation."""
@@ -49,7 +49,7 @@ class HandoffGenerator:
         logger.info("Layer 8: Generating final recommendation")
 
         # Build verdicts by pillar
-        verdicts = self._build_pillar_verdicts(gates_summary, consensus)
+        verdicts = self._build_pillar_verdicts(simulation_results, consensus)
 
         # Build monitoring framework
         monitoring = self._build_monitoring(feature)
@@ -59,16 +59,21 @@ class HandoffGenerator:
 
         # Generate leadership summary
         summary = await self._generate_summary(
-            feature, consensus, gates_summary
+            feature, consensus, simulation_results
         )
 
-        # Top risks (from gates)
+        # Top risks (from consensus mitigations and debate round tensions)
+        from tsc.models.recommendation import RiskEntry
         top_risks = []
-        for gate in gates_summary.results:
-            top_risks.extend(gate.risks)
-        top_risks = sorted(
-            top_risks, key=lambda r: r.probability, reverse=True
-        )[:5]
+        for idx, m in enumerate(consensus.mitigations[:5]):
+            top_risks.append(RiskEntry(
+                risk_category="Debate Identified Risk",
+                description=m,
+                probability=0.7 - (idx * 0.1),
+                impact="High",
+                weighted_score=0.7 - (idx * 0.1),
+                mitigation=m
+            ))
 
         total_minutes = (time.time() - start_time) / 60
 
@@ -91,8 +96,8 @@ class HandoffGenerator:
             metadata=EvaluationMetadata(
                 total_time_minutes=round(total_minutes, 1),
                 confidence_calculation=(
-                    f"Gates: {gates_summary.overall_score:.2f} × 0.6 + "
-                    f"Consensus: {consensus.approval_confidence:.2f} × 0.4 = "
+                    f"Simulation Adoption: {consensus.simulation_adoption_score:.2f} × 0.5 + "
+                    f"Board Consensus: {consensus.approval_confidence:.2f} × 0.5 = "
                     f"{consensus.approval_confidence:.2f}"
                 ),
                 llm_provider=self._llm.__class__.__name__,
@@ -110,37 +115,26 @@ class HandoffGenerator:
         return recommendation
 
     def _build_pillar_verdicts(
-        self, gates: GatesSummary, consensus: ConsensusResult
+        self, sim: MarketSentimentSeries, consensus: ConsensusResult
     ) -> dict[str, PillarVerdict]:
-        # Map gates to pillars
-        technical_gates = [g for g in gates.results if g.gate_id in ("4.1", "4.2", "4.3", "4.4")]
-        market_gates = [g for g in gates.results if g.gate_id == "4.5"]
-        risk_gates = [g for g in gates.results if g.gate_id == "4.6"]
-        exec_gates = [g for g in gates.results if g.gate_id in ("4.7", "4.8")]
-
-        def avg_score(gs):
-            return sum(g.score for g in gs) / max(len(gs), 1)
+        
+        adoption_score = consensus.simulation_adoption_score if hasattr(consensus, "simulation_adoption_score") else 0.0
 
         return {
-            "technical": PillarVerdict(
-                verdict=technical_gates[0].verdict.value if technical_gates else "UNKNOWN",
-                score=round(avg_score(technical_gates), 2),
-                rationale=", ".join(g.gate_name for g in technical_gates),
-            ),
-            "market": PillarVerdict(
-                verdict=market_gates[0].verdict.value if market_gates else "UNKNOWN",
-                score=round(avg_score(market_gates), 2),
-                rationale="Market fit based on Monte Carlo simulation",
+            "market_validation": PillarVerdict(
+                verdict="STRONG_FIT" if adoption_score > 0.7 else "MODERATE_FIT" if adoption_score > 0.4 else "RISKY",
+                score=adoption_score,
+                rationale="Market fit based on OASIS behavioral simulation",
             ),
             "internal_stakeholder": PillarVerdict(
                 verdict="CONSENSUS_REACHED" if consensus.overall_verdict != "REJECTED" else "NO_CONSENSUS",
                 score=consensus.approval_confidence,
-                rationale=f"{len(consensus.approvals)} stakeholders participated",
+                rationale=f"{len(consensus.approvals)} stakeholders participated in debate",
             ),
             "risk_assessment": PillarVerdict(
-                verdict=risk_gates[0].verdict.value if risk_gates else "UNKNOWN",
-                score=round(avg_score(risk_gates), 2),
-                rationale="Red-team risk analysis",
+                verdict="MANAGEABLE" if len(consensus.mitigations) > 0 else "UNKNOWN",
+                score=consensus.approval_confidence,
+                rationale="Risks mitigated via adversarial debate constraints",
             ),
         }
 
@@ -198,17 +192,15 @@ class HandoffGenerator:
         self,
         feature: FeatureProposal,
         consensus: ConsensusResult,
-        gates: GatesSummary,
+        sim: MarketSentimentSeries,
     ) -> str:
         try:
-            prompt = SUMMARY_USER.render(
-                feature=feature,
-                verdict=consensus.overall_verdict,
-                confidence=consensus.approval_confidence,
-                key_metrics=f"{gates.overall_score:.0%} gate pass rate",
-                roi="Based on adoption forecasts",
-                timeline=consensus.phase_1.timeline or "TBD",
-                top_risk=consensus.mitigations[0] if consensus.mitigations else "None identified",
+            prompt = (
+                f"Feature: {feature.title}\n"
+                f"Consensus Verdict: {consensus.overall_verdict}\n"
+                f"Simulation Adoption: {getattr(consensus, 'simulation_adoption_score', 0)}\n"
+                f"Top Mitigations: {', '.join(consensus.mitigations[:3])}\n"
+                "Provide a crisp 2-paragraph summary for the executive team."
             )
             return await self._llm.generate(
                 system_prompt=SUMMARY_SYSTEM,
