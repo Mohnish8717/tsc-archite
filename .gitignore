@@ -156,3 +156,5 @@ cython_debug/
 migrations/
 sample_data/
 node_modules/
+graphify-out/
+
