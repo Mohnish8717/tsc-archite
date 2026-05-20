@@ -85,42 +85,48 @@ class LLMClient(ABC):
     # ── Helpers ──────────────────────────────────────────────────────
 
     def _parse_json_response(self, text: str) -> dict[str, Any]:
-        """Extract JSON from LLM response, tolerating markdown fences."""
+        """Extract JSON from LLM response, tolerating markdown fences and conversational wrappers."""
         text = text.strip()
-        # Strip fenced code blocks
-        if text.startswith("```"):
-            # Remove opening fence (```json or ```)
-            first_newline = text.index("\n")
-            text = text[first_newline + 1 :]
-            # Remove closing fence
-            if text.endswith("```"):
-                text = text[: -len("```")]
-            text = text.strip()
+        
+        # 1. First try parsing the raw text directly
         try:
             return json.loads(text)
-        except json.JSONDecodeError as exc:
-            logger.warning("JSON parse failed, attempting repair: %s", exc)
-            # Try to find the first {/} or [/] to extract JSON
-            start_dict = text.find("{")
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Try to extract JSON from markdown code blocks
+        import re
+        block_match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+        if block_match:
+            try:
+                return json.loads(block_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Try to find the largest valid JSON object or array in the text
+        # We find all outermost {..} and [..] blocks and try parsing them.
+        # This prevents picking up stray `[SPEAKER]` tags if they aren't valid JSON.
+        
+        candidates = []
+        start_dict = text.find("{")
+        if start_dict != -1:
             end_dict = text.rfind("}") + 1
-            start_list = text.find("[")
-            end_list = text.rfind("]") + 1
-            
-            start = -1
-            end = -1
-            if start_dict >= 0 and (start_list == -1 or start_dict < start_list):
-                start = start_dict
-                end = end_dict
-            elif start_list >= 0:
-                start = start_list
-                end = end_list
+            if end_dict > start_dict:
+                candidates.append(text[start_dict:end_dict])
                 
-            if start >= 0 and end > start:
-                try:
-                    return json.loads(text[start:end])
-                except json.JSONDecodeError:
-                    pass
-            raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}") from exc
+        start_list = text.find("[")
+        if start_list != -1:
+            end_list = text.rfind("]") + 1
+            if end_list > start_list:
+                candidates.append(text[start_list:end_list])
+
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")
 
     def _log_call(self, method: str, input_tok: int, output_tok: int, elapsed: float) -> None:
         self._call_count += 1

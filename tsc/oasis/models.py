@@ -138,10 +138,27 @@ class OASISSimulationConfig(BaseModel):
     enable_graph_memory: bool = True
     
     # Discovery/Interview config
+    enable_interview_phase: bool = True
+    interview_sample_size: int = 30
     interview_prompts: List[str] = [
-        "What is your overall opinion on the proposed feature?",
-        "What are the main risks you see in this implementation?",
-        "Would you use this feature in your daily workflow?"
+        # 1. Behavioral anchoring — forces specific, not abstract, recall
+        "Walk me through the LAST TIME you encountered the exact problem this feature is supposed to solve. "
+        "What did you actually do? What did it cost you in time, money, or reputation?",
+        # 2. Adoption ladder — extracts realistic commitment level with price threshold
+        "On a scale of 1-10, how likely are you to use this in your first week after launch? "
+        "What would need to be true for that number to be a 9 or 10? What would make it a 1?",
+        # 3. WTP — structured pricing probe extracting three numbers
+        "If this feature required an additional monthly charge, what price would make you say "
+        "'definitely yes', 'maybe', and 'definitely no'? Give me three specific numbers.",
+        # 4. Risk surfacing — open-ended objection probe
+        "What is the ONE thing about this feature that, if it went wrong, would make you actively "
+        "recommend against it to colleagues? How likely do you think that failure is?",
+        # 5. Competitive exit vector — identifies displacement risk
+        "If this feature ships as described and does not work for your workflow, what is your next move? "
+        "Which alternative would you look at first, and why that one specifically?",
+        # 6. Advocacy signal — NPS behavioral proxy (not a rating)
+        "Is there someone on your team you would forward this announcement to right now? "
+        "What would you say to them in your own words — not a summary, your actual message?",
     ]
 
 class MarketSentimentSeries(BaseModel):
@@ -173,6 +190,7 @@ class MarketSentimentSeries(BaseModel):
     # LLM Aggregate Analysis
     aggregate_analysis: Optional[str] = None
     population_size: int = 0
+    focus_group_insights: Dict[str, Any] = Field(default_factory=dict)
     
     # Raw Data pointers
     db_snapshot_path: Optional[str] = None
@@ -371,10 +389,10 @@ class DecisionJournal:
         return [self.satisfaction, self.frustration, self.trust, self.urgency, self.advocacy]
     
     def prompt_summary(self) -> str:
-        """Generate a compact summary for injection into agent prompt."""
+        """Generate a compact summary with state-driven action directive for agent prompt."""
         trend_sat = "↓" if len(self.signals) > 2 and self.satisfaction < 0.4 else "↑" if self.satisfaction > 0.6 else "→"
         trend_fru = "↑" if self.frustration > 0.5 else "→"
-        
+
         lines = [
             f"\nYOUR DECISION JOURNAL (internal state):",
             f"  Satisfaction: {self.satisfaction:.2f} ({trend_sat})",
@@ -384,10 +402,34 @@ class DecisionJournal:
         if self.signals:
             recent_types = [s["type"] for s in self.signals[-3:]]
             lines.append(f"  Recent signals: {', '.join(recent_types)}")
-        if self.frustration > 0.6:
-            lines.append(f"  ⚠️ Your frustration is HIGH. Consider what you would ACTUALLY do as a real user.")
-        if self.advocacy > 0.6:
-            lines.append(f"  ✅ You are becoming an advocate. Would you recommend this to colleagues?")
+
+        # State-driven action directive — tells the agent WHAT to do, not just what it feels
+        if self.frustration > 0.75:
+            lines.append(
+                f"  🚨 ACTION: Your frustration is CRITICAL. Express this frustration explicitly, "
+                f"naming the specific pain point driving it. Do not soften your language."
+            )
+        elif self.frustration > 0.5:
+            lines.append(
+                f"  ⚠️ ACTION: You are frustrated. Ask a pointed question or demand a concrete "
+                f"answer — timeline, fix, or roadmap date — before you accept any reassurance."
+            )
+        elif self.trust < 0.3:
+            lines.append(
+                f"  🔍 ACTION: You do not trust the company right now. Challenge any claim "
+                f"without evidence. Ask for proof, data, or a public commitment."
+            )
+        elif self.advocacy > 0.6:
+            lines.append(
+                f"  ✅ ACTION: You are an advocate. Proactively recommend this to someone "
+                f"in the thread using concrete reasons from your own workflow — not generic praise."
+            )
+        elif self.satisfaction > 0.7:
+            lines.append(
+                f"  💬 ACTION: You are satisfied. Add a constructive perspective that builds "
+                f"on the discussion — what could make this even better for your specific use case?"
+            )
+
         return "\n".join(lines)
     
     def to_dict(self) -> dict:
@@ -448,6 +490,9 @@ class PredictionReport(BaseModel):
     
     # ── LLM Executive Summary ──
     executive_summary: str = ""
+    
+    # ── Focus Group Insights (Phase 2) ──
+    focus_group_insights: Dict[str, Any] = Field(default_factory=dict)
     
     # ── Per-Agent Journals ──
     agent_journals: List[Dict[str, Any]] = Field(default_factory=list)

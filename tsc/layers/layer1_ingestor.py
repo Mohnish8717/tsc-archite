@@ -507,7 +507,8 @@ class ContextualIngestor:
                 # SOTA-1: Use SEMANTIC_CHUNKING_USER prompt
                 prompt = SEMANTIC_CHUNKING_USER.render(document_content=norm.normalized_text)
                 
-                # Gemini 3 Flash structured output
+                # Gemma models often hang when forced into application/json via analyze(),
+                # so we use generate() and let the prompt engineering force the JSON output.
                 response_text = await self._llm.generate(
                     system_prompt=SEMANTIC_CHUNKING_SYSTEM,
                     user_prompt=prompt,
@@ -521,10 +522,18 @@ class ContextualIngestor:
                 elif response_text.startswith("```"):
                     response_text = response_text[3:-3].strip()
                 
-                raw_chunks = self.llm._parse_json_response(response_text)
+                raw_chunks = self._llm._parse_json_response(response_text)
                 
                 if not isinstance(raw_chunks, list):
-                    raise ValueError(f"Expected JSON list, got {type(raw_chunks)}")
+                    # Handle case where model wraps the array in a dict (e.g. {"chunks": [...]})
+                    if isinstance(raw_chunks, dict):
+                        # Find the first list value
+                        for v in raw_chunks.values():
+                            if isinstance(v, list):
+                                raw_chunks = v
+                                break
+                    if not isinstance(raw_chunks, list):
+                        raise ValueError(f"Expected JSON list, got {type(raw_chunks)}")
 
                 for rc in raw_chunks:
                     chunk = EnrichedChunk(
@@ -622,47 +631,52 @@ class ContextualIngestor:
         self, chunks: list[EnrichedChunk]
     ) -> list[EnrichedChunk]:
         """Enrich using LLM — primary and only enrichment path (v3.0)."""
-        for chunk in chunks:
-            # Segment-aware enrichment
-            if chunk.source_type == "interviews":
-                chunk.is_customer_perspective = True
-            elif chunk.source_type == "company_context":
-                chunk.is_customer_perspective = False
+        import asyncio
+        sem = asyncio.Semaphore(10)
+        
+        async def enrich_chunk(chunk: EnrichedChunk):
+            async with sem:
+                # Segment-aware enrichment
+                if chunk.source_type == "interviews":
+                    chunk.is_customer_perspective = True
+                elif chunk.source_type == "company_context":
+                    chunk.is_customer_perspective = False
 
-            try:
-                prompt = ENRICHMENT_USER.render(
-                    text=chunk.text,
-                    source_file=chunk.source_file,
-                    source_type=chunk.source_type,
-                )
-                result = await self._llm.analyze(
-                    system_prompt=ENRICHMENT_SYSTEM,
-                    user_prompt=prompt,
-                    temperature=0.2,
-                    max_tokens=1000,
-                )
-                self._apply_llm_enrichment(chunk, result)
-            except Exception as e:
-                logger.warning("LLM enrichment failed for %s: %s", chunk.chunk_id, e)
-                # Minimal fallback: regex metrics + keyword urgency
-                chunk.metrics = self._extract_metrics(chunk.text)
-                chunk.urgency = self._estimate_urgency(chunk.text)
-
-            # Hybrid pass: if general enrichment yielded 0 metrics, try dedicated LLM metric extraction
-            if not chunk.metrics:
                 try:
-                    llm_metrics = await self._extract_metrics_llm(chunk.text)
-                    if llm_metrics:
-                        chunk.metrics = llm_metrics
-                        logger.info(
-                            "LLM metric extraction recovered %d metrics for chunk %s",
-                            len(llm_metrics), chunk.chunk_id,
-                        )
+                    prompt = ENRICHMENT_USER.render(
+                        text=chunk.text,
+                        source_file=chunk.source_file,
+                        source_type=chunk.source_type,
+                    )
+                    result = await self._llm.analyze(
+                        system_prompt=ENRICHMENT_SYSTEM,
+                        user_prompt=prompt,
+                        temperature=0.2,
+                        max_tokens=1000,
+                    )
+                    self._apply_llm_enrichment(chunk, result)
                 except Exception as e:
-                    logger.debug("LLM metric extraction failed for %s: %s", chunk.chunk_id, e)
+                    logger.warning("LLM enrichment failed for %s: %s", chunk.chunk_id, e)
+                    # Minimal fallback: regex metrics + keyword urgency
+                    chunk.metrics = self._extract_metrics(chunk.text)
+                    chunk.urgency = self._estimate_urgency(chunk.text)
 
-            chunk.enrichment_timestamp = datetime.utcnow()
+                # Hybrid pass: if general enrichment yielded 0 metrics, try dedicated LLM metric extraction
+                if not chunk.metrics:
+                    try:
+                        llm_metrics = await self._extract_metrics_llm(chunk.text)
+                        if llm_metrics:
+                            chunk.metrics = llm_metrics
+                            logger.info(
+                                "LLM metric extraction recovered %d metrics for chunk %s",
+                                len(llm_metrics), chunk.chunk_id,
+                            )
+                    except Exception as e:
+                        logger.debug("LLM metric extraction failed for %s: %s", chunk.chunk_id, e)
 
+                chunk.enrichment_timestamp = datetime.utcnow()
+
+        await asyncio.gather(*(enrich_chunk(chunk) for chunk in chunks))
         return chunks
 
     def _apply_llm_enrichment(

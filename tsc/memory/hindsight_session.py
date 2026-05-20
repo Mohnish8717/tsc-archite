@@ -137,10 +137,22 @@ class HindsightSessionManager:
         """Store content into a specific bank.
 
         Args:
-            bank: Bank name (e.g., "world", "simulation", "debate")
+            bank: Bank name (e.g., "simulation", "debate", "personas")
+                  NOTE: "world" bank is DEPRECATED — use WorldDataBank.retain() instead.
             content: Text content to store
             metadata: Optional metadata dict (e.g., {"type": "interview", "file": "data.txt"})
         """
+        # M5 fix: block "world" bank — document storage is now WorldRAGEngine's domain.
+        # Hindsight is ONLY for agent experience memory (boardroom personas, OASIS agents).
+        if bank == "world":
+            logger.error(
+                "DEPRECATED: session.retain('world', ...) is blocked. "
+                "The 'world' bank has been migrated to WorldRAGEngine (Qdrant). "
+                "Use WorldDataBank.retain() or WorldRAGEngine.ingest_run_data() instead. "
+                "Hindsight is reserved for agent experience memory only."
+            )
+            return  # Silently drop — do NOT store document data in Hindsight
+
         if not content or not content.strip():
             return
 
@@ -175,6 +187,7 @@ class HindsightSessionManager:
                 )
             except Exception as e:
                 logger.debug(f"Hindsight retain failed for bank '{bank}': {e}")
+
 
     async def recall(self, bank: str, query: str, max_tokens: int = 800) -> str:
         """Retrieve semantically relevant content from a bank.
@@ -326,7 +339,11 @@ class HindsightSessionManager:
     @staticmethod
     def _bank_background(bank_name: str) -> str:
         backgrounds = {
-            "world": "Repository of raw customer data: interview transcripts, support tickets, usage analytics, and company context documents.",
+            # DEPRECATED (M5 migration): The 'world' bank is intentionally blocked.
+            # All document/RAG data now lives in WorldRAGEngine (Qdrant).
+            # retain("world", ...) raises ValueError. This string is kept for
+            # bank provisioning API compatibility only — it is never written to.
+            "world": "[DEPRECATED — WorldRAGEngine] Document storage was migrated to Qdrant (WorldRAGEngine) in M5. This bank is provisioned for API compatibility but all writes are blocked. Use WorldDataBank.ingest_document() for customer data ingestion.",
             "simulation": "OASIS social simulation data: agent interactions, behavioral patterns, product usage feedback from synthetic users.",
             "discovery": "Feature discovery analysis: identified pain points, proposed features, customer evidence citations.",
             "personas": "Generated user and stakeholder personas with psychological profiles, belief vectors, and predicted stances.",
@@ -339,7 +356,9 @@ class HindsightSessionManager:
     @staticmethod
     def _bank_retain_mission(bank_name: str) -> str:
         missions = {
-            "world": "Extract customer pain points, feature requests, sentiment, product feedback, and competitive intelligence from raw documents.",
+            # DEPRECATED (M5 migration): world bank writes are blocked — no NLU
+            # extraction should be configured here. See _bank_background above.
+            "world": "[DEPRECATED — blocked] Do not extract from this bank. All customer document ingestion routes through WorldRAGEngine (Qdrant hybrid search).",
             "simulation": "Extract user behavior patterns, feature adoption signals, rejection reasons, and social contagion dynamics from simulation logs.",
             "discovery": "Extract feature proposals, supporting evidence, customer quotes, and prioritization rationale.",
             "personas": "Extract persona traits, domain expertise, predicted behaviors, and belief systems.",

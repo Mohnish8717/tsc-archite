@@ -182,14 +182,51 @@ class FeatureDiscoveryEngine:
 
         # From raw chunks (direct access)
         if raw_chunks:
+            # FIX (Major): Sort chunks by urgency + sentiment before capping.
+            # Rationale: The LLM bases the product vision on these samples.
+            # Picking the FIRST 30 (file order) anchors proposals to irrelevant
+            # boilerplate. Instead, surface the highest-signal chunks — those
+            # marked CRITICAL/HIGH urgency or with negative sentiment (the pain points
+            # that drive real feature decisions).
+            def _chunk_priority(c) -> int:
+                urgency = str(getattr(c, "urgency_level", "")).upper()
+                sentiment = str(getattr(c, "sentiment_label", "")).upper()
+                score = 0
+                if urgency == "CRITICAL":
+                    score += 3
+                elif urgency == "HIGH":
+                    score += 2
+                elif urgency == "MEDIUM":
+                    score += 1
+                # Negative sentiment = pain point = high product signal
+                if sentiment in ("NEGATIVE", "ANGER", "FRUSTRATION", "FEAR"):
+                    score += 2
+                elif sentiment == "NEUTRAL":
+                    score += 0
+                return score
+
+            # Sort descending — highest priority pain points first
+            sorted_chunks = sorted(raw_chunks, key=_chunk_priority, reverse=True)
+            top_chunks = sorted_chunks[:30]  # cap after priority sort
+
+            # Minimum evidence threshold (user-confirmed requirement):
+            # if we have fewer than 3 chunks, warn but continue —
+            # the LLM fallback in _build_discovery_prompt still runs.
+            if len(top_chunks) < 3:
+                logger.warning(
+                    "Feature Discovery: only %d customer evidence chunks available "
+                    "(minimum recommended: 3). Proposals may lack evidence grounding.",
+                    len(top_chunks),
+                )
+
             chunk_texts = []
-            for chunk in raw_chunks[:30]:  # Cap at 30 chunks
+            for chunk in top_chunks:
                 text = getattr(chunk, 'text', getattr(chunk, 'content', str(chunk)))
                 if text:
                     chunk_texts.append(text[:500])
             if chunk_texts:
                 evidence_parts.append(
-                    f"=== RAW CUSTOMER DATA ({len(chunk_texts)} chunks) ===\n"
+                    f"=== RAW CUSTOMER DATA ({len(chunk_texts)} chunks, priority-sorted) ===\n"
                     + "\n---\n".join(chunk_texts)
                 )
 

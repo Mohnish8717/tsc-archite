@@ -1,29 +1,53 @@
 import asyncio
 import os
 import sys
-import logging
 from pathlib import Path
+import multiprocessing
+
+# Fix macOS ObjC + gRPC + asyncio deadlocks
+os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "1"
+os.environ["GRPC_POLL_STRATEGY"] = "poll"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["USE_TF"] = "0"
+os.environ["USE_JAX"] = "0"
+os.environ["USE_TORCH"] = "1"
+
+# SOTA BGE-M3 is 2.3GB and slow to download. Switch to the fully-cached all-MiniLM-L6-v2.
+os.environ["EMBEDDING_MODEL"] = "sentence-transformers/all-MiniLM-L6-v2"
+os.environ["EMBEDDING_DIM"] = "384"
+
+# MUST be spawn to prevent PyTorch/gRPC fork deadlocks on macOS Apple Silicon
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
 
 # Add project root to sys.path
 PROJECT_ROOT = Path("/Users/mohnish/Downloads/tsc architecture")
-sys.path.append(str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import dotenv
 dotenv.load_dotenv(PROJECT_ROOT / ".env")
 os.environ["TSC_LLM_PROVIDER"] = "google"
-os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it" # or gemini-3-pro if preferred, sticking to standard
+os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it"
+os.environ["HINDSIGHT_URL"] = "" # Disable Hindsight to avoid 402 API errors
+os.environ["GEMINI_FREE_RPM"] = "10" # Stay safely under Gemma's 15 RPM free tier limit
+os.environ["TSC_GEMINI_RPM_LIMIT"] = "10" # Keep global rate-limiter in perfect sync
 
-os.environ["GRPC_PYTHON_FORK_SUPPORT_ONLY"] = "0"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
-
-from tsc.pipeline.orchestrator import TSCPipeline
-
+import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("slack_scenario_runner")
 
 async def run_scenario():
+    logger.info("Pre-warming PyTorch models BEFORE any gRPC imports to prevent macOS deadlocks...")
+    # This MUST happen before create_llm_client() imports google.generativeai (which uses grpc)
+    from tsc.memory.world_rag import _get_embedder, _get_reranker
+    _get_embedder()
+    _get_reranker()
+
     logger.info("Starting Slack AI Controversy Scenario...")
+    from tsc.pipeline.orchestrator import TSCPipeline
     pipeline = TSCPipeline()
     data_dir = PROJECT_ROOT / "slack_ai_scenario"
     

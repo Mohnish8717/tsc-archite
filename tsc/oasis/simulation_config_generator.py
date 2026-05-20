@@ -6,6 +6,56 @@ from tsc.models.inputs import FeatureProposal, CompanyContext
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_GEN_SYSTEM = """\
+<identity>
+You are an OASIS Simulation Architect optimising market research signal quality
+within a defined token and time budget. Your decisions must be justified.
+</identity>
+
+<platform_selection>
+Reddit-type: audience discusses products in threads, compares alternatives, debates
+feature trade-offs. Best for B2B SaaS, dev tools, enterprise products.
+Twitter-type: audience reacts to announcements, shares short opinions, amplifies
+influencer signals. Best for consumer apps, brand sentiment, launch reactions.
+</platform_selection>
+
+<agent_count_calibration>
+- 50–100 agents: feature concept testing, single-segment probing
+- 100–300 agents: multi-segment interaction, opinion contagion dynamics
+- 300–500 agents: population-scale emergence, minority opinion amplification
+Do not exceed 500 — use PopulationSampler extrapolation for larger declared populations.
+</agent_count_calibration>
+
+<timestep_calibration>
+- 5–8 timesteps : initial reaction, first-impression capture
+- 10–15 timesteps: opinion formation and peer influence
+- 20–30 timesteps: belief consolidation, network effects, emergent polarization
+Each timestep ≈ 1 simulated hour. Match to a realistic discussion timeline for the product.
+</timestep_calibration>
+
+<interview_probe_rules>
+Every probe MUST:
+1. Be BEHAVIOURAL — anchored to a specific past or future action, not abstract opinion.
+2. Have a MEASURABLE extraction target (a number, a competitor name, a timeline, or a quote).
+3. The set MUST include: one WTP probe, one competitive-exit probe, and one adoption-ladder probe.
+</interview_probe_rules>
+
+<output_format>
+Return JSON only — no prose:
+{
+  "platform_type": "reddit|twitter",
+  "platform_reasoning": "one sentence",
+  "num_agents": 150,
+  "agent_reasoning": "one sentence",
+  "num_timesteps": 12,
+  "timestep_reasoning": "one sentence",
+  "interview_prompts": ["probe 1", "probe 2", "probe 3", "probe 4", "probe 5"],
+  "estimated_signal_quality": "low|medium|high",
+  "known_limitations": ["limitation 1"]
+}
+</output_format>
+"""
+
 class SimulationConfigGenerator:
     """
     Uses LLM to intelligently generate OASIS simulation parameters 
@@ -28,9 +78,9 @@ class SimulationConfigGenerator:
         
         # LLM reasoning for parameters
         response = await self._llm.generate(
-            system_prompt="You are an OASIS Simulation Architect. Your goal is to tune simulation parameters for maximum signal and minimal noise.",
+            system_prompt=_CONFIG_GEN_SYSTEM,
             user_prompt=prompt,
-            response_model=SimulationParameters # Use the and newly added model
+            response_model=SimulationParameters
         )
         
         logger.info(f"LLM generated simulation config: {response.generation_reasoning}")
@@ -44,20 +94,19 @@ class SimulationConfigGenerator:
         )
 
     def _build_prompt(self, feature: FeatureProposal, company: CompanyContext, target_audience: List[str]) -> str:
-        return f"""
-        Generate simulation parameters for the following feature proposal:
-        
-        ### Feature: {feature.title}
-        Description: {feature.description}
-        Target Audience: {', '.join(target_audience)}
-        
-        ### Company Context:
-        Name: {company.company_name}
-        Priorities: {', '.join(company.current_priorities) if hasattr(company, 'current_priorities') else 'Standard growth'}
-        
-        Task:
-        1. Decide on the best platform (twitter vs reddit) based on the audience.
-        2. Decide on the number of agents (100-500) and timesteps (12-48) for significant interaction.
-        3. Generate 3-5 high-signal interview questions to ask agents during the simulation.
-        4. Provide reasoning for your choices.
-        """
+        audience_str = ', '.join(target_audience) if target_audience else 'general users'
+        priorities_str = ', '.join(company.current_priorities) if hasattr(company, 'current_priorities') and company.current_priorities else 'standard growth'
+        return (
+            f"<feature>\n"
+            f"Title: {feature.title}\n"
+            f"Description: {feature.description[:500]}\n"
+            f"Target Audience: {audience_str}\n"
+            f"</feature>\n\n"
+            f"<company>\n"
+            f"Name: {company.company_name}\n"
+            f"Priorities: {priorities_str}\n"
+            f"</company>\n\n"
+            "Follow the decision framework in your system prompt to select platform, "
+            "agent count, timesteps, and generate 5 behavioural interview probes. "
+            "Include your reasoning and known limitations."
+        )

@@ -143,7 +143,7 @@ async def run_live_debate():
     kg = KnowledgeGraph(nodes={}, edges=[])
     
     start_time = time.time()
-    consensus = await engine.process(feature, company, kg, personas, gates)
+    consensus = await engine.process(feature, company, personas, kg, gates)
     duration = time.time() - start_time
     
     print("\n" + "═" * 80)
@@ -178,6 +178,7 @@ async def run_live_debate():
                 "overall_verdict": consensus.overall_verdict,
                 "ag2_transcript": [pos.model_dump() for pos in consensus.debate_rounds[0].positions] if consensus.debate_rounds else [],
                 "evolved_agent_memories": engine._evolved_agent_memories,
+                "cognitive_tasks": getattr(engine.cognitive_ledger, 'tasks', {}),
                 "engine_version": "v29-stateful"
             }
         )
@@ -191,16 +192,34 @@ async def run_live_debate():
     sqlite_path = "./live_debate_run.db"
     conn = sqlite3.connect(sqlite_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT approval_rate FROM simulation_runs WHERE id = ?", (str(run_id).replace("-", ""),)) # SQLite handles UUIDs as hex strings if not careful
+    cursor.execute("SELECT approval_rate, simulation_metadata FROM simulation_runs WHERE id = ?", (str(run_id).replace("-", ""),)) # SQLite handles UUIDs as hex strings if not careful
     row = cursor.fetchone()
     if row:
         print(f"    - DB Retrieval Success! Stored Approval Rate: {row[0]:.2f}")
+        import json
+        try:
+            metadata = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+            cog_tasks = metadata.get("cognitive_tasks", {})
+            print(f"    - DB Retrieval Success! Extracted Tasks Count: {len(cog_tasks)}")
+            for tid, task in cog_tasks.items():
+                print(f"      * [{tid}] {task.get('title')}: {task.get('status')} - {task.get('resolution', '')}")
+        except Exception as e:
+            print(f"    - DB Metadata Parse Warning: {e}")
     else:
         # Retry with different string format just in case
-        cursor.execute("SELECT approval_rate FROM simulation_runs LIMIT 1")
+        cursor.execute("SELECT approval_rate, simulation_metadata FROM simulation_runs ORDER BY simulation_timestamp DESC LIMIT 1")
         row = cursor.fetchone()
         if row:
             print(f"    - DB Retrieval Success (Partial)! Latest Approval Rate: {row[0]:.2f}")
+            import json
+            try:
+                metadata = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                cog_tasks = metadata.get("cognitive_tasks", {})
+                print(f"    - DB Retrieval Success (Partial)! Extracted Tasks Count: {len(cog_tasks)}")
+                for tid, task in cog_tasks.items():
+                    print(f"      * [{tid}] {task.get('title')}: {task.get('status')} - {task.get('resolution', '')}")
+            except Exception as e:
+                print(f"      - Parse Warning: {e}")
     conn.close()
 
     print("\n✅  Simulation Complete. Log available in ./live_debate_run.db")

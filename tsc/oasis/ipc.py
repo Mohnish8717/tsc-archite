@@ -41,11 +41,14 @@ class CommandListener:
             elif action == "stop":
                 self.should_stop = True
             elif action == "interview":
-                # Returns the questions to be handled by the engine
-                questions = cmd.get("questions", [])
+                # Returns the interview details to be handled by the engine
+                interview_payload = {
+                    "questions": cmd.get("questions", []),
+                    "target_agent_id": cmd.get("target_agent_id")
+                }
                 # Clear command file *after* extracting data
                 os.remove(self.command_file)
-                return questions
+                return interview_payload
                 
             # Clear command file after reading
             if os.path.exists(self.command_file):
@@ -57,20 +60,20 @@ class CommandListener:
     async def wait_if_paused(self, interview_callback=None):
         """Blocking loop for the worker if a 'pause' command is active, and handles interviews."""
         # Always check for new commands at least once
-        questions = await self.check_commands()
-        if questions and interview_callback:
-            logger.info(f"Performing mid-simulation interview with {len(questions)} questions")
-            await interview_callback(questions)
+        payload = await self.check_commands()
+        if payload and isinstance(payload, dict) and "questions" in payload and interview_callback:
+            logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
+            await interview_callback(payload)
 
         if self.is_paused:
             logger.info("Simulation PAUSED. Waiting for resume...")
             
         while self.is_paused:
             await asyncio.sleep(1)
-            questions = await self.check_commands()
-            if questions and interview_callback:
-                logger.info(f"Performing mid-simulation interview with {len(questions)} questions")
-                await interview_callback(questions)
+            payload = await self.check_commands()
+            if payload and isinstance(payload, dict) and "questions" in payload and interview_callback:
+                logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
+                await interview_callback(payload)
                 
             if self.should_stop:
                 break
@@ -95,12 +98,51 @@ class LocalActionLogger:
                 "action_type": action_type,
                 "content": content,
                 "platform": platform,
-                **(metadata or {})
+                # CRITICAL FIX: wrap as nested object, not top-level spread
+                # Frontend reads data.metadata.target_id for network arc rendering
+                "metadata": metadata or {}
             }
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.error(f"Failed to write local action log: {e}")
+
+    def log_spawn(self, agent_id: str, agent_name: str, agent_type: str, role: str, traits: list, impact: float,
+                  mbti: str = "", ocean_scores: Dict[str, float] = None, buyer_journey: str = "", bio: str = ""):
+        """Emit an agent_spawn event so the frontend can build the initial agent registry."""
+        try:
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "type": "agent_spawn",
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "agent_type": agent_type,
+                "role": role,
+                "traits": traits,
+                "impact": round(impact * 100),
+                "mbti": mbti,
+                "ocean_scores": ocean_scores or {},
+                "buyer_journey": buyer_journey,
+                "bio": bio,
+            }
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to write spawn log: {e}")
+
+
+    def log_simulation_event(self, event_type: str, data: Dict[str, Any]):
+        """Emit a structured simulation lifecycle event (simulation_start, progress, report, etc.)."""
+        try:
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "type": event_type,
+                **data
+            }
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to write simulation event: {e}")
 
     def log_event(self, event_type: str, metadata: Dict[str, Any] = None):
         """Append a lifecycle event (e.g., simulation_end, round_start) to the log."""

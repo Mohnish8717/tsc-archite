@@ -1,0 +1,97 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 5%;
+    --foreground: 210 40% 96%;
+    --card: 217 44% 10%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 47% 5%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 217 44% 15%;
+    --primary-foreground: 210 40% 96%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 187 95% 42%;
+    --accent-foreground: 222 47% 5%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 96%;
+    --border: 217 33% 17%;
+    --input: 217 33% 17%;
+    --ring: 187 95% 42%;
+    --radius: 0.5rem;
+  }
+
+  body {
+    @apply bg-background text-textLight font-sans antialiased m-0;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-mono;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-primary/40 backdrop-blur-md border border-white/10 rounded-xl shadow-lg;
+  }
+
+  .glass-button {
+    @apply bg-accent/20 hover:bg-accent/40 text-accent border border-accent/30 rounded-lg px-4 py-2 transition-colors duration-200 cursor-pointer font-mono text-sm;
+  }
+
+  .glass-nav-item {
+    @apply px-4 py-3 cursor-pointer transition-all duration-200 hover:bg-white/5 border-b-2 border-transparent hover:border-accent text-textMuted hover:text-textLight font-mono;
+  }
+
+  .glass-nav-item.active {
+    @apply border-accent text-accent bg-accent/10;
+  }
+}
+
+/* Animation keyframes for orbital timeline */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(2, 6, 23, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(6, 182, 212, 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(6, 182, 212, 0.6);
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

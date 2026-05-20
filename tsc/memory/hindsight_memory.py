@@ -33,6 +33,7 @@ import time
 import logging
 import threading
 import asyncio
+from concurrent.futures import Future
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +46,36 @@ try:
     nest_asyncio.apply()
 except ImportError:
     pass
+
+# ─── Persistent Hindsight Thread (CRITICAL-2 fix) ─────────────────────────
+# A single background thread owns a dedicated asyncio event loop that lives
+# for the entire process lifetime. All synchronous Hindsight calls are
+# dispatched here via run_coroutine_threadsafe(), eliminating the
+# ThreadPoolExecutor-per-call leak that caused thread exhaustion on long debates.
+_hindsight_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_hindsight_thread: threading.Thread = threading.Thread(
+    target=_hindsight_loop.run_forever,
+    name="hindsight-worker",
+    daemon=True,  # Dies cleanly when main process exits
+)
+_hindsight_thread.start()
+
+
+def _run_in_hindsight_loop(coro) -> Any:
+    """Dispatch a coroutine to the persistent Hindsight worker loop.
+
+    Safe to call from ANY thread — including the main asyncio event loop thread.
+    Uses run_coroutine_threadsafe() which is the only thread-safe bridge between
+    a running loop (main) and another loop (worker).
+
+    Raises:
+        TimeoutError: If Hindsight doesn't respond within 30 seconds.
+        Exception: Any exception raised inside the coroutine is re-raised here.
+    """
+    if not asyncio.iscoroutine(coro):
+        return coro
+    future: Future = asyncio.run_coroutine_threadsafe(coro, _hindsight_loop)
+    return future.result(timeout=30)
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +262,7 @@ class HindsightBoardroom:
         self._hindsight = None
         self._mode = "EMBEDDED"
         self._provider_info = get_hindsight_provider_info()
+        self._out_of_credits = False
 
         # Try to connect to Hindsight server
         url = hindsight_url or os.getenv("HINDSIGHT_URL", "")
@@ -251,24 +283,19 @@ class HindsightBoardroom:
             logger.info("V29: No HINDSIGHT_URL set. Using EMBEDDED memory mode (degraded — no NLU extraction).")
 
     def _run_sync(self, coro_or_val):
-        """Safely run a coroutine or normal value in a sync context."""
-        if not asyncio.iscoroutine(coro_or_val):
-            return coro_or_val
-            
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is already running, we are likely in a different thread or 
-                # nested. Use run_coroutine_threadsafe if in a different thread,
-                # or a new loop if possible. 
-                # For this environment, we'll try the simplest robust approach:
-                # using a background thread loop for Hindsight calls if needed.
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    return executor.submit(asyncio.run, coro_or_val).result()
-            return loop.run_until_complete(coro_or_val)
-        except (RuntimeError, ValueError):
-            return asyncio.run(coro_or_val)
+        """Safely run a coroutine from a synchronous context.
+
+        Delegates to the persistent Hindsight worker thread (_hindsight_loop)
+        via run_coroutine_threadsafe(). This is safe to call from:
+          - The main asyncio loop thread (AG2 / debate engine)
+          - Any worker thread
+          - A plain synchronous context (no running loop)
+
+        REPLACES the old ThreadPoolExecutor-per-call pattern (CRITICAL-2 fix).
+        The old approach created a new executor + asyncio.run() on every retain/
+        recall/reflect call, causing thread exhaustion on long debates (50+ calls).
+        """
+        return _run_in_hindsight_loop(coro_or_val)
             
 
     def initialize_agents(self, personas: list, feature_title: str, feature_description: str) -> None:
@@ -347,6 +374,12 @@ class HindsightBoardroom:
                     ))
                     logger.info(f"V29: Hindsight bank '{bank_id}' created for {agent_name}")
                 except Exception as e:
+                    err_str = str(e)
+                    if "402" in err_str or "Insufficient credits" in err_str:
+                        logger.error(f"V29: Hindsight OUT OF CREDITS (402). Disabling API calls globally.")
+                        self._hindsight = None
+                        self._mode = "EMBEDDED"
+                        self._out_of_credits = True
                     # If create still fails, try to use the existing bank anyway
                     bank_id = f"boardroom-{agent_name}"
                     memory.hindsight_bank_id = bank_id
@@ -411,6 +444,12 @@ class HindsightBoardroom:
                             timestamp=datetime.now(),
                         ))
             except Exception as e:
+                err_str = str(e)
+                if "402" in err_str or "Insufficient credits" in err_str:
+                    logger.error(f"V29: Hindsight OUT OF CREDITS (402) during retain. Disabling API calls.")
+                    self._hindsight = None
+                    self._mode = "EMBEDDED"
+                    self._out_of_credits = True
                 logger.info(f"V29: Hindsight retain failed for {sender_name}: {e}")
             return  # Hindsight handles everything — no regex needed
 
@@ -459,6 +498,12 @@ class HindsightBoardroom:
                         f"[BUILD upon your prior positions. Do NOT contradict commitments above.]"
                     )
             except Exception as e:
+                err_str = str(e)
+                if "402" in err_str or "Insufficient credits" in err_str:
+                    logger.error(f"V29: Hindsight OUT OF CREDITS (402) during recall. Disabling API calls.")
+                    self._hindsight = None
+                    self._mode = "EMBEDDED"
+                    self._out_of_credits = True
                 logger.debug(f"V29: Hindsight recall failed for {agent_name}: {e}")
 
         # ── EMBEDDED FALLBACK ───────────────────────────────────────────
@@ -506,6 +551,12 @@ class HindsightBoardroom:
                     return getattr(result, 'answer', getattr(result, 'text', str(result)))
                 return ""
             except Exception as e:
+                err_str = str(e)
+                if "402" in err_str or "Insufficient credits" in err_str:
+                    logger.error(f"V29: Hindsight OUT OF CREDITS (402) during reflect. Disabling API calls.")
+                    self._hindsight = None
+                    self._mode = "EMBEDDED"
+                    self._out_of_credits = True
                 logger.warning(f"V29: Hindsight reflect failed for {agent_name}: {e}")
 
         # ── EMBEDDED FALLBACK ───────────────────────────────────────────
@@ -544,6 +595,12 @@ class HindsightBoardroom:
                     return getattr(result, 'answer', getattr(result, 'text', str(result)))
                 return "No reflection available."
             except Exception as e:
+                err_str = str(e)
+                if "402" in err_str or "Insufficient credits" in err_str:
+                    logger.error(f"V29: Hindsight OUT OF CREDITS (402) during query. Disabling API calls.")
+                    self._hindsight = None
+                    self._mode = "EMBEDDED"
+                    self._out_of_credits = True
                 logger.warning(f"V29: Hindsight query failed: {e}")
 
         # ── EMBEDDED FALLBACK: LLM with regex-extracted context ─────────
@@ -789,11 +846,12 @@ class HindsightOASISManager:
         self.simulation_id = ""
         self.feature_title = ""
         self.feature_description = ""
+        self._shared_bank_id: str = ""
         self._provisioned_banks: list[str] = []
 
         # ── Memory Lifecycle Optimization (Free Tier) ──────────────────
         # Dirty-flag: only reflect agents that produced content this timestep
-        self._dirty_agents: set = set()
+        self._dirty_agents: set = set() # Now stores agent_id strings like "5", "42"
         # Timestep counter for adaptive reflect frequency
         self._timestep_counter: int = 0
         # Free-tier budget config — minimize token usage
@@ -828,10 +886,11 @@ class HindsightOASISManager:
 
 
     async def initialize_agents(self, agent_profiles: list, feature_title: str, feature_description: str, simulation_id: str = "default") -> None:
-        """Create Hindsight Memory Banks + Mental Models for all Oasis agents."""
+        """Create a single shared Hindsight Memory Bank for all Oasis agents."""
         self.feature_title = feature_title
         self.feature_description = feature_description
         self.simulation_id = simulation_id
+        self._shared_bank_id = f"oasis-{self.simulation_id}"
         
         # ── CONNECTION PREFLIGHT ──
         connected = False
@@ -845,81 +904,59 @@ class HindsightOASISManager:
         if not connected:
             raise ConnectionError(f"OASIS: Could not establish stable connection to Hindsight at {os.getenv('HINDSIGHT_URL')}")
 
-        # ─── CONCURRENT PROVISIONING ───
-        logger.info(f"🏦 OASIS: Provisioning Hindsight Memory Banks for {len(agent_profiles)} agents...")
+        # ─── PROVISIONING SINGLE SHARED BANK ───
+        logger.info(f"🏦 OASIS: Provisioning shared Hindsight Memory Bank for {len(agent_profiles)} agents...")
         
-        async def _provision_one(profile):
-            agent_id = str(profile.agent_id)
-            agent_name = profile.user_info_dict.get("name", f"Agent_{agent_id}")
-            bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
+        try:
+            # Clean slate: delete any pre-existing bank
+            try:
+                await self._hindsight.adelete_bank(bank_id=self._shared_bank_id)
+            except Exception:
+                pass
+
+            # Create the shared memory bank
+            await self._hindsight.acreate_bank(
+                bank_id=self._shared_bank_id,
+                name=f"OASIS-Run-{self.simulation_id}",
+                background=(
+                    f"OASIS Market Simulation. "
+                    f"Simulation of multiple personas evaluating: '{self.feature_title}'."
+                ),
+                retain_mission=(
+                    "Extract evolving beliefs, sentiments, objections, and needs for each agent. "
+                    "Track stance changes over time."
+                ),
+                enable_observations=True,
+            )
             
-            for attempt in range(3):
-                try:
-                    # Clean slate: delete any pre-existing bank
-                    try:
-                        await self._hindsight.adelete_bank(bank_id=bank_id)
-                    except Exception:
-                        pass
-
-                    # Create the persona memory bank
-                    await self._hindsight.acreate_bank(
-                        bank_id=bank_id,
-                        name=f"OASIS-{agent_name}",
-                        background=(
-                            f"OASIS Market Simulation Agent. Name: {agent_name}. "
-                            f"You represent a simulated persona evaluating: '{self.feature_title}'."
-                        ),
-                        retain_mission=(
-                            "Extract evolving beliefs, sentiments, objections, and needs. "
-                            "Track stance changes over time."
-                        ),
-                        enable_observations=True,
-                    )
-                    
-                    # Seed with feature context
-                    await self._hindsight.aretain_batch(
-                        bank_id=bank_id,
-                        items=[{
-                            "content": (
-                                f"[SYSTEM]: A new feature has been proposed for evaluation: "
-                                f"'{self.feature_title}'. Description: {self.feature_description[:1000]}"
-                            ),
-                            "context": "Initial feature briefing for market simulation",
-                            "entities": [
-                                {"text": self.feature_title, "type": "FEATURE"},
-                                {"text": agent_name, "type": "AGENT"},
-                            ],
-                            "tags": ["world", "feature_introduction"],
-                        }],
-                    )
-                    
-                    # Create Mental Model (Non-blocking)
-                    try:
-                        self._hindsight.create_mental_model(
-                            bank_id=bank_id,
-                            name="feature_sentiment",
-                            source_query=f"What is my current stance on '{self.feature_title}'?",
-                            trigger={"refresh_after_consolidation": True},
-                            max_tokens=250,
-                        )
-                    except Exception as e:
-                        logger.warning(f"  ⚠️  Mental model skip for {bank_id}: {e}")
-                    
-                    self._provisioned_banks.append(bank_id)
-                    logger.info(f"  ✅ Bank provisioned: {bank_id}")
-                    return True
-                except Exception as e:
-                    if attempt < 2:
-                        await asyncio.sleep(2.0 * (attempt + 1))
-                    else:
-                        logger.error(f"  ❌ OASIS: Bank creation FAILED for {agent_name}: {e}")
-            return False
-
-        # Execute all in parallel using gather
-        results = await asyncio.gather(*[_provision_one(p) for p in agent_profiles])
-        created_count = sum(1 for r in results if r)
-        
-        logger.info(f"🏦 OASIS: Finished provisioning. Total: {created_count}/{len(agent_profiles)} memory banks.")
+            # Seed with feature context for all agents in one batch
+            batch_items = []
+            for profile in agent_profiles:
+                agent_id = str(profile.agent_id)
+                agent_name = profile.user_info_dict.get("name", f"Agent_{agent_id}")
+                batch_items.append({
+                    "content": (
+                        f"[AGENT:{agent_id}|{agent_name}] [SYSTEM]: A new feature has been proposed for evaluation: "
+                        f"'{self.feature_title}'. Description: {self.feature_description[:1000]}"
+                    ),
+                    "context": "Initial feature briefing for market simulation",
+                    "entities": [
+                        {"text": self.feature_title, "type": "FEATURE"},
+                        {"text": agent_name, "type": "AGENT"},
+                    ],
+                    "tags": [f"agent_{agent_id}", "world", "feature_introduction"],
+                })
+            
+            await self._hindsight.aretain_batch(
+                bank_id=self._shared_bank_id,
+                items=batch_items,
+            )
+            
+            self._provisioned_banks = [self._shared_bank_id]
+            logger.info(f"🏦 OASIS: Finished provisioning. 1 shared bank '{self._shared_bank_id}' provisioned for {len(agent_profiles)} agents.")
+            
+        except Exception as e:
+            logger.error(f"  ❌ OASIS: Shared bank creation FAILED: {e}")
 
     async def structured_retain(
         self, agent_id: str, agent_name: str, action_type: str,
@@ -930,15 +967,15 @@ class HindsightOASISManager:
         Uses aretain_batch() with structured items instead of raw text blobs.
         Hindsight extracts discrete facts, temporal data, and entity relationships.
         """
-        if not self._hindsight:
+        if not self._hindsight or not self._shared_bank_id:
             return
             
-        bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
+        bank_id = self._shared_bank_id
         try:
             await self._hindsight.aretain_batch(
                 bank_id=bank_id,
                 items=[{
-                    "content": f"[{agent_name}]: {content[:1500]}",
+                    "content": f"[AGENT:{agent_id}|{agent_name}] [{action_type}]: {content[:1500]}",
                     "timestamp": datetime.now().isoformat(),
                     "context": (
                         f"OASIS simulation timestep {timestep}. "
@@ -948,12 +985,12 @@ class HindsightOASISManager:
                         {"text": self.feature_title, "type": "FEATURE"},
                         {"text": agent_name, "type": "AGENT"},
                     ],
-                    "tags": ["experience", action_type.lower(), f"timestep_{timestep}"],
+                    "tags": [f"agent_{agent_id}", "experience", action_type.lower(), f"timestep_{timestep}"],
                 }],
             )
             logger.info(f"  🧠 Memory inclusion (Timestep {timestep}): Stored '{action_type}' for {agent_name} into {bank_id}")
             # Mark agent as dirty — needs reflection this timestep
-            self._dirty_agents.add(bank_id)
+            self._dirty_agents.add(str(agent_id))
         except Exception as e:
             logger.warning(f"OASIS: Structured retain failed for {agent_name} ({bank_id}): {e}")
 
@@ -973,25 +1010,50 @@ class HindsightOASISManager:
         
         This is MUCH faster than areflect() and better for per-turn context.
         """
-        if not self._hindsight:
+        if not self._hindsight or not self._shared_bank_id:
             return ""
             
-        bank_id = f"oasis-{self.simulation_id}-persona-{agent_id}"
+        bank_id = self._shared_bank_id
         try:
-            result = await self._hindsight.arecall(
-                bank_id=bank_id,
-                query=(
-                    f"What are my current thoughts, objections, and sentiments "
-                    f"on '{self.feature_title}'? What actions have I taken?"
+            # Fallback strategy for older SDK versions that don't support filter_tags
+            recall_kwargs = {
+                "bank_id": bank_id,
+                "query": (
+                    f"What are agent {agent_id}'s current thoughts, objections, and sentiments "
+                    f"on '{self.feature_title}'? What actions has agent {agent_id} taken?"
                 ),
-                types=["experience", "opinion", "observation"],
-                budget=self._budget["recall_budget"],
-                max_tokens=self._budget["recall_max_tokens"],
-                include_entities=True,
-                max_entity_tokens=self._budget["max_entity_tokens"],
-            )
-            
-            # Build context from recall results
+                "types": ["experience", "opinion", "observation"],
+                "budget": self._budget["recall_budget"],
+                "max_tokens": self._budget["recall_max_tokens"],
+                "include_entities": True,
+                "max_entity_tokens": self._budget["max_entity_tokens"],
+            }
+            agent_tag = f"agent_{agent_id}"
+            agent_prefix = f"AGENT:{agent_id}"
+
+            try:
+                # Preferred path: SDK-native tag filtering (O(1) server-side)
+                result = await self._hindsight.arecall(**recall_kwargs, filter_tags=[agent_tag])
+            except TypeError:
+                # SDK version doesn't support filter_tags — fall back to unscoped
+                # recall and apply manual post-filtering client-side (CRITICAL-3 fix).
+                # Without this filter, Agent X would receive Agent Y's memories in a
+                # shared bank, causing false consensus across the agent population.
+                logger.debug(
+                    f"OASIS: filter_tags unsupported by SDK — applying manual "
+                    f"post-filter for agent_{agent_id}"
+                )
+                result = await self._hindsight.arecall(**recall_kwargs)
+                # Manually discard records that don't belong to this agent
+                if hasattr(result, 'results') and result.results:
+                    result.results = [
+                        r for r in result.results
+                        if agent_tag in getattr(r, 'content', '')
+                        or agent_prefix in getattr(r, 'content', '')
+                        or agent_tag in getattr(r, 'tags', [])
+                    ]
+
+            # Build context from (now agent-scoped) recall results
             parts = []
             if hasattr(result, 'results') and result.results:
                 for item in result.results:
@@ -1020,46 +1082,60 @@ class HindsightOASISManager:
         3. BELIEF EVOLUTION: Store reflection output back as a new memory
            so subsequent recalls include the evolved stance
         """
-        if not self._hindsight:
+        if not self._hindsight or not self._shared_bank_id:
             return
         
         self._timestep_counter += 1
         reflect_every = self._budget["reflect_every_n"]
         
-        # Adaptive frequency gate — skip reflection on non-reflect timesteps
+        # Adaptive frequency gate — skip reflection on non-reflect timesteps.
+        # IMPORTANT (Path-B drift fix): Do NOT clear _dirty_agents here.
+        # Agents that spoke during skipped timesteps must be reflected at the
+        # NEXT reflection cycle so their evolved_belief memories are created.
+        # Clearing here caused belief starvation: agents whose timestep was
+        # skipped never got a reflect call, so their recall() returned stale
+        # memories indefinitely, creating false "position stability".
         if self._timestep_counter % reflect_every != 0:
+            next_reflect = timestep + (reflect_every - self._timestep_counter % reflect_every)
             logger.info(
                 f"⏭️  OASIS: Skipping reflection at timestep {timestep} "
-                f"(next reflect at timestep {timestep + (reflect_every - self._timestep_counter % reflect_every)})"
+                f"(next reflect at timestep {next_reflect}). "
+                f"Accumulating {len(self._dirty_agents)} dirty agents for next cycle."
             )
-            self._dirty_agents.clear()
-            return
+            return  # _dirty_agents intentionally preserved — accumulates across skipped steps
         
         # Only reflect agents that actually spoke this round
-        active_banks = [b for b in self._provisioned_banks if b in self._dirty_agents]
-        skipped = len(self._provisioned_banks) - len(active_banks)
-        
+        active_agents = list(self._dirty_agents)
+        if not active_agents:
+            return
+
         logger.info(
             f"🔄 OASIS: Post-timestep {timestep} reflection — "
-            f"{len(active_banks)} active, {skipped} silent (skipped)"
+            f"{len(active_agents)} active agents"
         )
         
-        for bank_id in active_banks:
+        bank_id = self._shared_bank_id
+        for agent_id in active_agents:
             for attempt in range(2):  # Reduced retries for free tier
                 try:
-                    reflection = await self._hindsight.areflect(
-                        bank_id=bank_id,
-                        query=(
+                    reflect_kwargs = {
+                        "bank_id": bank_id,
+                        "query": (
                             f"After round {timestep} of the market simulation, "
-                            f"what is my evolved stance on '{self.feature_title}'? "
-                            f"Have I changed my mind about anything? "
-                            f"What specific concerns or support do I now have?"
+                            f"what is agent {agent_id}'s evolved stance on '{self.feature_title}'? "
+                            f"Has agent {agent_id} changed their mind about anything? "
+                            f"What specific concerns or support does agent {agent_id} now have?"
                         ),
-                        budget=self._budget["reflect_budget"],
-                    )
+                        "budget": self._budget["reflect_budget"],
+                    }
+                    try:
+                        reflection = await self._hindsight.areflect(**reflect_kwargs, filter_tags=[f"agent_{agent_id}"])
+                    except TypeError:
+                        reflection = await self._hindsight.areflect(**reflect_kwargs)
+                        
                     ans = getattr(reflection, 'answer',
                                   getattr(reflection, 'text', str(reflection)))
-                    logger.info(f"  🧠 {bank_id} post-T{timestep}: {ans[:120]}...")
+                    logger.info(f"  🧠 Agent {agent_id} post-T{timestep}: {ans[:120]}...")
                     
                     # CRITICAL: Store reflection back as evolved_belief memory
                     # This closes the Act→Retain→Reflect→Store→Recall→Act loop
@@ -1069,10 +1145,10 @@ class HindsightOASISManager:
                                 bank_id=bank_id,
                                 items=[{
                                     "content": (
-                                        f"[EVOLVED BELIEF after round {timestep}]: "
+                                        f"[AGENT:{agent_id}] [EVOLVED BELIEF after round {timestep}]: "
                                         f"{ans[:600]}"
                                     ),
-                                    "tags": ["opinion", "evolved_belief",
+                                    "tags": [f"agent_{agent_id}", "opinion", "evolved_belief",
                                              f"post_timestep_{timestep}"],
                                     "context": (
                                         "This is my synthesized belief after "
@@ -1085,17 +1161,17 @@ class HindsightOASISManager:
                     break  # Success
                 except Exception as e:
                     if attempt < 1:
-                        logger.warning(f"  ⏳ Reflect retry for {bank_id}: {e}")
+                        logger.warning(f"  ⏳ Reflect retry for Agent {agent_id}: {e}")
                         await asyncio.sleep(1.5)
                     else:
-                        logger.warning(f"  ⚠️  Reflect failed for {bank_id}: {e}")
+                        logger.warning(f"  ⚠️  Reflect failed for Agent {agent_id}: {e}")
             
             await asyncio.sleep(0.3)  # Jitter
         
         # Reset dirty set for next timestep
         self._dirty_agents.clear()
 
-    async def cleanup_banks(self) -> int:
+    async def cleanup_banks(self, simulation_id: str = "") -> int:
         """Delete all Hindsight banks provisioned during this simulation run.
         
         Called when a NEW simulation starts (not after each run) to preserve
@@ -1107,15 +1183,20 @@ class HindsightOASISManager:
             return 0
         
         deleted = 0
-        for bank_id in list(self._provisioned_banks):
-            try:
-                await self._hindsight.adelete_bank(bank_id=bank_id)
-                deleted += 1
-                logger.debug(f"  🧹 Deleted bank: {bank_id}")
-            except Exception as e:
-                logger.debug(f"  ⚠️  Could not delete {bank_id}: {e}")
+        target_bank = f"oasis-{simulation_id}" if simulation_id else self._shared_bank_id
         
-        self._provisioned_banks.clear()
+        if target_bank:
+            try:
+                await self._hindsight.adelete_bank(bank_id=target_bank)
+                deleted += 1
+                logger.debug(f"  🧹 Deleted bank: {target_bank}")
+            except Exception as e:
+                logger.debug(f"  ⚠️  Could not delete {target_bank}: {e}")
+        
+        if target_bank == self._shared_bank_id:
+            self._provisioned_banks.clear()
+            self._shared_bank_id = ""
+            
         logger.info(f"🧹 OASIS: Purged {deleted} Hindsight banks")
         return deleted
 

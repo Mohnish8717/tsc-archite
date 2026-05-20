@@ -38,6 +38,46 @@ from tsc.config import settings as tsc_settings, LLMProvider
 
 
 # =============================================================================
+# EXECUTIVE SUMMARY PROMPT (module-level constant)
+# =============================================================================
+_EXEC_SUMMARY_SYSTEM = """\
+You are a senior market research analyst preparing a simulation-derived executive brief.
+
+<data_contract>
+You will receive a JSON object containing simulation metrics.
+YOU MUST:
+- Use ONLY numbers and quotes present in that JSON. Do NOT invent, estimate, or
+  extrapolate any metric not explicitly in the data.
+- If a field is missing, zero, or empty (e.g. focus_group_insights is {}),
+  state "Focus group data unavailable for this run" — do not omit or fabricate.
+- Quote agents verbatim from decision_events[].quote only. Never paraphrase quotes.
+</data_contract>
+
+<output_format>
+Write exactly 3 paragraphs. No headers. No bullet points anywhere.
+
+PARAGRAPH 1 — VERDICT
+Lead with the single most surprising finding. Then state one clear recommendation:
+"ship" / "ship with changes" / "do not ship" / "needs more data".
+Cite the exact NPS, churn_velocity, and adoption_momentum values from the JSON.
+Use hedged language: "simulation suggests", not "will" or "is".
+
+PARAGRAPH 2 — RISK PROFILE
+Name the top 2 risks from top_risk_factors. For each, state likelihood as
+Low/Medium/High using the risk_distribution percentages to justify the label.
+Include one verbatim agent quote from decision_events[].quote — copy it exactly,
+wrap in quotation marks, do not shorten it.
+
+PARAGRAPH 3 — NEXT STEPS
+Give exactly 3 recommendations. Each must be a single testable action
+(verifiable true/false within 30 days). At least one must directly address
+the highest-churn segment identified in the segments field.
+</output_format>
+
+Write for a VP of Product with 90 seconds to read this. Be direct."""
+
+
+# =============================================================================
 # PUBLIC API
 # =============================================================================
 
@@ -49,7 +89,7 @@ async def RunOASISSimulation(
     mode: str = "feature_test",      # "behavioral" | "feature_test"
     session: Optional[Any] = None,   # HindsightSessionManager
     market_context: Optional[Dict[str, Any]] = None,
-    base_dir: str = "/tmp/oasis_runs",
+    base_dir: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "log", "oasis_runs"),
     available_actions: Optional[List[Any]] = None,
 ) -> MarketSentimentSeries:
     """
@@ -102,10 +142,23 @@ async def RunOASISSimulation(
     from camel.memories import ChatHistoryMemory
     from camel.memories import ContextRecord
 
-    # ── 2. Concurrency Semaphore (bound to THIS loop) ────────────────────────
-    # Raised from 1 → 20: enables 20 parallel LLM calls per timestep.
-    # Free-tier safe: Groq/Gemini support burst concurrency up to ~30 RPS.
-    _sem = asyncio.Semaphore(10)
+    # ── 2. Concurrency Control (Speed + Reliability) ─────────────────────────
+    # We use `aiolimiter` to enforce a strict RPM limit while allowing high
+    # concurrency via `asyncio.Semaphore`. This maximizes throughput.
+    try:
+        from aiolimiter import AsyncLimiter
+    except ImportError:
+        logger.error("aiolimiter not installed. Run: pip install aiolimiter")
+        raise
+        
+    # Gemma-4-31b-it free tier: empirically ~15 RPM hard limit.
+    # We cap at 10 RPM to leave headroom for retries and persona-gen calls.
+    # Override via GEMINI_FREE_RPM env var for paid tiers (e.g. 60 or 120).
+    GEMINI_FREE_RPM = int(os.getenv("GEMINI_FREE_RPM", "10"))
+    # Reduce concurrent agents if RPM is very low (<= 5) to avoid temporal burst hits
+    max_concurrency = 2 if GEMINI_FREE_RPM <= 5 else 4
+    _sem = asyncio.Semaphore(max_concurrency)   # Throttles thundering herd
+    _limiter = AsyncLimiter(max(1, GEMINI_FREE_RPM), 60.0)  # Hard RPM cap via token bucket
 
     # ── 3. Init guard variables (for safe finally-block) ─────────────────────
     platform_task = None
@@ -140,10 +193,17 @@ async def RunOASISSimulation(
     if HINDSIGHT_AVAILABLE:
         try:
             memory_manager = HindsightOASISManager()
+            # ── MAJOR-3 fix: use a timestamped bank ID so that re-running the same
+            # scenario doesn't wipe the previous run's forensic data on startup.
+            # The human-readable config.simulation_name is preserved for logging.
+            _run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            _bank_sim_id = f"{config.simulation_name}-{_run_ts}"
             # Clean up banks from PREVIOUS simulation (preserves for analysis
-            # until a NEW simulation starts — per user requirement)
+            # until a NEW simulation starts — per user requirement).
+            # We use the human name (without timestamp) so we clean up the
+            # LAST run, not the current one.
             try:
-                purged = await memory_manager.cleanup_banks()
+                purged = await memory_manager.cleanup_banks(simulation_id=config.simulation_name)
                 if purged > 0:
                     logger.info(f"🧹 Cleaned up {purged} banks from previous simulation")
             except Exception:
@@ -152,11 +212,23 @@ async def RunOASISSimulation(
                 agent_profiles=agent_profiles,
                 feature_title=getattr(feature, 'title', 'Unspecified Feature'),
                 feature_description=getattr(feature, 'description', 'No description provided'),
-                simulation_id=config.simulation_name,
+                simulation_id=_bank_sim_id,  # Timestamped — safe for concurrent/repeat runs
             )
         except Exception as e:
             logger.error(f"Fatal error during Hindsight Initialization: {e}")
             HINDSIGHT_AVAILABLE = False
+            # CRITICAL-1 fix: emit a visible degradation banner so operators
+            # know the simulation is running WITHOUT persistent agent memory.
+            # Previously this was a silent mode switch with only a debug-level log.
+            logger.warning(
+                "⚠️  " + "=" * 60 + "\n"
+                "⚠️  HINDSIGHT MEMORY DISABLED (initialization failed).\n"
+                "⚠️  Simulation will run WITHOUT persistent agent memory.\n"
+                "⚠️  Agent beliefs will NOT evolve across timesteps.\n"
+                "⚠️  Context drift resistance is severely degraded.\n"
+                "⚠️  Check HINDSIGHT_URL and HINDSIGHT_API_KEY env vars.\n"
+                "⚠️  " + "=" * 60
+            )
     else:
         logger.warning("HINDSIGHT NOT AVAILABLE: Market sentiment will not evolve into Opinion Networks.")
 
@@ -192,7 +264,11 @@ async def RunOASISSimulation(
 
     # ── 6. LLM Model (Direct instantiation) ──────────────────────────────────
     llm_model_name = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
-    llm_provider   = LLMProvider.GOOGLE
+    provider_str = os.getenv("TSC_LLM_PROVIDER", "google").upper()
+    try:
+        llm_provider = LLMProvider[provider_str]
+    except KeyError:
+        llm_provider = LLMProvider.GOOGLE
     api_key        = tsc_settings.get_api_key(llm_provider)
 
     from camel.models import GroqModel, OpenAIModel, AnthropicModel, GeminiModel
@@ -218,6 +294,10 @@ async def RunOASISSimulation(
         ActionType.DISLIKE_POST,
         ActionType.LIKE_COMMENT,
         ActionType.DISLIKE_COMMENT,
+        ActionType.CREATE_POST,
+        ActionType.REPOST,
+        ActionType.QUOTE_POST,
+        ActionType.DO_NOTHING,
     ]
 
     social_agents: List[SocialAgent] = []
@@ -239,13 +319,47 @@ async def RunOASISSimulation(
         info = profile.user_info_dict
         user_name = info.get("user_name", getattr(profile, "name", f"user_{profile.agent_id}")).lower().replace(" ", "_")
         display_name = info.get("name", getattr(profile, "name", f"Agent {profile.agent_id}"))
-        bio = info.get("profile", {}).get("user_profile", "")[:100]
+        bio = str(info.get("profile", {}).get("user_profile", ""))[:100]
         
         user_msg = [user_name, display_name, bio]
         await platform_obj.sign_up(agent_id=int(profile.agent_id), user_message=user_msg)
 
+    # ── 7.2 Emit Spawn Events → Frontend Agent Registry ─────────────────────
+    # Emit a simulation_start event + one agent_spawn per agent so the UI
+    # can pre-populate the node graph before any actions stream in.
+    local_logger.log_simulation_event("simulation_start", {
+        "simulation_id": config.simulation_name,
+        "feature_title": getattr(feature, 'title', 'Behavioral Simulation') if feature else 'Behavioral Simulation',
+        "num_agents": len(agent_profiles),
+        "num_timesteps": config.num_timesteps,
+        "platform": config.platform_type,
+    })
+    for profile in agent_profiles:
+        info = profile.user_info_dict
+        display_name = info.get("name", f"Agent {profile.agent_id}")
+        other = info.get("profile", {}).get("other_info", {})
+        role = other.get("role", info.get("description", "User"))
+        traits = other.get("pain_points", [])[:3]
+        bio = info.get("profile", {}).get("user_profile", "") or info.get("description", "")
+        local_logger.log_spawn(
+            agent_id=str(profile.agent_id),
+            agent_name=display_name,
+            agent_type=getattr(profile, 'agent_type', 'user'),
+            role=role,
+            traits=traits,
+            impact=getattr(profile, 'influence_strength', 0.5),
+            mbti=other.get("mbti", ""),
+            ocean_scores=other.get("ocean_scores", {}),
+            buyer_journey=other.get("buyer_journey", ""),
+            bio=bio,
+        )
+    logger.info(f"✅ Emitted {len(agent_profiles)} agent_spawn events to actions.jsonl")
+
     # CRITICAL: Monkey-patch ChatAgent._aexecute_tool
-    from camel.agents import ChatAgent
+    from camel.agents.chat_agent import ChatAgent
+    from camel.messages import BaseMessage
+    from tsc.oasis.models import PredictionReport, MarketSentimentSeries, OASISSimulationConfig, DecisionJournal
+    from tsc.oasis.extraction import extract_business_metrics
     from camel.agents._types import ToolCallRequest
     from camel.types.agents import ToolCallingRecord
     original_aexecute_tool = ChatAgent._aexecute_tool
@@ -262,6 +376,12 @@ async def RunOASISSimulation(
         str(a.social_agent_id): (a.user_info.name if a.user_info else "Agent")
         for a in social_agents
     }
+    # Fix #5: agent_id → profile dict (prevents wrong-persona lookup when
+    # sampler creates a subset; agent_profiles[idx] was indexed by position
+    # in social_agents, not by agent_id, causing mismatches on sampled cohorts)
+    agent_id_to_profile = {str(p.agent_id): p for p in agent_profiles}
+    # Fix #11: O(1) Eagle's Eye target lookup (was O(N) linear scan per callback)
+    agent_id_to_agent = {str(a.social_agent_id): a for a in social_agents}
 
     # ── 8. Social Network Topology (Preferential Attachment + Homophily) ────
     # Instead of a fake "Star Graph" where everyone only follows the proposer,
@@ -367,6 +487,14 @@ async def RunOASISSimulation(
     avg_degree = total_edges / max(1, num_agents)
     logger.info(f"🕸️  Network Topology Built: {total_edges} edges, avg degree {avg_degree:.1f} "
                 f"(peers: {len(follow_edges)}, reciprocal: {len(reciprocal_edges)}, hub: {num_agents - 1})")
+    # G4: Emit social network topology so the 3D graph can render real edges
+    local_logger.log_simulation_event("network_topology", {
+        "simulation_id": config.simulation_name,
+        "hub_agent_id": str(proposer_id),
+        "total_edges": total_edges,
+        "avg_degree": round(avg_degree, 2),
+        "edges": [{"from": str(f), "to": str(t)} for f, t in list(follow_edges)[:500] + list(reciprocal_edges)[:200]],
+    })
 
     # ── 8.1 Seed Platform — Source-to-Synth Pipeline ────────────────────────────
     # Research-backed approach: Extract REAL controversy quotes from input data
@@ -434,36 +562,84 @@ async def RunOASISSimulation(
         # Fallback: If no raw quotes extracted, create from feature data
         if not seeds and feat:
             seeds = [
-                f"Breaking: '{feat_title}' has been proposed.\n\n"
-                f"{feat_desc}\n\n"
-                f"I have serious concerns about this. The opt-out process alone "
-                f"seems designed to minimize actual opt-outs. What's the REAL "
-                f"impact on our users and our reputation?",
-                
-                f"Devil's advocate on '{feat_title}': The business case is "
-                f"actually strong. More training data = better models = better UX. "
-                f"But the execution is terrible. How would YOU implement this "
-                f"if you had to balance data quality with user trust?",
+                # Seed 1: Angry power user — names specific failure
+                f"[POWER USER] '{feat_title}' just broke my production workflow.\n\n"
+                f"{feat_desc[:200]}\n\n"
+                f"This is unacceptable. I have a team depending on this. "
+                f"@engineers: Give me a concrete timeline, not a PR statement.",
+
+                # Seed 2: Skeptical analyst — demands evidence
+                f"Unpopular take on '{feat_title}': the business case is actually reasonable. "
+                f"BUT I need to see the technical risk assessment.\n\n"
+                f"{feat_desc[:150]}\n\n"
+                f"@decision-makers: Have you stress-tested this against your compliance requirements? "
+                f"What's the fallback if it ships with bugs?",
+
+                # Seed 3: Pre-purchase evaluator — surfaces pricing tier and WTP signal
+                # (P5 fix: weak 'confused new user' replaced with evaluator archetype
+                # that anchors the budget approval + pricing discussion from the start)
+                f"I'm evaluating '{feat_title}' as part of our procurement decision. "
+                f"Quick question for current users: is this included in the base tier "
+                f"or gated behind Enterprise? I need to know if this triggers a new "
+                f"budget approval cycle before I bring it to my manager. "
+                f"Also — has anyone measured actual productivity impact? "
+                f"I need numbers, not testimonials.",
+
+                # Seed 4: New user — confused, seeks context
+                f"I just onboarded last month and now '{feat_title}' is rolling out. "
+                f"Can someone explain how this affects new accounts? "
+                f"I haven't even finished setting up my workflow yet. "
+                f"Is there a migration guide or do we figure it out ourselves?",
+
+                # Seed 5: Churning user — competitive exit signal
+                f"I was already evaluating alternatives when this '{feat_title}' announcement dropped. "
+                f"Two years as a customer and I'm being treated like a beta tester. "
+                f"What would actually make you stay? I'm genuinely asking.",
+
+                # Seed 6: Advocate — creates counter-narrative
+                f"Hot take: '{feat_title}' solves a real problem that the critics are missing. "
+                f"{feat_desc[:150]}\n\n"
+                f"For anyone actually using [the core workflow], this is exactly what was needed. "
+                f"Change my mind with a SPECIFIC technical objection, not vibes.",
             ]
-        
+
         return seeds or [f"New feature proposal: {feat_title}. {feat_desc[:500]}"]
-    
+
+    controversy_seeds = _extract_controversy_seeds(feature, context, market_ctx if 'market_ctx' in dir() else {})
+    # G12: Emit seed posts so the UI can show the debate context from T=0
+    local_logger.log_simulation_event("seed_posts", {
+        "simulation_id": config.simulation_name,
+        "seeds": [{"index": i, "content": s[:500]} for i, s in enumerate(controversy_seeds)],
+    })
+
     if mode == "behavioral" or feature is None:
         product_desc = context.company_name if context else "the product"
         product_stack = ", ".join(context.tech_stack) if (context and context.tech_stack) else "the platform"
         competitors = ", ".join(context.competitors) if (context and context.competitors) else "alternatives"
         
         seed_posts = [
-            f"Hey everyone! As a daily user of {product_desc}, I wanted to share "
-            f"my experience today. The {product_stack} workflow has been interesting "
-            f"but I've run into some friction points. What's your experience been like?",
-            
-            f"I've been comparing {product_desc} with {competitors} lately. "
-            f"Some things work great here, but there are areas where I feel "
-            f"we're falling behind. Anyone else noticing gaps?",
-            
-            f"Product update thread 🧵: What's the ONE thing about {product_desc} "
-            f"that, if fixed or improved, would make you significantly more productive?",
+            # Seed 1: Friction-first — forces agents to declare position on real pain points
+            # (prompt-optimization.md §Constraint Tightening: specific, not vague opener)
+            f"[Honest review after 6 months with {product_desc}]: "
+            f"The {product_stack} integration is genuinely useful day-to-day, "
+            f"but onboarding new team members is still painful every single time. "
+            f"What's everyone's actual experience? Specifically: "
+            f"what do you wish worked differently, and what would it take for you to recommend this internally?",
+
+            # Seed 2: Competitive threat — anchors the comparative analysis discussion
+            # and ensures GM signal 'competitive_threat' fires early in the simulation
+            f"Our team ran a bake-off: {product_desc} vs {competitors}. "
+            f"I'll be direct — there are specific workflows where {competitors.split(',')[0].strip()} "
+            f"is just faster. If you've done the same comparison, "
+            f"what kept you here — or what finally made you switch?",
+
+            # Seed 3: Exit / renewal signal — exposes WTP anchor and hard thresholds
+            # without directly asking (agents reveal them through their response framing)
+            f"Genuine question for power users: at what point does the cost of staying "
+            f"with {product_desc} outweigh the switching cost? "
+            f"Our contract renewal is coming up and I'm struggling to justify "
+            f"the line item to leadership without concrete productivity numbers. "
+            f"Has anyone actually measured the ROI?",
         ]
         for post in seed_posts:
             await platform_obj.create_post(agent_id=int(proposer_id), content=post)
@@ -493,10 +669,11 @@ async def RunOASISSimulation(
     async def _interview(agent: SocialAgent, question: str) -> Dict[str, Any]:
         try:
             async with _sem:
-                msg = BaseMessage.make_user_message(
-                    role_name="INTERVIEWER", content=question
-                )
-                response = await asyncio.wait_for(agent.astep(msg), timeout=120.0)
+                async with _limiter:
+                    msg = BaseMessage.make_user_message(
+                        role_name="INTERVIEWER", content=question
+                    )
+                    response = await asyncio.wait_for(agent.astep(msg), timeout=120.0)
             return {
                 "content": response.msgs[0].content if response.msgs else "No response",
                 "timestamp": datetime.now().isoformat(),
@@ -524,10 +701,28 @@ async def RunOASISSimulation(
         (re.compile(r"(useful|helpful|productive|efficient|saves time)", re.I),      "utility", +0.5),
         (re.compile(r"(useless|waste|pointless|doesn't help)", re.I),               "negative_utility", -0.5),
         (re.compile(r"(privacy|data|surveillance|tracking|spy)", re.I),              "privacy_concern", -0.4),
+        # -- Added: 6 enterprise-critical signal patterns --
+        (re.compile(r"(roi|payback|cost.?benefit|break.?even|return on)", re.I),     "roi_inquiry", +0.3),
+        (re.compile(r"(pilot|trial|proof.?of.?concept|poc|evaluate|test it)", re.I), "evaluation_intent", +0.5),
+        (re.compile(r"(renew|annual contract|multi.?year|commit|long.?term)", re.I), "expansion_signal", +0.8),
+        (re.compile(r"(escalat|vp|cto|ciso|board|exec|management)", re.I),           "executive_escalation", -0.6),
+        (re.compile(r"(workaround|hack|manually|spreadsheet|instead of)", re.I),     "workaround_dependency", -0.3),
+        (re.compile(r"(love it but|like it however|good but|useful but)", re.I),     "conditional_approval", +0.2),
     ]
 
-    def _gm_resolve(content: str, timestep: int) -> dict:
-        """Game Master: Classify behavioral intent from natural language."""
+    # Fix #8: Sycophancy collapse patterns — detect when an agent caves to social pressure
+    _SYCOPHANCY_PATTERNS = re.compile(
+        r"(you(?:'re| are) right|i agree|good point|that(?:'s| is) fair|i(?:'ve| have) changed|"
+        r"now i see|you(?:'ve| have) convinced|i was wrong|fair enough|that makes sense now)",
+        re.I,
+    )
+
+    def _gm_resolve(content: str, timestep: int, agent_id: str = "") -> dict:
+        """Game Master: Classify behavioral intent from natural language.
+
+        Fix #8: Also flags sycophancy_collapse when agent uses agreement language
+        while their DecisionJournal is in HIGH_RISK or SKEPTICAL state.
+        """
         if not content:
             return {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
         
@@ -537,7 +732,28 @@ async def RunOASISSimulation(
             if pattern.search(content):
                 signals_found.append((signal_type, intensity))
                 factors.add(signal_type.split("_")[0])  # Extract factor root
-        
+
+        # Sycophancy collapse detection (Fix #8)
+        # A HIGH_RISK or frustrated agent suddenly expressing agreement = data validity flag
+        if _SYCOPHANCY_PATTERNS.search(content):
+            journal = decision_journals.get(agent_id) if agent_id else None
+            if journal and (journal.frustration > 0.5 or journal.trust < 0.35):
+                signals_found.append(("sycophancy_collapse", -0.3))
+                factors.add("sycophancy")
+                # G9: emit WS event with triggering content so UI can show the actual message
+                if local_logger is not None:
+                    local_logger.log_simulation_event("sycophancy_alert", {
+                        "agent_id": agent_id,
+                        "agent_name": journal.agent_name,
+                        "timestep": timestep,
+                        "pattern": "capitulation_under_pressure",
+                        "frustration_at_collapse": round(journal.frustration, 3),
+                        "trust_at_collapse": round(journal.trust, 3),
+                        "data_validity_warning": True,
+                        "triggering_content": content[:300] if content else "",
+                        "signal_history": [s.get("type", "neutral") for s in journal.signals[-5:]],
+                    })
+
         if not signals_found:
             return {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
         
@@ -554,11 +770,42 @@ async def RunOASISSimulation(
             "all_signals": [s[0] for s in signals_found],
         }
 
-    def _detect_action_type(content: str) -> str:
-        """Detect CAMEL platform action type from response content."""
+    def _detect_action_type(content: str, action_resp=None) -> str:
+        """Detect CAMEL platform action type.
+
+        Fix #2: Reads structured tool call name from action_resp.info first.
+        Content string-scan is a fallback only (~20% of calls where info is absent).
+        """
+        # Primary: read the actual CAMEL tool call name (zero ambiguity)
+        if action_resp is not None:
+            try:
+                tool_calls = action_resp.info.get("tool_calls", []) if action_resp.info else []
+                if tool_calls:
+                    tc = tool_calls[0]
+                    tool_name = ""
+                    if hasattr(tc, "tool_name"):
+                        tool_name = tc.tool_name
+                    elif hasattr(tc, "name"):
+                        tool_name = tc.name
+                    elif isinstance(tc, dict):
+                        tool_name = tc.get("name") or tc.get("function", {}).get("name") or ""
+                    
+                    if tool_name:
+                        return tool_name.upper()
+            except Exception:
+                pass
+        # Fallback: content string scan (preserves existing behaviour)
         content_lower = content.lower() if content else ""
         if "create_comment" in content_lower or "comment" in content_lower:
             return "COMMENT"
+        elif "create_post" in content_lower:
+            return "CREATE_POST"
+        elif "repost" in content_lower:
+            return "REPOST"
+        elif "quote_post" in content_lower or "quote" in content_lower:
+            return "QUOTE_POST"
+        elif "do_nothing" in content_lower or "no action" in content_lower:
+            return "DO_NOTHING"
         elif "like_post" in content_lower or "like_comment" in content_lower:
             return "LIKE"
         elif "dislike" in content_lower:
@@ -573,6 +820,7 @@ async def RunOASISSimulation(
             return "REFRESH"
         return "POST"
 
+
     # =====================================================================
     # POPULATION SAMPLER — Scale active LLM cohort
     # =====================================================================
@@ -586,6 +834,18 @@ async def RunOASISSimulation(
     logger.info(f"🌍 Declared population: {len(agent_profiles):,} agents")
     logger.info(f"🔬 Active LLM cohort:   {len(active_profiles):,} agents ({sample_reason})")
     logger.info(f"👥 Shadow agents:       {len(sampler.shadow_agents):,} (state-inherited, 0 tokens)")
+    # G8: Emit simulation config so the UI can display degraded-mode banners + scale info
+    local_logger.log_simulation_event("simulation_config", {
+        "simulation_id": config.simulation_name,
+        "hindsight_available": HINDSIGHT_AVAILABLE,
+        "llm_model": llm_model_name,
+        "platform_type": config.platform_type,
+        "num_timesteps": config.num_timesteps,
+        "declared_population": len(agent_profiles),
+        "llm_active_cohort": effective_sample,
+        "shadow_agents": len(sampler.shadow_agents),
+        "interview_phase_enabled": getattr(config, 'enable_interview_phase', False),
+    })
     
     # =====================================================================
     # DECISION JOURNAL INITIALIZATION
@@ -616,11 +876,38 @@ async def RunOASISSimulation(
     ts_trust: List[float] = []
 
     # =====================================================================
-    # MAIN SIMULATION LOOP
+    # PHASE 3: EAGLE'S EYE CALLBACK
+    # =====================================================================
+    async def eagle_eye_interview_callback(payload: Dict[str, Any]):
+        questions = payload.get("questions", [])
+        target_id = payload.get("target_agent_id")
+        
+        # Fix #11: O(1) dict lookup (was O(N) linear scan over social_agents)
+        target_agent = agent_id_to_agent.get(str(target_id))
+        if not target_agent:
+            logger.warning(f"Eagle's Eye: Target agent {target_id} not found.")
+            return
+
+        logger.info(f"🦅 EAGLE'S EYE: Interviewing Agent {target_id}")
+        for q in questions:
+            resp = await _interview(target_agent, q)
+            logger.info(f"   Q: {q}")
+            logger.info(f"   A: {resp['content']}")
+            local_logger.log_action(
+                agent_id=target_id,
+                agent_name=agent_id_to_name.get(str(target_id), "Unknown"),
+                action_type="INTERVIEW_RESPONSE",
+                content=f"Q: {q}\nA: {resp['content']}",
+                timestep=-1, # Indicates out-of-band
+                metadata={"type": "eagles_eye"}
+            )
+
+    # =====================================================================
+    # MAIN SIMULATION LOOP (PHASE 1)
     # =====================================================================
     try:
         for t in range(config.num_timesteps):
-            await command_listener.wait_if_paused()
+            await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
             if command_listener.should_stop:
                 break
 
@@ -633,14 +920,13 @@ async def RunOASISSimulation(
                 if agent_id not in decision_journals:
                     return
                 
-                backoff    = 5.0
-                max_retries = 15
+                backoff     = 2.0                  # start with a fast 2s backoff
+                max_retries = 20                   # more retries, smarter backoff
 
                 for attempt in range(max_retries):
                     try:
                         async with _sem:
-                            await asyncio.sleep(random.uniform(1.0, 4.0))
-
+                            # ── Phase 1: IO-only prep (no LLM token, no rate limit needed) ──
                             hindsight_context = ""
                             if HINDSIGHT_AVAILABLE and memory_manager:
                                 hindsight_context = await memory_manager.recall_for_turn(str(agent_id))
@@ -651,31 +937,56 @@ async def RunOASISSimulation(
                             platform_obs = ""
                             if refresh_resp.get("success") and refresh_resp.get("posts"):
                                 posts = refresh_resp["posts"]
+                                # ── Context window guard ──
+                                # Limit to 5 posts × 3 comments to keep gemma-4-31b-it
+                                # inference under ~30s. Full history causes 4+ min timeouts.
+                                MAX_POSTS = 5
+                                MAX_COMMENTS_PER_POST = 3
                                 platform_obs = "\n\nCURRENT PLATFORM STATE:\n"
-                                for p in posts:
+                                for p in posts[:MAX_POSTS]:
                                     platform_obs += f"- [PostID {p['post_id']}] (User {p['user_id']}): {p['content']}\n"
                                     if p.get('comments'):
-                                        for c in p['comments']:
+                                        for c in p['comments'][-MAX_COMMENTS_PER_POST:]:
                                             platform_obs += f"  └─ [CommentID {c['comment_id']}] (User {c['user_id']}): {c['content']}\n"
 
                             # ── Persona-Grounded Anti-Sycophancy Prompt ──
-                            profile = agent_profiles[idx]
+                            # Fix #5: use agent_id_to_profile dict (not agent_profiles[idx])
+                            # idx is position in social_agents (full list); for sampled cohorts
+                            # agent_profiles[idx] returns the wrong persona.
+                            profile = agent_id_to_profile.get(agent_id) or agent_profiles[idx]
                             info = profile.user_info_dict
                             persona_profile = info.get("profile", {})
                             comm_style = persona_profile.get("communication_style", "direct")
                             pain_points = persona_profile.get("pain_points", [])
                             satisfaction = getattr(profile, 'satisfaction', 0.5)
                             agent_type = getattr(profile, 'agent_type', 'unknown')
-                            
+
+                            # Phase-aware timestep directive
+                            _ts_phase = (
+                                "OPENING" if t < 2
+                                else "CLOSING" if t >= config.num_timesteps - 2
+                                else "MID-DISCUSSION"
+                            )
+                            _ts_directive = {
+                                "OPENING": "State your initial position clearly. Stake a specific view.",
+                                "MID-DISCUSSION": "React to what others have said. Build on or push back against SPECIFIC points already made.",
+                                "CLOSING": "Consolidate your view. Has anything changed your position? State your final stance explicitly.",
+                            }[_ts_phase]
+
                             persona_grounding = (
-                                f"\nCRITICAL BEHAVIORAL RULES FOR {agent_name}:\n"
-                                f"1. Your communication style is: {comm_style}\n"
-                                f"2. Your TOP concern is: {pain_points[0] if pain_points else 'daily usability'}\n"
-                                f"3. You may agree or disagree with others, but your response MUST be driven by your personal workflow and product experience.\n"
-                                f"4. If you agree, ADD a new perspective from your own usage. If you disagree, explain how their view conflicts with your practical needs.\n"
-                                f"5. Reference SPECIFIC features, workflows, or policies from the posts. Avoid abstract philosophy.\n"
+                                f"\nCRITICAL BEHAVIORAL RULES FOR {agent_name} "
+                                f"[Timestep {t+1}/{config.num_timesteps} — {_ts_phase}]:\n"
+                                f"1. ANTI-SYCOPHANCY: Do NOT change your stated position because others disagree. "
+                                f"Only update if shown concrete evidence that matches your specific concern.\n"
+                                f"2. Your communication style is: {comm_style}\n"
+                                f"3. Your TOP concern is: {pain_points[0] if pain_points else 'daily usability'}\n"
+                                f"4. If you agree, ADD a new perspective from your own usage. "
+                                f"If you disagree, explain how their view conflicts with your practical needs.\n"
+                                f"5. Reference SPECIFIC features, workflows, or policies from the posts. "
+                                f"Avoid abstract philosophy.\n"
                                 f"6. Your user type is '{agent_type}' with satisfaction={satisfaction:.1f} — act accordingly.\n"
-                                f"7. Keep your response under 150 words. Speak naturally as a real user of this product.\n"
+                                f"7. PHASE DIRECTIVE: {_ts_directive}\n"
+                                f"8. Keep your response under 150 words. Speak naturally as a real user.\n"
                             )
                             
                             # ── Decision Journal Injection ──
@@ -683,28 +994,156 @@ async def RunOASISSimulation(
                             if agent_id in decision_journals:
                                 journal_ctx = decision_journals[agent_id].prompt_summary()
                             
+                            # P3 fix: content ordering per context-management.md
+                            # §Recommended Ordering + §Lost-in-the-Middle mitigation.
+                            # Rule: Instructions at START (primacy) and END (recency)
+                            # receive highest LLM attention. Data goes in the MIDDLE.
+                            #
+                            # OLD (broken): instruction → persona → journal → data → memory
+                            # NEW (fixed):  data → memory → journal → persona → action_cue
+                            #   - Platform state + hindsight = content (middle = lower bias OK)
+                            #   - persona_grounding = directive (end = highest recency bias)
+                            #   - Closing action cue = final trigger (bottom = highest attention)
                             step_msg = BaseMessage.make_user_message(
-                                role_name="ENVIRONMENT", 
+                                role_name="ENVIRONMENT",
                                 content=(
-                                    "Please observe the platform state and take your next autonomous action.\n"
-                                    f"{persona_grounding}\n"
-                                    f"{journal_ctx}\n"
-                                    f"Current Platform State:\n{platform_obs}\n"
-                                    f"{hindsight_context}"
+                                    # BUCKET 1 (top): Current observations — data, not directives
+                                    f"<platform_state>\n{platform_obs}\n</platform_state>\n\n"
+                                    # BUCKET 2 (middle): Narrative memory from prior turns
+                                    f"<memory>\n{hindsight_context}\n</memory>\n\n"
+                                    # BUCKET 3 (middle): Agent's own emotional state summary
+                                    f"<journal>\n{journal_ctx}\n</journal>\n\n"
+                                    # BUCKET 4 (bottom — highest recency attention): Behavioral rules
+                                    f"<rules>\n{persona_grounding}\n</rules>\n\n"
+                                    # Closing action cue — very last token, maximum LLM focus
+                                    "Review the platform state above and select ONE action to take now."
                                 )
                             )
-                            action_resp = await asyncio.wait_for(
-                                agent.astep(step_msg), timeout=240.0
-                            )
 
-                        content = action_resp.msgs[0].content if action_resp and action_resp.msgs else "No content"
-                        action_type = _detect_action_type(content)
+                            # ── Phase 2: LLM call — MUST be inside _limiter ──
+                            # _limiter is a token-bucket enforcing GEMINI_FREE_RPM.
+                            # Previously this context was closed before astep(), meaning
+                            # every agent.astep() LLM call ran completely unguarded → 429s.
+                            async with _limiter:
+                                logger.debug(f"    🚦 Rate-limit slot acquired for {agent_name}")
+                                action_resp = await asyncio.wait_for(
+                                    agent.astep(step_msg), timeout=240.0
+                                )
 
-                        # ── Game Master: Resolve behavioral signal ──
-                        gm_signal = _gm_resolve(content, timestep=t)
+                        raw_content = action_resp.msgs[0].content if action_resp and action_resp.msgs else "No content"
+                        
+                        # Step A: Check for structured tool call arguments (most reliable source of pristine comment text)
+                        tool_val = None
+                        if action_resp and hasattr(action_resp, 'info') and action_resp.info:
+                            tool_info = action_resp.info.get('tool_calls', [])
+                            for tc in (tool_info if isinstance(tool_info, list) else []):
+                                if hasattr(tc, 'args'):
+                                    args = tc.args
+                                elif isinstance(tc, dict):
+                                    args = tc.get('arguments', tc.get('args', {}))
+                                else:
+                                    args = {}
+                                if isinstance(args, dict):
+                                    tool_val = args.get('content') or args.get('quote_content') or args.get('text')
+                                    if tool_val:
+                                        break
+                        
+                        # Step B: Select source content (tool argument wins over raw text containing thought blocks)
+                        selected_content = tool_val if tool_val else raw_content
+                        
+                        # Step C: Strip thought blocks and formatting markers (fallback if thoughts leaked to tool call or raw text is used)
+                        import re
+                        cleaned = re.sub(r'<thought>.*?</thought>', '', selected_content, flags=re.DOTALL)
+                        cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
+                        # Remove markdown bold/italic tags and optional thought prefixes
+                        cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
+                        content = cleaned.strip() or "No content"
+
+                        # Fix #2: pass action_resp so tool call name is read first
+                        action_type = _detect_action_type(content, action_resp=action_resp)
+
+                        # Step D: Proactively query the SQLite platform database for the clean post/comment content actually saved.
+                        # This guarantees that we use the final, clean text registered in the simulation platform.
+                        if action_type in ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST"]:
+                            try:
+                                import sqlite3
+                                conn = sqlite3.connect(unique_db)
+                                cursor = conn.cursor()
+                                if "COMMENT" in action_type:
+                                    cursor.execute(
+                                        "SELECT content FROM comment WHERE user_id = ? ORDER BY comment_id DESC LIMIT 1",
+                                        (int(agent_id),)
+                                    )
+                                    row = cursor.fetchone()
+                                    if row and row[0]:
+                                        content = row[0]
+                                elif "POST" in action_type or "REPOST" in action_type:
+                                    cursor.execute(
+                                        "SELECT content FROM post WHERE user_id = ? ORDER BY post_id DESC LIMIT 1",
+                                        (int(agent_id),)
+                                    )
+                                    row = cursor.fetchone()
+                                    if row and row[0]:
+                                        content = row[0]
+                                conn.close()
+
+                                # Apply safety sanitization on database content just in case any thought tags were persisted
+                                cleaned_db = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL)
+                                cleaned_db = re.sub(r'<thinking>.*?</thinking>', '', cleaned_db, flags=re.DOTALL)
+                                cleaned_db = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned_db)
+                                content = cleaned_db.strip() or "No content"
+                            except Exception as db_err:
+                                logger.warning(f"Failed to fetch clean content from SQLite platform database: {db_err}")
+
+
+                        # ── Extract target_id for frontend network rendering ──
+                        # Parse target agent or thread from the tool call result
+                        action_target_id = None
+                        
+                        # —— Game Master: Resolve behavioral signal ——
+                        # Fix #8: pass agent_id so sycophancy_collapse can check journal state
+                        gm_signal = _gm_resolve(content, timestep=t, agent_id=agent_id)
                         if agent_id in decision_journals and gm_signal["type"] != "neutral":
-                            decision_journals[agent_id].update_from_signal(gm_signal)
-                            logger.info(f"    🎲 GM State Shift: {agent_name} → {gm_signal['type']} ({gm_signal['intensity']:+.2f})")
+                            # Weight signal intensity by agent influence strength:
+                            # a power user's exit intent carries more predictive weight
+                            # than a new evaluator's identical wording.
+                            _inf = getattr(profile, "influence_strength", 0.5)
+                            weighted_signal = {
+                                **gm_signal,
+                                "intensity": round(gm_signal["intensity"] * _inf, 3),
+                                "raw_intensity": gm_signal["intensity"],
+                            }
+                            decision_journals[agent_id].update_from_signal(weighted_signal)
+                            logger.info(f"    🎲 GM State Shift: {agent_name} → {gm_signal['type']} "
+                                        f"(raw={gm_signal['intensity']:+.2f}, "
+                                        f"weighted={weighted_signal['intensity']:+.3f}, "
+                                        f"inf={_inf:.2f})")
+
+                        if action_resp and hasattr(action_resp, 'info') and action_resp.info:
+                            # OASIS returns tool call info with post_id or comment_id.
+                            # action_resp.info['tool_calls'] is a list of ToolCallingRecord
+                            # (Pydantic model with .tool_name and .args), NOT dicts.
+                            tool_info = action_resp.info.get('tool_calls', [])
+                            for tc in (tool_info if isinstance(tool_info, list) else []):
+                                # Support both ToolCallingRecord objects and plain dicts
+                                if hasattr(tc, 'args'):
+                                    args = tc.args  # ToolCallingRecord.args is already a dict
+                                elif isinstance(tc, dict):
+                                    args = tc.get('arguments', tc.get('args', {}))
+                                else:
+                                    args = {}
+                                if isinstance(args, dict):
+                                    action_target_id = args.get('post_id') or args.get('user_id') or args.get('comment_id')
+                                    break
+                        # Fallback: parse content for @mentions or post references
+                        if not action_target_id:
+                            import re as _re
+                            # look for @agent_N pattern in content
+                            mention = _re.search(r'@(agent_\d+)', content, _re.I)
+                            if mention:
+                                action_target_id = mention.group(1)
+
+
 
                         local_logger.log_action(
                             agent_id=agent_id,
@@ -712,10 +1151,20 @@ async def RunOASISSimulation(
                             action_type=action_type,
                             content=content,
                             timestep=t,
+                            metadata={
+                                "target_id": str(action_target_id) if action_target_id else None,
+                                "confidence": abs(gm_signal.get("intensity", 0.5)),
+                                "signal_type": gm_signal.get("type", "neutral"),
+                                # G6: full signal detail for UI forensics
+                                "all_signals": gm_signal.get("all_signals", []),
+                                "signal_factors": gm_signal.get("factors", []),
+                                "signal_quote": gm_signal.get("quote", ""),
+                                "raw_intensity": gm_signal.get("intensity", 0.0),
+                            }
                         )
                         
                         if HINDSIGHT_AVAILABLE and memory_manager:
-                            await memory_manager.extract_and_retain(
+                            await memory_manager.structured_retain(
                                 str(agent_id), agent_name, action_type, content, t
                             )
                             logger.info(f"    💾 Hindsight retained action for {agent_name}")
@@ -729,15 +1178,73 @@ async def RunOASISSimulation(
                         break
 
                     except Exception as e:
-                        if attempt < max_retries - 1:
+                        err_str = str(e)
+                        # ── 429-aware backoff: respect retry_delay from API ──
+                        import re as _re_retry
+                        retry_match = _re_retry.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)', err_str)
+                        if retry_match:
+                            suggested_wait = float(retry_match.group(1)) + 2.0
+                            logger.warning(f"  ⏳ 429 rate-limit: waiting {suggested_wait:.0f}s (API-suggested) "
+                                           f"before retry {attempt+1}/{max_retries} for {agent_name}")
+                            await asyncio.sleep(suggested_wait)
+                            backoff = max(backoff, suggested_wait)  # don't go below API suggestion
+                        elif attempt < max_retries - 1:
+                            logger.warning(f"  ↩️  Retry {attempt+1}/{max_retries} for {agent_name} "
+                                           f"in {backoff:.0f}s — {err_str[:120]}")
                             await asyncio.sleep(backoff)
-                            backoff = min(60.0, backoff * 1.5)
+                            backoff = min(120.0, backoff * 1.6)
                         else:
                             logger.error(f"Agent {agent_name} failed after {max_retries} attempts: {e}")
 
             # Execute all agents concurrently using the defined semaphore
             tasks = [process_agent(idx, agent) for idx, agent in enumerate(social_agents)]
             await asyncio.gather(*tasks)
+
+            # ── GM → Platform Feedback (post-step, deadlock-free) ──────────────
+            # Direct platform_obj method calls — identical pattern to seed posts
+            # at line 559/568. NO channel interaction. SQLite single-writer.
+            # HIGH_RISK agents' negative engagement is written back so the RecSys
+            # recalibrates what content they receive in the NEXT timestep.
+            #
+            # Proof of deadlock safety:
+            #   platform_obj.dislike_post() / update_rec_table() are plain async
+            #   methods that do SQLite writes and return. They do NOT call
+            #   channel.send_to() or channel.receive_from(). The channel is only
+            #   used by SocialAgent internally when it executes its own actions.
+            #   We have never been in the channel path here — this is the same
+            #   orchestrator context that calls platform_obj.create_post() for seeds.
+            _high_risk_ids = [
+                int(j.agent_id) for j in decision_journals.values()
+                if j.frustration > 0.75
+            ]
+            if _high_risk_ids:
+                # Fetch the posts currently in the platform to find recent hot posts
+                # that HIGH_RISK agents should signal negative engagement on.
+                # We use post_ids visible in the current refresh window.
+                _gm_fb_errors = 0
+                for _hr_id in _high_risk_ids:
+                    try:
+                        _refresh = await platform_obj.refresh(agent_id=_hr_id)
+                        if _refresh.get("success") and _refresh.get("posts"):
+                            # Dislike the first post in their feed — signals to RecSys
+                            # that this agent is negatively engaged with current content.
+                            _first_post_id = _refresh["posts"][0].get("post_id")
+                            if _first_post_id is not None:
+                                await platform_obj.dislike_post(
+                                    agent_id=_hr_id, post_id=int(_first_post_id)
+                                )
+                    except Exception as _fb_err:
+                        _gm_fb_errors += 1
+                        logger.debug(f"GM→Platform feedback skipped for agent {_hr_id}: {_fb_err}")
+                if _high_risk_ids:
+                    logger.info(
+                        f"    📡 GM→Platform: {len(_high_risk_ids)} HIGH_RISK agents "
+                        f"wrote negative engagement signal (errors={_gm_fb_errors})"
+                    )
+
+            # Refresh RecSys after GM feedback so next timestep's content feed
+            # reflects updated engagement signals. Called once per timestep.
+            await platform_obj.update_rec_table()
 
             if HINDSIGHT_AVAILABLE and memory_manager:
                 await memory_manager.synthesize_post_timestep(timestep=t)
@@ -748,9 +1255,113 @@ async def RunOASISSimulation(
             # ── Time-series accumulation ──
             journals_list = list(decision_journals.values())
             if journals_list:
-                ts_satisfaction.append(round(sum(j.satisfaction for j in journals_list) / len(journals_list), 3))
-                ts_frustration.append(round(sum(j.frustration for j in journals_list) / len(journals_list), 3))
-                ts_trust.append(round(sum(j.trust for j in journals_list) / len(journals_list), 3))
+                avg_sat = round(sum(j.satisfaction for j in journals_list) / len(journals_list), 3)
+                avg_fru = round(sum(j.frustration for j in journals_list) / len(journals_list), 3)
+                avg_tru = round(sum(j.trust for j in journals_list) / len(journals_list), 3)
+                ts_satisfaction.append(avg_sat)
+                ts_frustration.append(avg_fru)
+                ts_trust.append(avg_tru)
+                # Emit live progress event to the JSONL stream → WebSocket → frontend
+                local_logger.log_simulation_event("progress", {
+                    "timestep": t,
+                    "total": config.num_timesteps,
+                    "percent": round((t + 1) / config.num_timesteps * 100, 1),
+                    "satisfaction": avg_sat,
+                    "frustration": avg_fru,
+                    "trust": avg_tru,
+                })
+
+        # =================================================================
+        # PHASE 2: FOCUS GROUP (Post-Simulation Interview)
+        # =================================================================
+        if getattr(config, 'enable_interview_phase', False):
+            logger.info("\n" + "═" * 60)
+            logger.info("🎤 PHASE 2: FOCUS GROUP INTERVIEWS")
+            logger.info("═" * 60)
+            
+            # Stratified Sampling: Group by GM signal (frustration vs satisfaction)
+            sample_size = min(getattr(config, 'interview_sample_size', 30), len(active_profiles))
+            
+            # Sort agents by highest frustration and highest satisfaction to get a diverse mix
+            sorted_by_sat = sorted(decision_journals.values(), key=lambda j: j.satisfaction, reverse=True)
+            sorted_by_fru = sorted(decision_journals.values(), key=lambda j: j.frustration, reverse=True)
+            
+            # We want an even mix of champions, detractors, and random lurkers
+            sampled_ids = set()
+            for i in range(sample_size // 3):
+                if i < len(sorted_by_sat): sampled_ids.add(sorted_by_sat[i].agent_id)
+                if i < len(sorted_by_fru): sampled_ids.add(sorted_by_fru[i].agent_id)
+            
+            # Fill the rest randomly — Fix #10: use random.sample from remaining
+            # set so we never re-pick an already-sampled ID (prevents infinite loop)
+            all_aids = [a.agent_id for a in decision_journals.values()]
+            remaining = [aid for aid in all_aids if aid not in sampled_ids]
+            if remaining:
+                need = min(sample_size - len(sampled_ids), len(remaining))
+                sampled_ids.update(random.sample(remaining, need))
+                
+            logger.info(f"Selected {len(sampled_ids)} agents for Focus Group.")
+            
+            interview_transcripts = {}
+            for aid in sampled_ids:
+                # Fix #11: reuse the O(1) dict built at init
+                agent = agent_id_to_agent.get(aid)
+                if not agent: continue
+                
+                transcript = ""
+                for q in getattr(config, 'interview_prompts', []):
+                    resp = await _interview(agent, q)
+                    transcript += f"Q: {q}\nA: {resp['content']}\n\n"
+                    
+                interview_transcripts[aid] = transcript
+                local_logger.log_action(
+                    agent_id=aid,
+                    agent_name=agent_id_to_name.get(aid, "Unknown"),
+                    action_type="FOCUS_GROUP",
+                    content=transcript,
+                    timestep=config.num_timesteps,
+                    metadata={"type": "focus_group"}
+                )
+
+            # Process extractions
+            all_metrics = []
+            for aid, transcript in interview_transcripts.items():
+                profile = next((p for p in active_profiles if str(p.agent_id) == aid), None)
+                if profile:
+                    metrics = await extract_business_metrics(profile, transcript)
+                    metrics["agent_id"] = aid
+                    metrics["agent_name"] = agent_id_to_name.get(aid, "Unknown")
+                    all_metrics.append(metrics)
+                    
+            if all_metrics:
+                # Aggregate Focus Group Insights
+                # Fix #3: extraction.py outputs willingness_to_pay_usd_monthly,
+                # not willingness_to_pay_usd — key mismatch caused avg_wtp = $0 always
+                valid_wtp = [m["willingness_to_pay_usd_monthly"] for m in all_metrics if m.get("willingness_to_pay_usd_monthly") is not None]
+                avg_wtp = sum(valid_wtp) / len(valid_wtp) if valid_wtp else 0.0
+                avg_intent = sum(m.get("adoption_intent", 0.0) for m in all_metrics) / len(all_metrics)
+                avg_churn_delta = sum(m.get("churn_risk_delta", 0.0) for m in all_metrics) / len(all_metrics)
+                objections = [m["primary_objection"] for m in all_metrics if m.get("primary_objection")]
+                
+                series.focus_group_insights = {
+                    "average_wtp_usd": round(avg_wtp, 2),
+                    "stated_adoption_intent_pct": round(avg_intent * 100, 1),
+                    "churn_risk_delta": round(avg_churn_delta, 3),
+                    "primary_objections": list(set(objections))[:5] # Top 5 unique
+                }
+                logger.info(f"📊 Focus Group Results: WTP=${avg_wtp:.2f}, Intent={avg_intent:.2f}, ChurnDelta={avg_churn_delta:.2f}")
+                # G2: Emit full per-agent focus group records (WTP, competitor, barriers, quotes)
+                local_logger.log_simulation_event("focus_group_results", {
+                    "simulation_id": config.simulation_name,
+                    "participants": len(all_metrics),
+                    "metrics": all_metrics,
+                    "aggregate": {
+                        "avg_wtp_usd": round(avg_wtp, 2),
+                        "adoption_intent_pct": round(avg_intent * 100, 1),
+                        "churn_risk_delta": round(avg_churn_delta, 3),
+                        "top_objections": list(set(objections))[:5],
+                    },
+                })
 
         # =================================================================
         # POST-SIMULATION: Prediction Report Generation
@@ -764,76 +1375,81 @@ async def RunOASISSimulation(
         n = len(all_journals) or 1
         feature_title = getattr(feature, 'title', 'Behavioral Simulation') if feature else 'Behavioral Simulation'
 
-        # ── Propagate states to shadow agents (must happen before metrics) ──
+        # Propagate states to shadow agents (must happen before metrics)
         sampler.propagate_states(decision_journals)
         extrapolated = sampler.build_extrapolated_report(decision_journals)
+        # G3: Emit population-scale statistics with confidence intervals
+        local_logger.log_simulation_event("population_stats", {
+            "simulation_id": config.simulation_name,
+            **extrapolated,
+        })
         
-        # Combine active + shadow for full declared-population metrics
-        shadow_journals_proxy = sampler.shadow_agents
-        all_frusts = ([j.frustration for j in all_journals]
-                      + [s.frustration for s in shadow_journals_proxy])
-        all_sats   = ([j.satisfaction for j in all_journals]
-                      + [s.satisfaction for s in shadow_journals_proxy])
-        all_advs   = ([j.advocacy   for j in all_journals]
-                      + [s.advocacy   for s in shadow_journals_proxy])
-        declared_n = len(all_frusts) or 1
-
-        # Override with population-scale values
-        high_risk  = sum(1 for f in all_frusts if f > 0.6) / declared_n
-        low_risk   = sum(1 for s in all_sats   if s > 0.6) / declared_n
-        moderate   = max(0.0, 1.0 - high_risk - low_risk)
-        risk_dist  = {"HIGH_RISK": round(high_risk, 2),
-                      "MODERATE":  round(moderate,  2),
-                      "LOW_RISK":  round(low_risk,  2)}
-        promoters  = sum(1 for a in all_advs   if a > 0.6) / declared_n
-        nps        = round((promoters - high_risk) * 100, 1)
-        n          = declared_n
-
-        # Churn velocity & adoption momentum
-        churn_vel = round((ts_frustration[-1] - ts_frustration[0]) / max(len(ts_frustration), 1), 3) if ts_frustration else 0.0
-        adopt_mom = round((ts_satisfaction[-1] - ts_satisfaction[0]) / max(len(ts_satisfaction), 1), 3) if ts_satisfaction else 0.0
-
-        # Top risk factors (from signal types)
-        all_signal_types = [s["type"] for j in all_journals for s in j.signals if s["type"] != "neutral"]
-        factor_counts = _Counter(all_signal_types)
-        total_signals = sum(factor_counts.values()) or 1
-        top_factors = [{"factor": f, "frequency": round(c / total_signals, 2)} for f, c in factor_counts.most_common(8)]
-
-        # Decision events
-        all_decisions = [d for j in all_journals for d in j.decisions]
-
-        # Dynamic segment discovery via clustering
-        segments = []
-        try:
-            from .clustering import ClusterOnBehavioralState
-            segments = await ClusterOnBehavioralState(all_journals)
-        except Exception as e:
-            logger.warning(f"Behavioral clustering failed: {e}")
+        # Pull focus group data if available
+        fg_insights = getattr(series, 'focus_group_insights', {})
 
         # Build PredictionReport
         report = PredictionReport(
             simulation_id=config.simulation_name,
             feature_title=feature_title,
-            population_size=n,
+            population_size=extrapolated.get("population_size", n),
             timesteps_completed=len(series.timesteps),
-            segments=segments,
-            risk_distribution=risk_dist,
+            segments=extrapolated.get("segments", []),
+            risk_distribution=extrapolated.get("risk_distribution", {}),
             satisfaction_curve=ts_satisfaction,
             frustration_curve=ts_frustration,
             trust_curve=ts_trust,
-            net_promoter_score=nps,
-            churn_velocity=churn_vel,
-            adoption_momentum=adopt_mom,
-            decision_events=all_decisions,
-            top_risk_factors=top_factors,
-            agent_journals=[j.to_dict() for j in all_journals],
+            net_promoter_score=extrapolated.get("net_promoter_score", 0.0),
+            churn_velocity=extrapolated.get("churn_velocity", 0.0),
+            adoption_momentum=extrapolated.get("adoption_momentum", 0.0),
+            decision_events=extrapolated.get("decision_events", []),
+            top_risk_factors=extrapolated.get("top_risk_factors", []),
+            focus_group_insights=fg_insights,
+            agent_journals=[j.__dict__ for j in all_journals],
         )
+        # G1: Emit per-agent journal states — the richest signal in the system
+        # Each journal contains satisfaction/frustration/trust/urgency/advocacy,
+        # all GM decision events, and the full signal timeline.
+        local_logger.log_simulation_event("agent_journals", {
+            "simulation_id": config.simulation_name,
+            "count": len(all_journals),
+            "journals": [j.to_dict() if hasattr(j, 'to_dict') else j.__dict__ for j in all_journals],
+        })
 
-        # ── Propagate states to shadow agents ──
-        sampler.propagate_states(decision_journals)
-        extrapolated = sampler.build_extrapolated_report(decision_journals)
-        
-        # Combine active + shadow for full population metrics
+        # ── Executive Summary (VP-ready narrative, LLM-generated) ──
+        try:
+            import json as _json
+            _exec_data = _json.dumps({
+                "feature": feature_title,
+                "nps": round(report.net_promoter_score, 1),
+                "churn_velocity": round(report.churn_velocity, 3),
+                "adoption_momentum": round(report.adoption_momentum, 3),
+                "risk_distribution": report.risk_distribution,
+                "top_risk_factors": report.top_risk_factors[:5],
+                "segments": report.segments[:5],
+                "focus_group_insights": report.focus_group_insights,
+                "decision_events": report.decision_events[:5],
+            }, default=str)
+            _exec_agent = ChatAgent(
+                system_message=BaseMessage.make_assistant_message(
+                    role_name="System", content=_EXEC_SUMMARY_SYSTEM
+                ),
+                model=model,
+            )
+            _exec_resp = await asyncio.wait_for(
+                _exec_agent.astep(
+                    BaseMessage.make_user_message(role_name="Analyst", content=_exec_data)
+                ),
+                timeout=60.0,
+            )
+            report.executive_summary = _exec_resp.msgs[0].content if _exec_resp.msgs else ""
+            logger.info("📝 Executive summary generated.")
+        except Exception as _e:
+            logger.warning(f"Executive summary generation skipped: {_e}")
+
+
+
+        declared_n = extrapolated.get("population_size", n)
+        shadow_journals_proxy = sampler.shadow_agents
 
         # ── Output 1: Log ──
         print("\n" + "═" * 60)

@@ -468,6 +468,7 @@ class AG2DebateEngine:
                 "api_key": gemini_key,
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
                 "api_type": "openai",
+                "max_retries": 5,
             }
         elif is_groq_model and groq_key:
             config = {
@@ -475,11 +476,13 @@ class AG2DebateEngine:
                 "api_key": groq_key,
                 "base_url": "https://api.groq.com/openai/v1",
                 "api_type": "openai",
+                "max_retries": 5,
             }
         else:
             config = {
                 "model": model_name,
                 "api_key": openai_key or "",
+                "max_retries": 5,
             }
 
         self.primary_config = {"config_list": [config], "timeout": 120}
@@ -741,6 +744,8 @@ class AG2DebateEngine:
                     return retriever
                 elif last_speaker == retriever:
                     return critic
+                elif getattr(last_speaker, 'name', '') == "Discovery_Initiator":
+                    return planner
                 elif last_speaker == critic:
                     if "[CRITIC_APPROVED]" in last_msg:
                         return synthesizer
@@ -894,42 +899,42 @@ class AG2DebateEngine:
                 self.debate_fsm.advance(override=DebateState.VOTE)
             return "CHAIRMAN OVERRIDE: Advancing debate immediately to the VOTE state."
 
-        # v3.0: Hindsight-grounded evidence tools for debate agents
-        _session_ref = getattr(self, '_session', None)
+        # v3.0: WorldDataBank-grounded evidence tools for debate agents
+        _world_bank_ref = getattr(self, '_world_bank', None)
 
         def query_customer_data(query: str) -> str:
-            """Query raw customer interviews and usage data from Hindsight for evidence-based arguments. Use this to cite specific customer quotes and pain points."""
-            if _session_ref:
+            """Query raw customer interviews and usage data from the WorldRAGEngine for evidence-based arguments. Use this to cite specific customer quotes and pain points."""
+            if _world_bank_ref:
                 try:
                     import asyncio
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         from concurrent.futures import ThreadPoolExecutor
                         with ThreadPoolExecutor(max_workers=1) as executor:
-                            result = executor.submit(asyncio.run, _session_ref.recall("world", query)).result()
+                            result = executor.submit(asyncio.run, _world_bank_ref.recall("world", query)).result()
                     else:
-                        result = loop.run_until_complete(_session_ref.recall("world", query))
+                        result = loop.run_until_complete(_world_bank_ref.recall("world", query))
                     return str(result)[:2000] if result else "No customer data found for this query."
                 except Exception as e:
                     return f"Customer data query failed: {e}"
-            return "Customer data not available — no Hindsight session connected."
+            return "Customer data not available — no WorldDataBank connected."
 
         def query_simulation(query: str) -> str:
             """Query behavioral simulation results from OASIS — what simulated users said about their needs and product usage patterns."""
-            if _session_ref:
+            if _world_bank_ref:
                 try:
                     import asyncio
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         from concurrent.futures import ThreadPoolExecutor
                         with ThreadPoolExecutor(max_workers=1) as executor:
-                            result = executor.submit(asyncio.run, _session_ref.recall("simulation", query)).result()
+                            result = executor.submit(asyncio.run, _world_bank_ref.recall("simulation", query)).result()
                     else:
-                        result = loop.run_until_complete(_session_ref.recall("simulation", query))
+                        result = loop.run_until_complete(_world_bank_ref.recall("simulation", query))
                     return str(result)[:2000] if result else "No simulation data found for this query."
                 except Exception as e:
                     return f"Simulation query failed: {e}"
-            return "Simulation data not available — no Hindsight session connected."
+            return "Simulation data not available — no WorldDataBank connected."
 
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
         tools["run_multi_agent_discovery"] = run_multi_agent_discovery
@@ -987,12 +992,15 @@ class AG2DebateEngine:
         gates_summary: Any = None,  # v3.0: gates removed, kept for backward compat
         simulation_results: Any = None,  # MarketSentimentSeries from OASIS
         session: Any = None,  # HindsightSessionManager for cross-layer data access
+        world_bank: Any = None,  # WorldDataBank facade for pipeline evidence retrieval
+        pipeline_jsonl: Any = None,
     ) -> ConsensusResult:
         """Run the comprehensive high-reasoning debate."""
         logger.info(f"AG2 Layer 6: Starting debate with {len(personas)} stakeholders.")
         self.feature = feature
         self.graph = graph
-        self._session = session  # v3.0: Hindsight session for cross-layer data
+        self._session = session  # v3.0: Hindsight session for agent memory
+        self._world_bank = world_bank  # v3.0: WorldDataBank for document retrieval
         self._simulation_results = simulation_results  # v3.0: OASIS behavioral data
             
         # Refinement: OpenTelemetry Tracing enablement
@@ -1085,42 +1093,137 @@ class AG2DebateEngine:
                 logger.warning(f'Anti-sycophancy logit_bias injection failed: {e} — using base config')
                 return base_config
 
+        # ═══════════════════════════════════════════════════════════════════
+        # V31: PROMPT-ENGINEERED BOARDROOM PERSONA SYSTEM
+        # Architecture: XML-tagged context buckets (per context-management.md)
+        # Pattern: Few-Shot + Constitutional CoT (per prompt-patterns.md)
+        # Anti-degradation: Critical rules at START and END (primacy+recency)
+        # ═══════════════════════════════════════════════════════════════════
+
+        # Role-specific evidence hierarchies — what counts as "proof" for each domain
+        ROLE_EVIDENCE_HIERARCHIES = {
+            'cto': 'Architecture diagrams, latency benchmarks (ms), MTTR data, load test results, dependency audits. Opinions without benchmarks are inadmissible.',
+            'cfo': 'P&L projections, burn rate calculations, CAC/LTV ratios, runway models, IRR/NPV analysis. Round numbers without a model behind them are inadmissible.',
+            'ciso': 'CVE IDs, CVSS scores, penetration test reports, compliance frameworks (SOC2/HIPAA/GDPR citations), threat models. "It might be risky" is inadmissible.',
+            'cpo': 'NPS scores, user interview quotes, funnel metrics (DAU/MAU, activation rate, churn %), A/B test results, cohort analysis. "Users want this" without data is inadmissible.',
+            'ceo': 'TAM/SAM/SOM estimates, board directives, competitive intelligence, revenue run-rate, strategic OKRs. Vision statements without market sizing are inadmissible.',
+            'legal': 'Statute citations, case law precedents, regulatory filings, compliance checklists, liability exposure estimates. "We could get sued" without specifics is inadmissible.',
+            'sales': 'Pipeline data, win/loss ratios, customer quotes from deals, competitive displacement evidence, quota impact analysis. "Customers are asking for this" without names is inadmissible.',
+        }
+
+        # Role-specific speech patterns — how each executive actually talks
+        ROLE_SPEECH_PATTERNS = {
+            'cto': 'You think in systems and failure modes. You draw architecture on whiteboards. You say things like "That breaks at scale because..." and "The dependency chain here is..."',
+            'cfo': 'You think in spreadsheets and scenarios. Every proposal is a cash flow model to you. You say things like "Walk me through the unit economics on that" and "What does the sensitivity analysis show?"',
+            'ciso': 'You think in attack surfaces and threat vectors. You see every feature as a potential breach. You say things like "What is the blast radius if this is compromised?" and "Show me the threat model."',
+            'cpo': 'You think in user journeys and activation funnels. You champion the customer. You say things like "What does the user actually experience?" and "Our cohort data shows..."',
+            'ceo': 'You think in strategic bets and board narratives. You balance all perspectives. You say things like "How does this move the needle on our Q3 objective?" and "What is the opportunity cost of NOT doing this?"',
+            'legal': 'You think in risk exposure and regulatory frameworks. You say things like "Under GDPR Article 17, this creates a right-to-deletion obligation that..." and "The liability exposure here is..."',
+            'sales': 'You think in pipeline impact and competitive positioning. You say things like "I have three enterprise deals where this is a blocker" and "Our win rate against [competitor] drops when we lack..."',
+        }
+
+        # ── Role classification maps (built ONCE, used per-persona) ──────────
+        # ROLE_ALIAS_MAP: matches any real-world title variant to a canonical role key.
+        # Handles "VP of Engineering", "Head of Product", "General Counsel", etc.
+        # ADR rationale: keeps matching logic in one place; adding a new title variant
+        # requires editing only this dict, not the per-persona loop.
+        ROLE_ALIAS_MAP = {
+            'cto':   ['cto', 'tech', 'engineering', 'vp eng', 'head of eng', 'vp of eng'],
+            'cfo':   ['cfo', 'finance', 'financial', 'treasurer', 'vp finance', 'vp of finance'],
+            'ciso':  ['ciso', 'security', 'infosec', 'cyber', 'compliance officer', 'vp security'],
+            'cpo':   ['cpo', 'product', 'head of product', 'vp product', 'vp of product'],
+            'ceo':   ['ceo', 'chief exec', 'president', 'founder', 'managing director', 'md'],
+            'legal': ['legal', 'counsel', 'general counsel', 'attorney', 'compliance', 'glo', 'clco'],
+            'sales': ['sales', 'revenue', 'crm', 'account', 'gtm', 'vp sales', 'head of sales'],
+            'data':  ['data', 'analytics', 'ml', 'ai', 'scientist', 'bi', 'chief data'],
+            'ops':   ['operations', 'ops', 'coo', 'chief operating', 'infrastructure', 'platform'],
+        }
+
         for persona in personas:
-            # Primary Agent — embed the EXACT feature being debated so agents stay on topic
+            # Determine the role key for domain-specific injection
+            role_lower = persona.role.lower()
+            role_key = persona.role_short.lower() if hasattr(persona, 'role_short') else ''
+            evidence_hierarchy = ''
+            speech_pattern = ''
+            # Resolve canonical role key via alias map (built once above the loop)
+            for rk, aliases in ROLE_ALIAS_MAP.items():
+                if any(alias in role_lower for alias in aliases) or rk in role_key:
+                    evidence_hierarchy = ROLE_EVIDENCE_HIERARCHIES.get(rk, '')
+                    speech_pattern = ROLE_SPEECH_PATTERNS.get(rk, '')
+                    break
+
+            competitors_str = ', '.join([str(c) for c in getattr(company, 'competitors', []) or []][:3])  # pyre-ignore
+            priorities_str = ', '.join([str(p) for p in getattr(company, 'current_priorities', []) or []][:2])  # pyre-ignore
+
+            # V31-Fix1: Build peer roster so agents know who they are debating against by name
+            peer_roster = "\n".join([
+                f"  - {p.name.replace('_', ' ')} ({p.role})"
+                for p in personas if p.name != persona.name
+            ])
+            first_name = persona.name.split('_')[0]  # Extract first name for natural address
+
+            # ── V31: Structured System Prompt (XML-tagged context buckets) ──
             public_msg = (
-                f"You are {persona.name}, the {persona.role} at {company.company_name}. "
-                f"Your profile: {persona.psychological_profile.full_profile_text}. "
-                f"\n\nTHE FEATURE UNDER DEBATE TODAY IS: '{feature.title}'\n"
-                f"DESCRIPTION: {feature.description}\n"
-                f"COMPANY CONTEXT: {company.company_name} — Competitors: {', '.join([str(c) for c in getattr(company, 'competitors', []) or []][:3])}. " # pyre-ignore
-                f"Budget: {company.budget}. Priorities: {', '.join([str(p) for p in getattr(company, 'current_priorities', []) or []][:2])}.\n\n" # pyre-ignore
-                "You must debate ONLY this feature. Do NOT invent alternative scenarios. "
-                "You are an Intelligent Executive with Strategic Autonomy. Do not wait for permission to research. "
-                "If your logic detects an information vacuum, execute your tools recursively until the vacuum is filled. "
-                "You dictate your own strategic path. "
-                "Before finalizing a stance, evaluate 3 alternative consequences (Tree of Thoughts). "
-                "REALISM: You are in a BOARDROOM. Do NOT introduce yourself or your role. Do NOT say 'I am {persona.name}'. "
-                "Do NOT use technical headers or internal 'thoughts' in your final output. Speak as a professional human executive. "
-                "CRITICAL 1: There is a BOARDROOM AGENDA tracking this debate. A Background Synthesizer will automatically monitor your consensus and update the Task Ledger. "
-                "CRITICAL 2: You MUST formalize your conclusion by invoking the `submit_tension_vector` tool representing your vote! "
-                "If the Critic rejects your confidence score as < 0.7 after 3 rounds, you MUST set `is_high_risk` to True in your payload. "
-                "CRITICAL 3 (SEARCH-FIRST): You have NO internal knowledge of user feedback or simulation results. You MUST call `query_simulation` to retrieve actual social market simulation data before making any factual assertions about user sentiment, NPS, or adoption risk! "
-                "CRITICAL 4 (CONFIDENCE DECAY): If 3 consecutive searches fail to find a direct answer, do NOT keep searching. Fallback to 'General Principles' reasoning and explicitly set `is_low_information=True` in your final vote.\n\n"
-                "[V28 NO-REHASH RULE] You have already READ the feature brief. DO NOT restate its contents, numbers, or architecture. "
-                "Every sentence you speak MUST contain NEW analysis, a NEW risk, a NEW number you computed, or a NEW solution "
-                "that was NOT in the original proposal. If you find yourself summarizing the brief, STOP and instead provide: "
-                "(a) a specific failure scenario with probability, (b) a quantitative estimate YOU derived, or "
-                "(c) a direct challenge to another executive's claim. Restating known facts is a SYSTEM VIOLATION.\n\n"
-                "[V28 EVIDENCE-DEMAND PROTOCOL] When ANY executive (including yourself) makes a quantitative claim "
-                "(e.g., '80% of cases are deterministic', '30-day deployment', '$X recovery'), you MUST either: "
-                "(a) Cite the data source (pilot results, industry benchmark, customer interview), OR "
-                "(b) Explicitly flag it as 'UNVALIDATED ASSUMPTION — requires [specific validation step].' "
-                "Accepting unvalidated numbers without challenge is a SYSTEM VIOLATION. Ask: 'Based on what data?'\n\n"
-                "[V28 SPECIFICITY MANDATE] Every proposal or agreement MUST include: "
-                "(a) A concrete deliverable with timeline (not 'TSD by Friday' but 'FHIR mapping spec for Epic v2024, 2 sprints'), "
-                "(b) A testable success metric (not 'it will work' but 'pilot 500 cases, measure % fully deterministic'), "
-                "(c) A failure threshold that triggers a pivot (not 'we hope' but 'if <60% deterministic, default to Tier 2'). "
-                "Philosophical agreements without specs are NOT boardroom decisions."
+                f"<identity>\n"
+                f"You are {persona.name.replace('_', ' ')}, {persona.role} at {company.company_name}.\n"
+                f"Psychology: {persona.psychological_profile.full_profile_text}\n"
+                f"{speech_pattern}\n"
+                f"You have been in this role for years. You do not introduce yourself. You do not explain your title. "
+                f"You walk into the room and speak with the authority of someone who owns their domain.\n\n"
+                f"YOUR COLLEAGUES IN THIS ROOM:\n{peer_roster}\n"
+                f"Address them by first name only (e.g., '{personas[1].name.split('_')[0] if len(personas) > 1 else 'them'}').\n"
+                f"</identity>\n\n"
+
+                f"<motion_on_the_floor>\n"
+                f"FEATURE: {feature.title}\n"
+                f"BRIEF: {feature.description}\n"
+                f"COMPANY: {company.company_name} | Competitors: {competitors_str} | Budget: {company.budget} | Priorities: {priorities_str}\n"
+                f"</motion_on_the_floor>\n\n"
+
+                f"<evidence_rules>\n"
+                f"YOUR ADMISSIBLE EVIDENCE: {evidence_hierarchy}\n"
+                f"CROSS-EXAMINATION RULE: When another executive makes a factual claim, you MUST ask 'Based on what data?' "
+                f"if they did not cite a source. Accepting unvalidated claims is a failure of your fiduciary duty.\n"
+                f"GROUNDING RULE: Before making any factual assertion about users, markets, or performance, call "
+                f"`query_simulation` or `query_customer_data` first. You have NO internal knowledge of these.\n"
+                f"ASSUMPTION TAGGING: If you cannot ground a claim, you MUST prefix it with [ASSUMPTION] and state "
+                f"the specific validation step needed. Example: '[ASSUMPTION — needs pilot data] I estimate 60% deterministic.'\n"
+                f"</evidence_rules>\n\n"
+
+                f"<speech_rules>\n"
+                f"FORMAT: 2-4 sentences per turn. Lead with your conclusion, then your evidence. Longer ONLY for data reports.\n"
+                f"ADDRESSING: Name the person you are responding to. 'I disagree with [Name] because...' not 'Some might argue...'\n"
+                f"NO REHASH: You have read the feature brief. Do NOT restate it. Every sentence must contain NEW analysis, "
+                f"a NEW risk, a NEW number you computed, or a direct challenge to another executive's specific claim.\n"
+                f"INTERRUPTION: If you hear an unvalidated claim, cut in immediately. Real executives do not wait politely.\n"
+                f"</speech_rules>\n\n"
+
+                # Issue 8 Fix: Feature-specific examples — prevent healthcare domain anchoring
+                f"<boardroom_examples>\n"
+                f"GOOD — these are the ONLY acceptable speech patterns in this room:\n"
+                f"  CFO: 'I ran the unit economics on {feature.title}: at $380K/month burn, this adds 5.2 months of "
+                f"runway consumption. We hit our debt covenant at month 11 if we approve this without a revenue offset model.'\n"
+                f"  CISO: 'Before we proceed — does {feature.title} expand our authentication surface? "
+                f"I need a threat model for the new permission scope before I sign off. That is not negotiable.'\n"
+                f"  CTO: '[First name], your timeline assumes all dependencies are ready. Name the three hardest integration "
+                f"blockers for {feature.title} and give me sprint counts, not weeks.'\n"
+                f"  CPO: 'Our cohort data shows the activation rate for similar features at {company.company_name} "
+                f"was 34% in the first 30 days. What is our target for {feature.title} and how do we measure it?'\n\n"
+                f"BAD — these responses are PROHIBITED and constitute a system violation:\n"
+                f"  'I agree, this is a great approach.' — NO. State WHY, cite data, or stay silent.\n"
+                f"  'This could potentially have some risks.' — NO. Name the risk, size it, demand an answer.\n"
+                f"  'As the proposal states, {feature.title} will...' — NO. The board read the brief. Add new information.\n"
+                f"</boardroom_examples>\n\n"
+
+                f"<procedure>\n"
+                f"AGENDA: A Background Synthesizer tracks task completion. You do not need to manage the agenda.\n"
+                f"VOTING: You MUST formalize your conclusion by calling `submit_tension_vector` with your vote.\n"
+                f"  - If your confidence stays below 0.7 after 3 rounds of debate, set `is_high_risk: true`.\n"
+                f"  - If 3 consecutive tool searches fail, set `is_low_information: true` and vote on first-principles.\n"
+                f"TOOLS: You have `query_simulation`, `query_customer_data`, `calculate_financials`, `run_pre_mortem_simulation`, "
+                f"and `run_multi_agent_discovery`. Use them proactively — do not wait for permission.\n"
+                f"TREE OF THOUGHTS: Before finalizing your stance, internally evaluate 3 alternative consequences.\n"
+                f"</procedure>"
             )
             
             # U6: Inject historical precedent memory
@@ -1137,7 +1240,10 @@ class AG2DebateEngine:
                     f"Reveal condition: {pkg.get('reveal_condition', '')}"
                 )
             
-            system_message = public_msg + private_suffix
+            system_message = (
+                f"[SYSTEM: YOU ARE {persona.name.upper()} ({persona.role.upper()})]\n"
+                f"Remain in character at all times. Do not slip into another persona's internal thought process.\n\n"
+            ) + public_msg + private_suffix
             
             agent_config = build_anti_sycophancy_config(
                 structured_llm_config,
@@ -1169,17 +1275,18 @@ class AG2DebateEngine:
                     f'Your personal objective this session:\n{private_goal}'
                 )
 
+            # V31: Consolidated constitutional constraints (placed at END for recency bias)
             system_message += (
-                "\n\n[SIMULATION INTEGRITY RULE: STRICT IN-CHARACTER ENFORCEMENT]\n"
-                "NEVER reference backend systems, Pydantic exceptions, bugs, or tool mechanism errors out loud. "
-                "If a tool call fails, silently correct your JSON parameters and re-submit, or state your opinion naturally. "
-                "Breaking the 4th wall or complaining about your 'backend/tools' is a FATAL SYSTEM VIOLATION.\n\n"
-                "[STRICT DOMAIN SILO ENFORCEMENT]\n"
-                f"You are the {persona.role}. You MUST evaluate all arguments and proposals STRICTLY through the lens of {persona.domain_expertise}. "
-                "DO NOT drift into generic commentary. For example, if you are the CFO, do not argue about UX friction—focus purely on burn rate and capitalization. "
-                "RIGOROUS ANALYSIS MANDATE: You MUST use specific domain KPIs (e.g., Latency in ms, MTTR, CAC, LTV, CVE scores) in your reasoning. "
-                "Vague claims like 'it might be risky' are system violations. Propose a specific 'Fatal Scenario' that justifies your stance."
-                "Defend your specific corporate silo against the other executives."
+                f"\n\n<constitutional_rules>\n"
+                f"DOMAIN SILO: You are the {persona.role}. Evaluate ONLY through {persona.domain_expertise}. "
+                f"If another domain is raised, defer: 'That is [Name]'s call, not mine.' Do not opine outside your lane.\n"
+                f"IN-CHARACTER: Never reference tools, backends, Pydantic, JSON errors, or system mechanics aloud. "
+                f"If a tool fails, silently retry or state your position naturally.\n"
+                f"SPECIFICITY: Every proposal must include (a) deliverable + timeline, (b) testable success metric, "
+                f"(c) failure threshold that triggers a pivot. Philosophical agreements are not decisions.\n"
+                f"CONCISION REMINDER: 2-4 sentences. Conclusion first, evidence second. Name who you are addressing.\n"
+                f"</constitutional_rules>\n\n"
+                f"[IDENTITY ANCHOR: YOU ARE {persona.name.upper()} ({persona.role.upper()}). You are NOT anyone else.]"
             )
 
             # U16: Reasoning-First Mode Injection
@@ -1237,13 +1344,29 @@ class AG2DebateEngine:
         # ═══════════════════════════════════════════════════════════════════
 
 
-        # 3. Setup Red Team Agent
+        # 3. V31: Red Team Agent (Adversarial Few-Shot Pattern)
         red_team_sys = (
-            "You are the RedTeamAgent. Your singular goal is to aggressively stress-test the board's "
-            "preliminary consensus. You must find the worst-case scenario that destroys the company if this feature is shipped. "
-            "Propose a fatal flaw. The board gets 1 round (Mitigation Loop) to fix it. "
-            "REALISM: Speak like a high-level security consultant. Do NOT use headers like 'REDTEAM REPORT' or 'TARGET'. "
-            "Just speak your analysis directly into the room."
+            "<identity>\n"
+            "You are an external adversarial consultant retained by the board to stress-test this proposal. "
+            "You have no loyalty to anyone in this room. You are paid to find the failure mode that kills the company.\n"
+            "</identity>\n\n"
+            "<task>\n"
+            "Identify the single most catastrophic failure scenario if this feature ships as proposed. "
+            "The board gets ONE mitigation round to address your finding. If they cannot, you recommend REJECT.\n"
+            "</task>\n\n"
+            "<output_format>\n"
+            "Speak directly — no headers, no bullet formatting, no 'REPORT' labels. You are talking to executives.\n"
+            "Structure: (1) The failure mechanism in one sentence, (2) Probability estimate with basis, "
+            "(3) Blast radius — who/what gets destroyed, (4) The specific question the board must answer to proceed.\n"
+            "</output_format>\n\n"
+            "<examples>\n"
+            "GOOD: 'If the FHIR integration fails mid-deployment — which happens in roughly 40% of first-time Epic "
+            "integrations based on KLAS data — you have 200 clinicians locked out of their workflow with no fallback. "
+            "That is a patient safety incident and a front-page story. Before I sign off, I need to see the rollback "
+            "procedure and the manual override path.'\n\n"
+            "BAD: 'There are several potential risks with this approach that the team should consider carefully.' "
+            "— This is worthless. Name the risk, size it, and demand the answer.\n"
+            "</examples>"
         )
         red_team_agent = autogen.AssistantAgent(
             name="RedTeamAgent",
@@ -1252,11 +1375,23 @@ class AG2DebateEngine:
         )
         self._register_tools_to_agent(red_team_agent, self._create_tools())
         
-        # 4. Setup Debiaser Agent
+        # 4. V31: Debiaser Agent (Structured Output Pattern with parseable format)
         debiaser_sys = (
-            "You are the DebiaserAgent. You run Blind Analysis on the debate transcript. "
-            "Do not focus on who said what. Identify cognitive biases (e.g., Sunk Cost Fallacy, Groupthink, Recency Bias). "
-            "Output a Bias Report that forces agents to re-evaluate."
+            "<identity>\n"
+            "You are a cognitive bias auditor. You analyze the debate transcript for systematic reasoning errors.\n"
+            "</identity>\n\n"
+            "<task>\n"
+            "Scan the preceding debate turns. For each bias detected, output ONE line in this exact format:\n"
+            "BIAS: [bias_type] | AGENT: [agent_name] | STATEMENT: \"[exact quote]\" | CORRECTION: [what they should re-evaluate]\n\n"
+            "Bias types to detect: Anchoring, Sunk Cost Fallacy, Groupthink, Authority Bias, "
+            "Confirmation Bias, Availability Heuristic, Bandwagon Effect, Recency Bias.\n\n"
+            "If no bias is detected, output: NO_BIAS_DETECTED\n"
+            "Do NOT write paragraphs. Do NOT explain what biases are. Just flag them.\n"
+            "</task>\n\n"
+            "<examples>\n"
+            "BIAS: Anchoring | AGENT: Sarah_CFO | STATEMENT: \"The $2M number from last quarter's estimate\" | CORRECTION: Re-derive cost from current sprint velocity, not historical anchor.\n"
+            "BIAS: Groupthink | AGENT: Multiple | STATEMENT: \"We all agree this is the right direction\" | CORRECTION: No dissenting view has been voiced. Force a devil's advocate round.\n"
+            "</examples>"
         )
         debiaser_agent = autogen.AssistantAgent(
             name="DebiaserAgent",
@@ -1265,17 +1400,33 @@ class AG2DebateEngine:
         )
         self._register_tools_to_agent(debiaser_agent, self._create_tools())
 
-        # 4.5 Setup Boardroom Moderator (Strategist)
+        # 4.5 V31: Boardroom Chairman (Parliamentary Procedure + Volleyball Discussion Pattern)
         moderator_sys = (
-            "You are the Chairman of the Board. You facilitate an emergent, intelligent debate.\n"
-            "You do not rigidly block phases. Instead, you analyze the 'Contextual Delta' of the debate. "
-            "If the CTO raises a security risk, you immediately pivot and ask the CISO for a vulnerability assessment. "
-            "If the CPO proposes a costly feature, you demand a model from the CFO. "
-            "Force stakeholders to use their tools (`TavilySearchTool`, `calculate_financials`) proactively. "
-            "Interrupt any agent who becomes repetitive or sycophantic. Allow the most intelligent response to emerge. "
-            "CRITICAL ESCAPE HATCH (NON-GROUNDING): If agents are stuck in a loop because web search or facts cannot be found, "
-            "DO NOT wait indefinitely for grounding. Immediately force them to declare their results using logical deduction "
-            "and command them to invoke `submit_tension_vector` with the `is_low_information: true` flag. Ensure the debate ends."
+            "<identity>\n"
+            "You are the Chairman of the Board. You run this meeting under modified parliamentary procedure.\n"
+            "You are NOT a participant in the debate. You are the facilitator who ensures the room reaches a decision.\n"
+            "</identity>\n\n"
+            "<chairmanship_rules>\n"
+            "VOLLEYBALL, NOT TENNIS: Never let the debate bounce between only two people. After any exchange " 
+            "between two executives, you MUST call on a third person by name: '[Name], what is your read on this?'\n\n"
+            "DOMAIN ROUTING: When a topic enters someone's domain, route to them immediately:\n"
+            "  - Cost/budget claim → 'That is a financial question. [CFO name], run the numbers.'\n"
+            "  - Security concern → 'Hold that thought. [CISO name], is that a real threat vector?'\n"
+            "  - User impact claim → '[CPO name], what does the simulation data actually show?'\n\n"
+            "POINT OF ORDER: If an executive speaks outside their domain without data, call them out:\n"
+            "  '[Name], that is outside your lane. Unless you have data, defer to [domain owner].'\n\n"
+            "CUT REPETITION: If an agent repeats a point already made, interrupt: 'We have heard that. What is NEW?'\n\n"
+            "FORCE TOOLS: If an agent makes an ungrounded claim, demand they use their tools:\n"
+            "  '[Name], do not speculate. Run `calculate_financials` / `query_simulation` and give us the actual number.'\n\n"
+            "DEADLOCK BREAKER: If agents loop without resolution for 3+ turns, force the question:\n"
+            "  'We are going in circles. Each of you: state your final position in one sentence, then vote.'\n"
+            "  Command them to invoke `submit_tension_vector` with `is_low_information: true` if data is unavailable.\n"
+            "</chairmanship_rules>\n\n"
+            "<speech_rules>\n"
+            "You speak in 1-2 sentences. You direct, you do not opine. You name names.\n"
+            "GOOD: '[CFO name], those numbers do not add up. Run the sensitivity analysis before we proceed.'\n"
+            "BAD: 'Perhaps we should consider the financial implications more carefully.' — Too vague. Name the person, name the action.\n"
+            "</speech_rules>"
         )
         moderator_agent = autogen.AssistantAgent(
             name="Boardroom_Moderator",
@@ -1284,16 +1435,21 @@ class AG2DebateEngine:
         )
         self._register_tools_to_agent(moderator_agent, self._create_tools())
         
-        # 4.75 Setup Background Task Synthesizer
+        # 4.75 V31: Task Synthesizer (Strict Format Zero-Shot — parseable output only)
         synth_sys = (
-            "You are the silent Background Task Ledger process. You listen to the boardroom debate. "
-            "You must identify when a new sub-problem is mentioned and when a task is resolved or mitigated. "
-            "\n\nRULES:\n"
-            "1. If an executive identifies a missing research point or a requirement, output: ADD_MICRO_TASK: [Parent_ID] | [Task_ID] | [Description]. "
-            "2. If an executive provides data that satisfies an open task (e.g. running a financial tool for a financial task), or explicitly mentions a mitigation, output: RESOLVE_TASK: [Task_ID] | [Resolution Summary]. "
-            "3. If no update is needed, output: `NO_UPDATE`. "
-            "Parent Task IDs: T1 (Technical Feasibility), T2 (Financial Safety), T3 (Market Fit), T4 (Security, Legal). "
-            "Example: `RESOLVE_TASK: T2 | CFO calculated 120% budget utilization; project marked as financially unsustainable.`"
+            "You are a silent background process. You NEVER speak to the room. You ONLY output structured task updates.\n\n"
+            "OUTPUT FORMAT (one per line, exactly this syntax):\n"
+            "  ADD_MICRO_TASK: [Parent_ID] | [Task_ID] | [Description]\n"
+            "  RESOLVE_TASK: [Task_ID] | [Resolution Summary]\n"
+            "  NO_UPDATE\n\n"
+            "PARENT IDs: T1=Technical Feasibility, T2=Financial Safety, T3=Market Fit, T4=Security/Legal\n\n"
+            "TRIGGER RULES:\n"
+            "- ADD when an executive identifies a missing data point, dependency, or open question.\n"
+            "- RESOLVE when an executive provides data (tool result, calculation, citation) that closes an open task.\n"
+            "- NO_UPDATE if the message is debate/opinion without new task-relevant information.\n\n"
+            "EXAMPLE:\n"
+            "  ADD_MICRO_TASK: T2 | T2.3 | CFO needs sensitivity analysis on 3 burn rate scenarios\n"
+            "  RESOLVE_TASK: T2 | CFO ran calculate_financials: 120% budget utilization, project financially unsustainable"
         )
         task_synthesizer = autogen.AssistantAgent(
             name="TaskSynthesizer",
@@ -1341,10 +1497,17 @@ class AG2DebateEngine:
                         return messages
                     compressed = []
                     n_trim = len(messages) - 4
+                    # V31-Fix3: Expanded preserve signals — veto/block history must survive compression
+                    PRESERVE_SIGNALS = {
+                        "CONSTRAINT", "RISK", "PINNED", "IS_HIGH_RISK",
+                        "VETO", "BLOCK", "OPPOSE", "SUSTAIN", "ASSUMPTION",
+                        "HIGH_RISK", "REJECT", "AUDIT", "CVE", "COMPLIANCE"
+                    }
                     for msg in messages[:n_trim]: # pyre-ignore
                         content = str(msg.get("content", ""))
-                        if "CONSTRAINT" in content.upper() or "RISK" in content.upper() or "PINNED" in content.upper():
-                            compressed.append({**msg, "content": f"[COMPRESSED ENTITY PRESERVED] {content[:200]}..."})
+                        content_upper = content.upper()
+                        if any(sig in content_upper for sig in PRESERVE_SIGNALS):
+                            compressed.append({**msg, "content": f"[PRESERVED-SIGNAL] {content[:400]}..."})
                         else:
                             compressed.append({**msg, "content": "[COMPRESSED]"})
                     compressed.extend(messages[-4:]) # pyre-ignore
@@ -1516,6 +1679,7 @@ class AG2DebateEngine:
         # the FSM routes the next turn back to the veto-raiser for explicit re-evaluation.
         _unresolved_vetoes = {}  # {agent_name: veto_dimension}
         _veto_resolution_pending = [None]  # Name of veto-raiser awaiting resolution turn
+        _moderator_clean_sys = ['']  # Issue 6 Fix: mutable closure to save moderator sys before LAST CALL append
         
         def fsm_speaker_selector(last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
             messages = groupchat.messages
@@ -1539,18 +1703,59 @@ class AG2DebateEngine:
                         if isinstance(reply, dict):
                             reply = reply.get("content", "")
                         if isinstance(reply, str):
-                            if "ADD_MICRO_TASK:" in reply:
-                                parts = reply.split("ADD_MICRO_TASK:")[1].split("\n")[0].split("|")
-                                if len(parts) >= 3:
-                                    cog_ledger.internal_add_micro_task(parts[0].strip(), parts[1].strip(), parts[2].strip())
-                            if "RESOLVE_TASK:" in reply:
-                                parts = reply.split("RESOLVE_TASK:")[1].split("\n")[0].split("|")
-                                if len(parts) >= 2:
-                                    cog_ledger.internal_update_task(parts[0].strip(), "RESOLVED", parts[1].strip())
+                            # V31: Line-by-line parsing to handle multiple additions/resolutions robustly
+                            for line in reply.split("\n"):
+                                line = line.strip()
+                                if "ADD_MICRO_TASK:" in line:
+                                    parts = line.split("ADD_MICRO_TASK:")[1].split("|")
+                                    if len(parts) >= 3:
+                                        cog_ledger.internal_add_micro_task(parts[0].strip(), parts[1].strip(), parts[2].strip())
+                                        logger.info(f"Synthesizer ADDED task: {parts[1].strip()} -> {parts[2].strip()}")
+                                elif "RESOLVE_TASK:" in line:
+                                    parts = line.split("RESOLVE_TASK:")[1].split("|")
+                                    if len(parts) >= 2:
+                                        cog_ledger.internal_update_task(parts[0].strip(), "RESOLVED", parts[1].strip())
+                                        logger.info(f"Synthesizer RESOLVED task: {parts[0].strip()} -> {parts[1].strip()}")
                     except Exception as e:
-                        logger.debug(f"Async TaskSynthesizer exception: {e}")
+                        logger.error(f"Async TaskSynthesizer error: {e}", exc_info=True)
                 # Fire-and-forget: don't block speaker selection
                 _u22_bg_pool.submit(_async_synth_update, task_synthesizer, last_msg, self.cognitive_ledger)
+
+            # Issue 7 Fix: Debiaser output parser — feed BIAS: lines into blackboard_conflicts
+            # Previously the Debiaser fired and its structured output went nowhere actionable.
+            # Now each detected bias is written to the CognitiveLedger blackboard so the
+            # FSM speaker selector surfaces it in the next affected agent's system message.
+            if last_speaker == debiaser_agent and last_msg:
+                def _parse_debiaser_output(msg_text, cog_ledger):
+                    try:
+                        bias_count = 0
+                        for line in msg_text.split('\n'):
+                            line = line.strip()
+                            if not line.startswith('BIAS:'):
+                                continue
+                            parts = line.split('|')
+                            if len(parts) < 2:
+                                continue
+                            # Extract agent name from 'AGENT: SomeName' part
+                            agent_part = next((p for p in parts if 'AGENT:' in p.upper()), '')
+                            agent_name = agent_part.replace('AGENT:', '').replace('agent:', '').strip()
+                            # Build a short conflict label for the blackboard
+                            bias_type_part = parts[0].replace('BIAS:', '').strip()
+                            correction_part = next((p for p in parts if 'CORRECTION:' in p.upper()), '')
+                            correction = correction_part.replace('CORRECTION:', '').replace('correction:', '').strip()
+                            if agent_name:
+                                conflict_label = f"[DEBIASER] {bias_type_part}: {correction[:120]}"
+                                # blackboard_conflicts is a dict; overwrite or extend per agent
+                                existing = getattr(cog_ledger, 'blackboard_conflicts', {})
+                                existing[agent_name] = existing.get(agent_name, '') + f"\n{conflict_label}"
+                                cog_ledger.blackboard_conflicts = existing
+                                bias_count += 1
+                                logger.info(f"Debiaser flagged {agent_name} — {bias_type_part}")
+                        if bias_count:
+                            logger.info(f"{bias_count} bias signal(s) injected into blackboard_conflicts.")
+                    except Exception as e:
+                        logger.error(f"Debiaser parse error: {e}", exc_info=True)
+                _u22_bg_pool.submit(_parse_debiaser_output, last_msg, self.cognitive_ledger)
             
             # ── V25-Fix4: GRACEFUL ADJOURNMENT with "Last Call" window ──
             # At ADJOURNMENT_TURN_LIMIT, enter a 3-turn "Last Call" where the Moderator
@@ -1561,10 +1766,12 @@ class AG2DebateEngine:
                 turns_past_limit = _main_turn_counter[0] - ADJOURNMENT_TURN_LIMIT
                 
                 if turns_past_limit == 0:
-                    # First trigger: Moderator announces Last Call
-                    logger.info(f"V25-Fix4: LAST CALL announced at turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}")
+                    # Issue 6 Fix: Save the clean system message BEFORE appending LAST CALL.
+                    # Without this, [LAST CALL] persists for turns 41-45, corrupting chairmanship.
+                    _moderator_clean_sys[0] = moderator_agent.system_message
+                    logger.info(f"V31-Fix6: LAST CALL announced at turn {_main_turn_counter[0]}/{ADJOURNMENT_TURN_LIMIT}. Clean sys saved ({len(_moderator_clean_sys[0])} chars).")
                     moderator_agent.update_system_message(
-                        moderator_agent.system_message +
+                        _moderator_clean_sys[0] +
                         "\n\n[LAST CALL] The deliberation is nearing its limit. "
                         "Announce: 'The chair is calling LAST CALL. Each remaining executive has ONE final "
                         "turn to state their position or vote before adjournment.' "
@@ -1576,6 +1783,11 @@ class AG2DebateEngine:
                     return moderator_agent
                 
                 elif turns_past_limit < LAST_CALL_WINDOW:
+                    # Issue 6 Fix: Restore clean moderator sys-msg on the second tick (turn_past_limit==1).
+                    # The LAST CALL message was delivered on tick 0; restore normal chairmanship for ticks 1+.
+                    if turns_past_limit == 1 and _moderator_clean_sys[0]:
+                        moderator_agent.update_system_message(_moderator_clean_sys[0])
+                        logger.info("V31-Fix6: Moderator sys-msg restored to clean state after LAST CALL delivery.")
                     # Last Call window: route to agents who haven't spoken yet
                     silent_agents = [
                         a for a in groupchat.agents
@@ -1584,7 +1796,7 @@ class AG2DebateEngine:
                         and a != last_speaker
                     ]
                     if silent_agents:
-                        logger.info(f"V25-Fix4: Last Call routing to silent agent: {silent_agents[0].name}")
+                        logger.info(f"V31-Fix6: Last Call routing to silent agent: {silent_agents[0].name}")
                         return silent_agents[0]
                     # All have spoken — fall through to normal routing for one more round
                 
@@ -1603,13 +1815,20 @@ class AG2DebateEngine:
                                     f"{m.get('name', '?')}: {str(m.get('content', ''))[:200]}"
                                     for m in messages[-10:]  # Last 10 messages for context
                                 ])
+                                # V31: CoT-structured force-vote with evidence chain
                                 vote_prompt = (
-                                    f"You are {fa.name}. You just listened to a boardroom debate about the feature.\n\n"
-                                    f"DEBATE SUMMARY:\n{debate_text[:1200]}\n\n"
-                                    f"Provide your FINAL vote in this EXACT JSON format:\n"
-                                    f'{{"dimension": "<your primary concern>", "score": <0.1 to 0.9>, '
-                                    f'"confidence": <0.3 to 0.9>, "is_high_risk": <true/false>, '
-                                    f'"reasoning": "<one sentence>"}}'
+                                    f"<force_vote>\n"
+                                    f"You are {fa.name}. The chairman has called for an immediate vote.\n\n"
+                                    f"DEBATE TRANSCRIPT (last 10 turns):\n{debate_text[:1200]}\n\n"
+                                    f"Think step by step:\n"
+                                    f"1. What is the strongest argument FOR this feature from the debate?\n"
+                                    f"2. What is the strongest argument AGAINST?\n"
+                                    f"3. From YOUR domain, what is the decisive factor?\n\n"
+                                    f"Then output your vote as EXACT JSON (nothing else):\n"
+                                    f'{{"dimension": "<your primary domain concern>", "score": <0.1-0.9>, '
+                                    f'"confidence": <0.3-0.9>, "is_high_risk": <true/false>, '
+                                    f'"reasoning": "<one sentence citing specific evidence from debate>"}}\n'
+                                    f"</force_vote>"
                                 )
                                 reply = fa.generate_reply(messages=[{"role": "user", "content": vote_prompt}])
                                 if isinstance(reply, dict):
@@ -1858,18 +2077,46 @@ class AG2DebateEngine:
             # U5: Append assertiveness injection based on frustration level
             assertiveness = self.cognitive_ledger.get_assertiveness_injection(next_selected.name)
             
-            # --- FSM PROCEDURE STRICT ENFORCEMENT ---
+            # --- V31: FSM PROCEDURE ENFORCEMENT (Structured Phase Directives) ---
             fsm_override = ""
             if state.name == 'RESEARCH':
-                fsm_override = "\n\n[PROCEDURAL OVERRIDE: RESEARCH PHASE]\nDo NOT reach conclusions yet. Propose questions, gather facts, build context."
+                fsm_override = (
+                    "\n\n<phase_directive phase='RESEARCH'>\n"
+                    "You are in the RESEARCH phase. Do NOT state conclusions or vote.\n"
+                    "Your job: (1) Identify what data is missing, (2) Call tools to retrieve it, "
+                    "(3) Share what you found with the room. Example: 'I need the churn impact data. "
+                    "Let me run query_simulation.' Then share the result.\n"
+                    "</phase_directive>"
+                )
             elif state.name == 'CHALLENGE':
-                fsm_override = "\n\n[PROCEDURAL OVERRIDE: CHALLENGE PHASE]\nYou MUST aggressively attack the proposal. Find mathematical or logical flaws. DO NOT AGREE." + CONTRARIAN_MANDATE
+                fsm_override = (
+                    "\n\n<phase_directive phase='CHALLENGE'>\n"
+                    "You are in the CHALLENGE phase. Your job is to ATTACK the proposal.\n"
+                    "Find the mathematical or logical flaw. Name the specific assumption that is wrong "
+                    "and propose the failure scenario with probability and blast radius.\n"
+                    "Agreement is PROHIBITED in this phase. If you agree with the majority, identify "
+                    "the specific conditions under which this proposal would FAIL.\n"
+                    + CONTRARIAN_MANDATE +
+                    "</phase_directive>"
+                )
             elif state.name == 'MITIGATION':
-                fsm_override = "\n\n[PROCEDURAL OVERRIDE: MITIGATION PHASE]\nPropose strict boundaries, conditions, and SLA solutions to the flaws found."
+                fsm_override = (
+                    "\n\n<phase_directive phase='MITIGATION'>\n"
+                    "You are in the MITIGATION phase. For each flaw identified in CHALLENGE:\n"
+                    "(1) Propose a specific boundary, condition, or SLA. (2) Name who owns the mitigation. "
+                    "(3) Define the failure threshold that re-triggers escalation. No philosophical fixes "
+                    "— only measurable remediation with owners and deadlines.\n"
+                    "</phase_directive>"
+                )
             elif state.name == 'VOTE':
-                fsm_override = "\n\n[PROCEDURAL OVERRIDE: FATAL VOTING PHASE]\nYou MUST output your final mathematical vote using `submit_tension_vector`. ANY CHIT-CHAT IS A SYSTEM VIOLATION."
+                fsm_override = (
+                    "\n\n<phase_directive phase='VOTE'>\n"
+                    "VOTING PHASE. No more debate. Call `submit_tension_vector` NOW with your final vote.\n"
+                    "Your vote must reflect the evidence presented during this session, not general feelings.\n"
+                    "</phase_directive>"
+                )
                 
-            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0].split("[YOUR EVOLVING MEMORY")[0]
+            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0].split("<phase_directive")[0].split("[YOUR EVOLVING MEMORY")[0]
             
             # V29: Inject recalled memory from HindsightBoardroom
             memory_context = ""
@@ -1909,17 +2156,46 @@ class AG2DebateEngine:
             try:
                 _rate_semaphore.acquire()
                 try:
-                    # Direct single-call research prompt — one LLM call instead of 6-8
+                    # V31: Domain-scoped research brief (role-specific investigation frame)
+                    # Determines what questions this specific role would ask in pre-meeting preparation
+                    role_name_lower = agent_name.lower()
+                    domain_frame = "Key risks, dependencies, and open questions from your domain"
+                    if 'cfo' in role_name_lower or 'finance' in role_name_lower:
+                        domain_frame = (
+                            "(1) Total cost estimate with burn rate model, (2) Budget utilization vs ceiling, "
+                            "(3) Revenue offset potential, (4) Capital allocation risk if approved"
+                        )
+                    elif 'cto' in role_name_lower or 'tech' in role_name_lower:
+                        domain_frame = (
+                            "(1) Architecture dependencies and integration risks, (2) Deployment timeline "
+                            "with sprint-level granularity, (3) Tech debt impact, (4) Scalability bottlenecks"
+                        )
+                    elif 'ciso' in role_name_lower or 'security' in role_name_lower:
+                        domain_frame = (
+                            "(1) Attack surface expansion, (2) Known CVEs in proposed dependencies, "
+                            "(3) Compliance gaps (SOC2/HIPAA/GDPR), (4) Threat model for data flow"
+                        )
+                    elif 'cpo' in role_name_lower or 'product' in role_name_lower:
+                        domain_frame = (
+                            "(1) User adoption risk and activation friction, (2) Competitive positioning, "
+                            "(3) Churn impact if launched vs not launched, (4) Feature-market fit evidence"
+                        )
+                    elif 'ceo' in role_name_lower:
+                        domain_frame = (
+                            "(1) Strategic alignment with board-level OKRs, (2) Opportunity cost of this "
+                            "vs alternatives, (3) Competitive response timeline, (4) Revenue impact estimate"
+                        )
+                    
                     research_prompt = (
-                        f"You are {agent_name}, a senior executive. "
-                        f"Analyze this feature proposal from your professional domain:\n\n"
+                        f"<pre_meeting_brief>\n"
+                        f"You are {agent_name}. The board will debate this feature in 10 minutes.\n"
                         f"FEATURE: {feat.title}\n"
-                        f"DESCRIPTION: {feat.description[:600]}\n\n"
-                        f"Provide a concise Intelligence Brief (3-5 bullet points) covering:\n"
-                        f"1. Key risks from YOUR domain perspective\n"
-                        f"2. Critical questions that need answers\n"
-                        f"3. Your initial stance (SUPPORT / OPPOSE / CONDITIONAL)\n"
-                        f"Be specific and grounded. No generic statements."
+                        f"BRIEF: {feat.description[:600]}\n\n"
+                        f"Prepare your domain-specific intelligence brief. Investigate:\n"
+                        f"{domain_frame}\n\n"
+                        f"Output: 3-5 bullet points. Each must contain a SPECIFIC number, metric, or fact.\n"
+                        f"End with: INITIAL STANCE: SUPPORT / OPPOSE / CONDITIONAL + one-sentence basis.\n"
+                        f"</pre_meeting_brief>"
                     )
                     reply = agent_obj.generate_reply(messages=[{"role": "user", "content": research_prompt}])
                     if isinstance(reply, dict):
@@ -1969,11 +2245,18 @@ class AG2DebateEngine:
         def _generate_stance(agent_obj, feat):
             """Generate a single agent's initial position statement concurrently."""
             try:
+                # V31: Committed position with specific objection or endorsement condition
                 stance_prompt = (
-                    f"You are in a boardroom reviewing: '{feat.title}'.\n"
-                    f"Description: {feat.description[:500]}\n\n"
-                    "In exactly 2-3 sentences, state your initial position on this feature "
-                    "from your professional perspective. Be direct and specific."
+                    f"<position_statement>\n"
+                    f"Feature: '{feat.title}'\n"
+                    f"Brief: {feat.description[:500]}\n\n"
+                    f"Take a COMMITTED position from your professional domain. No fence-sitting.\n"
+                    f"In exactly 2 sentences: (1) Your verdict — SUPPORT, OPPOSE, or CONDITIONAL — and the "
+                    f"single most important reason. (2) The specific condition that would change your mind.\n\n"
+                    f"Example: 'I OPPOSE this feature. At our current burn rate, the 5-month runway extension "
+                    f"puts us in breach of our debt covenant. I would reconsider if the CFO shows a model "
+                    f"where monthly spend stays under $400K.'\n"
+                    f"</position_statement>"
                 )
                 reply = agent_obj.generate_reply(messages=[{"role": "user", "content": stance_prompt}])
                 if isinstance(reply, dict):
@@ -2083,6 +2366,58 @@ class AG2DebateEngine:
         )
         manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=self.primary_config, max_consecutive_auto_reply=ADJOURNMENT_TURN_LIMIT + 5)
         
+        # Stream debate messages to pipeline.jsonl in real-time
+        def stream_debate_message(recipient, messages, sender, config):
+            if messages:
+                last_msg = messages[-1]
+                content = last_msg.get("content", "")
+                if content:
+                    sender_name = last_msg.get("name") or sender.name
+                    # Strip any thought tags for clean UI display
+                    clean_content = AG2DebateEngine._strip_thought_tags(content).strip()
+                    
+                    # If this message has actual content, and is not a system control message
+                    if clean_content and not any(token in clean_content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
+                        # Determine if it's a challenge
+                        is_challenge = any(k in clean_content.lower() for k in ["risk", "veto", "reject", "challenge", "object", "disagree", "cve", "leak", "vulnerability"])
+                        
+                        # Format the sender name for the UI (e.g., remove prefix if present, e.g. "Alpha_CTO" -> "CTO")
+                        ui_sender = sender_name
+                        if "_" in sender_name:
+                            parts = sender_name.split("_")
+                            if len(parts) > 1:
+                                ui_sender = parts[1] # e.g. "CTO", "CEO"
+                                
+                        # ID for frontend
+                        msg_id = f"db_{len(messages)}"
+                        
+                        # Construct the event payload
+                        event_payload = {
+                            "type": "debate_message",
+                            "message": {
+                                "id": msg_id,
+                                "sender": ui_sender,
+                                "text": clean_content,
+                                "type": "challenge" if is_challenge else "normal"
+                            }
+                        }
+                        
+                        # Write to pipeline.jsonl if available
+                        if pipeline_jsonl:
+                            try:
+                                with open(pipeline_jsonl, "a", encoding="utf-8") as f:
+                                    f.write(json.dumps(event_payload) + "\n")
+                                logger.info(f"Streamed debate message from {ui_sender} to pipeline.jsonl")
+                            except Exception as exc:
+                                logger.warning(f"Failed to stream debate message: {exc}")
+            return False, None
+
+        manager.register_reply(
+            trigger=lambda sender: True,
+            reply_func=stream_debate_message,
+            position=0
+        )
+        
         logger.info("Executing AG2 Autonomous Boardroom Debate (V24 Direct Cross-Agent Mode)...")
         
         # V28-Fix7: Enhanced Deliberation Protocol — Novelty-First Board Memo
@@ -2130,17 +2465,23 @@ class AG2DebateEngine:
         logger.info(f"U23-P3: Submitting INFORMED batch votes for {len(background_agents)} background agents...")
         
         def _informed_batch_vote(bg_agent_obj, feat, stance_text, debate_text):
-            """U23-Fix3: Generate an informed vote via a single LLM call using the debate context."""
+            """U23-Fix3 + V31: Generate informed CoT vote using debate context."""
             try:
+                # V31-Fix2: Apply same CoT chain as force-vote for consistency
                 vote_prompt = (
-                    f"You are {bg_agent_obj.name}. You just listened to a boardroom debate about '{feat.title}'.\n\n"
+                    f"<force_vote>\n"
+                    f"You are {bg_agent_obj.name.replace('_', ' ')}. You observed the board debate '{feat.title}'.\n\n"
                     f"YOUR INITIAL STANCE: {stance_text[:300]}\n\n"
-                    f"KEY DEBATE EXCHANGES:\n{debate_text[:800]}\n\n"
-                    f"Based on what you heard, provide your FINAL vote in this EXACT JSON format:\n"
-                    f'{{"dimension": "<your primary concern dimension>", "score": <0.1 to 0.9>, '
-                    f'"confidence": <0.3 to 0.9>, "is_high_risk": <true/false>, '
-                    f'"reasoning": "<one sentence explaining your vote>"}}\n'
-                    f"Dimension must be one of: Technical_Feasibility, Unit_Economics, Security_Risk, Market_Fit, Strategic_Alignment, Legal_Compliance, General_Assessment"
+                    f"KEY DEBATE MOMENTS:\n{debate_text[:800]}\n\n"
+                    f"Think step by step:\n"
+                    f"1. What argument from the debate STRENGTHENED your initial stance?\n"
+                    f"2. What argument CHALLENGED it and why did it or did not change your mind?\n"
+                    f"3. From YOUR domain specifically, what is the decisive factor?\n\n"
+                    f"Then output EXACT JSON (nothing else):\n"
+                    f'{{"dimension": "<one of: Technical_Feasibility|Unit_Economics|Security_Risk|Market_Fit|Strategic_Alignment|Legal_Compliance>", '
+                    f'"score": <0.1-0.9>, "confidence": <0.3-0.9>, "is_high_risk": <true/false>, '
+                    f'"reasoning": "<one sentence citing specific evidence from the debate>"}}\'\n'
+                    f"</force_vote>"
                 )
                 reply = bg_agent_obj.generate_reply(messages=[{"role": "user", "content": vote_prompt}])
                 if isinstance(reply, dict):
@@ -2307,6 +2648,79 @@ class AG2DebateEngine:
             verdict = "REJECTED" if final_score < 0.6 else "CONDITIONALLY_APPROVED"
         else:
             verdict = "APPROVED" if final_score >= 0.7 else ("CONDITIONALLY_APPROVED" if final_score >= 0.5 else "REJECTED")
+
+        # U22-P2: Wait for all background tasks to complete before serializing tasks/ledger
+        logger.info("U22-P2: Waiting for background TaskSynthesizer and Debiaser tasks to complete...")
+        _u22_bg_pool.shutdown(wait=True)
+        logger.info("U22-P2: Background thread pool successfully shut down and synchronized.")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # V31: BOARD DECISION RECORD — Verdict Synthesis
+        # Transforms numerical vote aggregation → actionable human-readable mandate.
+        # This is what makes this a DECISION ENGINE, not just a debate engine.
+        # ═══════════════════════════════════════════════════════════════════
+        board_decision_record = ""
+        try:
+            # Build vote summary for the synthesis prompt
+            vote_lines = []
+            for agent_name, payload in getattr(self, "live_tension_registry", {}).items():
+                adj = getattr(payload, "adjustments", {})
+                conf = getattr(payload, "confidence", 0.5)
+                hr = getattr(payload, "is_high_risk", False)
+                dim_str = ", ".join(f"{k}={v:.2f}" for k, v in adj.items())
+                vote_lines.append(f"  {agent_name}: {dim_str} | confidence={conf:.2f} | high_risk={hr}")
+            
+            resolved_tasks_str = "\n".join([
+                f"  [{tid}] {t['title']}: {t['status']} — {t.get('resolution', '')}"
+                for tid, t in self.cognitive_ledger.tasks.items()
+            ])
+            
+            sustained_vetoes = [
+                name for name, payload in getattr(self, "live_tension_registry", {}).items()
+                if getattr(payload, "is_high_risk", False)
+            ]
+
+            verdict_synthesis_prompt = (
+                f"<verdict_synthesis>\n"
+                f"The board has completed deliberation on: '{feature.title}'\n\n"
+                f"MATHEMATICAL VERDICT: {verdict} (score={final_score:.2f})\n\n"
+                f"INDIVIDUAL VOTES:\n" + "\n".join(vote_lines) + "\n\n"
+                f"TASK LEDGER STATUS:\n{resolved_tasks_str}\n\n"
+                f"SUSTAINED VETOES: {', '.join(sustained_vetoes) if sustained_vetoes else 'None'}\n\n"
+                f"As Chairman, produce the BOARD DECISION RECORD. Be specific and actionable.\n"
+                f"Format exactly as:\n\n"
+                f"DECISION: [APPROVE / CONDITIONAL APPROVE / REJECT]\n"
+                f"BASIS: [The single most decisive argument — cite the executive and their specific evidence]\n"
+                f"CONDITIONS: [If CONDITIONAL — list exactly what must be verified before shipping, with owners]\n"
+                f"DISSENT: [Any sustained vetoes, who holds them, and what must change]\n"
+                f"NEXT ACTION: [One concrete next step with owner name and deadline]\n"
+                f"</verdict_synthesis>"
+            )
+            
+            bdr_reply = moderator_agent.generate_reply(
+                messages=[{"role": "user", "content": verdict_synthesis_prompt}]
+            )
+            if isinstance(bdr_reply, dict):
+                bdr_reply = bdr_reply.get("content", "")
+            board_decision_record = AG2DebateEngine._strip_thought_tags(str(bdr_reply))
+            
+            # Print to stdout for visibility
+            print(f"\n{'═'*80}")
+            print(f"📋  BOARD DECISION RECORD")
+            print(f"{'═'*80}")
+            print(board_decision_record)
+            print(f"{'═'*80}\n")
+            logger.info(f"V31: Board Decision Record generated ({len(board_decision_record)} chars)")
+            
+            # Append to groupchat transcript for downstream pipeline
+            groupchat.messages.append({
+                "role": "assistant",
+                "name": "Boardroom_Moderator",
+                "content": f"BOARD DECISION RECORD:\n{board_decision_record}"
+            })
+        except Exception as e:
+            logger.warning(f"V31: Verdict synthesis failed: {e}")
+            board_decision_record = f"DECISION: {verdict}\nBASIS: Score={final_score:.2f}. Automated fallback — synthesis LLM call failed.\n"
 
         # Improvement 19: Confidence Calibration Audit
         logger.info("=== Phase 4: Confidence Calibration Audit ===")

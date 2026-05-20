@@ -80,6 +80,34 @@ class PipelineConfig(BaseSettings):
     web_host: str = Field(default="0.0.0.0", alias="TSC_WEB_HOST")
     web_port: int = Field(default=8000, alias="TSC_WEB_PORT")
 
+    # ── WorldRAGEngine — Qdrant (vector store) ───────────────────────
+    qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
+    qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
+
+    # ── WorldRAGEngine — Neo4j (knowledge graph) ─────────────────────
+    neo4j_url: str = Field(default="bolt://localhost:7687", alias="NEO4J_URL")
+    neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
+    neo4j_password: str = Field(default="changeme", alias="NEO4J_PASSWORD")
+
+    # ── WorldRAGEngine — Embeddings (BGE-M3, free local) ─────────────
+    # RAG Architect skill: BGE-M3 — 1024-dim, 8192-tok, MTEB top-tier
+    rag_embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    rag_embedding_dim: int = Field(default=1024, alias="EMBEDDING_DIM")
+
+    # ── WorldRAGEngine — Reranker (free local CrossEncoder) ──────────
+    rag_reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        alias="RERANKER_MODEL",
+    )
+
+    # ── WorldRAGEngine — LazyGraphRAG community index dir ────────────
+    graphrag_index_dir: str = Field(default="./graphrag_index", alias="GRAPHRAG_INDEX_DIR")
+
+    # ── RAG Evaluation thresholds (from RAG Architect skill) ─────────
+    rag_precision_threshold: float = Field(default=0.70, alias="RAG_PRECISION_THRESHOLD")
+    rag_recall_threshold: float = Field(default=0.60, alias="RAG_RECALL_THRESHOLD")
+    rag_faithfulness_threshold: float = Field(default=0.80, alias="RAG_FAITHFULNESS_THRESHOLD")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

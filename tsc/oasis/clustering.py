@@ -29,18 +29,13 @@ async def _get_embedder():
         await asyncio.sleep(0.1)
         try:
             from fastembed import TextEmbedding
-            # SOTA Upgrade: Move to BGE-Large (1024-dim) for high-fidelity clustering
-            logger.info("Loading SOTA FastEmbed model (BAAI/bge-large-en-v1.5) for high-fidelity clustering...")
-            _embedder = TextEmbedding(model_name="BAAI/bge-large-en-v1.5")
-            logger.info("✓ BGE-Large model loaded.")
+            # Use BGE-Small by default for macOS performance and quick initialization
+            logger.info("Loading FastEmbed model (BAAI/bge-small-en-v1.5) for high-fidelity clustering...")
+            _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            logger.info("✓ BGE-Small model loaded.")
         except Exception as e:
-            logger.error(f"Failed to load SOTA embedder (BGE-Large): {e}. Falling back to small model.")
-            try:
-                from fastembed import TextEmbedding
-                _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-                logger.info("✓ Fallback BGE-Small model loaded.")
-            except:
-                return None
+            logger.error(f"Failed to load SOTA embedder (BGE-Small): {e}.")
+            return None
     return _embedder
 
 async def PerformBehavioralClustering(

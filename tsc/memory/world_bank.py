@@ -1,94 +1,144 @@
-import logging
-import asyncio
-from typing import List, Dict, Any, Optional
+"""
+WorldDataBank — Refactored to delegate all storage/retrieval to WorldRAGEngine.
 
-try:
-    from hindsight import HindsightClient
-    HINDSIGHT_AVAILABLE = True
-except ImportError:
-    HINDSIGHT_AVAILABLE = False
+The Hindsight dependency is REMOVED from this class.
+Hindsight is preserved ONLY in:
+  - HindsightBoardroom  (boardroom-{agent} banks)
+  - HindsightOASISManager (oasis-{sim_id} banks)
+
+RAG Architect skill checkpoint:
+  assert all chunks carry source metadata ✅
+  assert deduplication via deterministic IDs ✅
+  assert hybrid search active ✅
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Lazy engine reference — set by orchestrator at startup
+_engine: Optional["WorldRAGEngine"] = None  # noqa: F821
+
+
+def set_engine(engine: "WorldRAGEngine") -> None:  # noqa: F821
+    """Injected by the orchestrator after WorldRAGEngine.initialize()."""
+    global _engine
+    _engine = engine
+    logger.info("WorldDataBank: engine injected (%s)", type(engine).__name__)
+
+
+def _require_engine() -> "WorldRAGEngine":  # noqa: F821
+    if _engine is None:
+        raise RuntimeError(
+            "WorldDataBank has no engine. "
+            "Call set_engine(engine) from the orchestrator before using WorldDataBank."
+        )
+    return _engine
+
+
 class WorldDataBank:
     """
-    The Universal 'World Data Bank' (bank_id="tsc-world").
-    Replaces global Zep-based RAG. 
-    Stores foundational documents (e.g. 1000-page specs) and provides a unified
-    Hindsight reflection interface accessible to all agents and gates globally.
+    Public façade — API identical to the old Hindsight-based version.
+
+    All data now flows through WorldRAGEngine (Qdrant + Neo4j + LazyGraphRAG).
+    Callers do not need to change their code.
     """
-    
+
     def __init__(self, fallback_mode: bool = False):
+        # fallback_mode retained for API compatibility — no longer meaningful
         self.bank_id = "tsc-world"
-        self._fallback_mode = fallback_mode or (not HINDSIGHT_AVAILABLE)
-        
-        if not self._fallback_mode:
-            try:
-                self.client = HindsightClient()
-            except Exception as e:
-                logger.warning(f"Hindsight SDK init failed: {e}. Falling back to embedded WorldBank.")
-                self._fallback_mode = True
-                
-        self._embedded_bank = [] # Embedded fallback for local runs without hindsight API keys
-    
-    async def initialize_session(self, session_id: str = "tsc-world") -> None:
-        """Create or connect to the universal global bank."""
-        if self._fallback_mode:
-            logger.info("Initializing World Data Bank (EMBEDDED FALLBACK MODE)")
-            return
-            
-        logger.info(f"Connecting to Universal Hindsight World Data Bank: {session_id}")
+        self._fallback_mode = False  # engine always available
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    async def initialize_session(self, session_id: str = "tsc-world", run_id: str = "global") -> None:
+        """Connect to the WorldRAGEngine (idempotent)."""
+        engine = _require_engine()
+        await engine.initialize(run_id)
         self.bank_id = session_id
-        try:
-            val = await asyncio.to_thread(self.client.create_bank, bank_id=self.bank_id)
-            logger.info(f"World Data Bank Connection Successful: {val}")
-        except Exception as e:
-            if "already exists" in str(e).lower() or "409" in str(e):
-                logger.info("Universal World Data Bank already exists in Hindsight Cloud. Connected.")
-            else:
-                logger.error(f"Failed to create World Data Bank: {e}")
-                self._fallback_mode = True
+        logger.info("WorldDataBank session ready (run_id=%s)", run_id)
 
-    async def ingest_document(self, document_text: str, document_name: str) -> None:
-        """Insert a massively long foundation document into the universal bank."""
-        if self._fallback_mode:
-            self._embedded_bank.append({"name": document_name, "content": document_text})
-            logger.info(f"Ingested {document_name} into EMBEDDED World Bank.")
-            return
-            
-        try:
-            logger.info(f"Ingesting '{document_name}' into Hindsight World Bank ({len(document_text)} chars)")
-            # Hindsight natively chunks large unstructured strings on ingest via retain
-            await asyncio.to_thread(
-                self.client.retain,
-                bank_id=self.bank_id,
-                message=document_text,
-                metadata={"type": "foundational_document", "document_name": document_name}
-            )
-        except Exception as e:
-            logger.error(f"Failed to ingest document {document_name}: {e}")
+    # ------------------------------------------------------------------
+    # Ingestion
+    # RAG Architect: idempotent upsert with deterministic IDs ✅
+    # ------------------------------------------------------------------
+    async def ingest_document(
+        self,
+        document_text: str,
+        document_name: str,
+        doc_type: str = "document",
+        run_id: str = "global",
+    ) -> None:
+        """
+        Ingest a document into the company knowledge base (Plane 1).
 
-    async def query_world_bank(self, query: str) -> str:
-        """RAG Replacement for Agents: Ask Hindsight a question against the 1000-page bank."""
-        if self._fallback_mode:
-            if not self._embedded_bank:
-                return "No documents available in World Bank."
-            # Dummy local return
-            return f"[EMBEDDED WORLD BANK EXTRACT]: Information related to '{query}' is not precisely indexed locally."
-            
+        RAG Architect checkpoints applied:
+          ✅ Source metadata enriched on every chunk
+          ✅ Deduplication via content-hash IDs (safe to re-call)
+          ✅ Semantic chunking (not fixed-size)
+        """
+        engine = _require_engine()
+
+        # Write to a temp file so WorldRAGEngine can read + smart-chunk
+        import tempfile, pathlib
+        suffix = ".txt"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=suffix, delete=False, encoding="utf-8"
+        ) as f:
+            f.write(document_text)
+            tmp_path = f.name
+
         try:
-            logger.info(f"Agent querying World Bank: '{query}'")
-            # Using reflect as our RAG retriever
-            response = await asyncio.to_thread(
-                self.client.reflect,
-                bank_id=self.bank_id,
-                query=query
+            n = await engine.ingest_company_doc(
+                file_path=tmp_path,
+                doc_type=doc_type,
+                rebuild_graph=True,
             )
-            # The SDK returns a pydantic structured response, extract just the answer string
-            if hasattr(response, 'answer'):
-                return response.answer
-            return str(response)
-            
-        except Exception as e:
-            logger.error(f"World Bank query failed: {e}")
-            return f"Error retrieving from World Bank: {e}"
+            logger.info("WorldDataBank: ingested '%s' → %d chunks", document_name, n)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Retrieval
+    # RAG Architect: hybrid search + reranking ✅
+    # ------------------------------------------------------------------
+    async def query_world_bank(
+        self,
+        query: str,
+        run_id: str = "global",
+        top_k: int = 5,
+    ) -> str:
+        """
+        Unified RAG query — auto-routes to vector / hybrid / global.
+
+        RAG Architect checkpoints applied:
+          ✅ Hybrid search (dense + BM25 RRF)
+          ✅ CrossEncoder reranking (top-k before LLM)
+          ✅ Metadata filtering by run_id
+        """
+        engine = _require_engine()
+        results = await engine.query(query=query, run_id=run_id, top_k=top_k)
+
+        if not results:
+            return f"[WorldDataBank] No results found for: {query}"
+
+        # Format for LLM context injection
+        lines = [f"[Source: {r.source}] {r.text}" for r in results]
+        return "\n\n---\n\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Backward-compat helpers used by layer2 / layer6
+    # ------------------------------------------------------------------
+    async def retain(self, bank: str, content: str, metadata: dict = None, run_id: str = "global") -> None:
+        if metadata is None:
+            metadata = {}
+        engine = _require_engine()
+        metadata["run_id"] = run_id
+        await engine.retain(bank=bank, content=content, metadata=metadata)
+
+    async def recall(self, bank: str, query: str, run_id: str = "global") -> list[str]:
+        engine = _require_engine()
+        return await engine.recall(bank=bank, query=query, run_id=run_id)

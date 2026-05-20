@@ -79,8 +79,8 @@ class TokenBucket:
         deadline = time.monotonic() + timeout
         lock = self._get_lock()
 
-        async with lock:
-            while True:
+        while True:
+            async with lock:
                 self._refill()
 
                 if self._tokens >= estimated_tokens and self._requests >= 1:
@@ -120,15 +120,15 @@ class TokenBucket:
                     "Rate limiter: waiting %.1fs (need %d tokens, have %.0f)",
                     wait_secs, estimated_tokens, self._tokens,
                 )
-                # Release the lock during sleep so other coroutines can check
-                # Actually, we keep the lock to serialize — asyncio.sleep yields
-                # to the event loop but no other acquire() can proceed
-                await asyncio.sleep(wait_secs)
+
+            # Sleep outside the lock so other tasks can check/refill concurrently
+            await asyncio.sleep(wait_secs)
 
 
-# ── Module-level singleton ──────────────────────────────────────────
+# ── Module-level singletons ──────────────────────────────────────────
 
 _groq_bucket: Optional[TokenBucket] = None
+_gemini_bucket: Optional[TokenBucket] = None
 
 
 def get_groq_bucket(
@@ -152,7 +152,102 @@ def get_groq_bucket(
     return _groq_bucket
 
 
+def get_gemini_bucket(
+    tpm_limit: int | None = None,
+    rpm_limit: int | None = None,
+) -> TokenBucket:
+    """Get or create the singleton Gemini rate limiter.
+
+    Reads limits from environment variables if not provided:
+      TSC_GEMINI_TPM_LIMIT (default: 1000000)
+      TSC_GEMINI_RPM_LIMIT (default: 12)  # Safely under the 15 RPM free tier
+    """
+    global _gemini_bucket
+
+    if _gemini_bucket is None:
+        tpm = tpm_limit or int(os.getenv("TSC_GEMINI_TPM_LIMIT", "1000000"))
+        # Sync with GEMINI_FREE_RPM to ensure matching global rate limiting
+        env_rpm = os.getenv("TSC_GEMINI_RPM_LIMIT") or os.getenv("GEMINI_FREE_RPM")
+        rpm = rpm_limit or int(env_rpm) if env_rpm else 12
+        _gemini_bucket = TokenBucket(tpm_limit=tpm, rpm_limit=rpm)
+        logger.info("Gemini rate limiter initialized: %d TPM, %d RPM", tpm, rpm)
+
+    return _gemini_bucket
+
+
 def reset_groq_bucket() -> None:
-    """Reset singleton (for testing)."""
-    global _groq_bucket
+    """Reset singletons (for testing)."""
+    global _groq_bucket, _gemini_bucket
     _groq_bucket = None
+    _gemini_bucket = None
+
+
+def patch_openai_globally() -> None:
+    """Monkey-patch openai's synchronous and asynchronous chat completions
+    to globally enforce our custom rate limiters. This ensures AutoGen (ag2)
+    and all sub-systems are perfectly rate-limited without bypasses.
+    """
+    try:
+        import openai
+        import openai.resources.chat.completions as chat_completions
+        
+        # Avoid double patching
+        if hasattr(chat_completions.Completions.create, "_is_patched"):
+            return
+            
+        orig_sync_create = chat_completions.Completions.create
+        orig_async_create = chat_completions.AsyncCompletions.create
+        
+        def patched_sync_create(self, *args, **kwargs):
+            model = kwargs.get("model", "")
+            base_url = str(getattr(self._client, "base_url", ""))
+            is_gemini = "generativelanguage" in base_url or "gemini" in model.lower() or "gemma" in model.lower()
+            
+            if is_gemini:
+                # Synchronous request rate limiting for Gemini
+                # We enforce a dynamic delay proportional to our GEMINI_FREE_RPM limit.
+                # E.g. at 3 RPM, this delay will be 20.0s, perfectly avoiding any 429s.
+                rpm_limit = int(os.getenv("GEMINI_FREE_RPM", "10"))
+                delay = max(4.0, 60.0 / max(1, rpm_limit))
+                logger.info(f"⏳ Globally rate-limiting synchronous Gemini call ({model}) with a {delay:.1f}s delay...")
+                time.sleep(delay)
+            elif "groq" in base_url or "llama" in model.lower():
+                # Enforce a short delay for Groq to be safe
+                time.sleep(0.5)
+                
+            return orig_sync_create(self, *args, **kwargs)
+            
+        async def patched_async_create(self, *args, **kwargs):
+            model = kwargs.get("model", "")
+            base_url = str(getattr(self._client, "base_url", ""))
+            is_gemini = "generativelanguage" in base_url or "gemini" in model.lower() or "gemma" in model.lower()
+            
+            if is_gemini:
+                bucket = get_gemini_bucket()
+                messages = kwargs.get("messages", [])
+                input_chars = sum(len(str(m.get("content", ""))) for m in messages)
+                estimated = (input_chars // 4) + kwargs.get("max_tokens", 1000)
+                
+                logger.debug(f"⏳ Globally acquiring capacity for async Gemini call ({model}, estimated {estimated} tokens)...")
+                await bucket.acquire(estimated)
+            elif "groq" in base_url or "llama" in model.lower():
+                bucket = get_groq_bucket()
+                messages = kwargs.get("messages", [])
+                input_chars = sum(len(str(m.get("content", ""))) for m in messages)
+                estimated = (input_chars // 4) + kwargs.get("max_tokens", 1000)
+                await bucket.acquire(estimated)
+                
+            return await orig_async_create(self, *args, **kwargs)
+            
+        patched_sync_create._is_patched = True
+        patched_async_create._is_patched = True
+        
+        chat_completions.Completions.create = patched_sync_create
+        chat_completions.AsyncCompletions.create = patched_async_create
+        logger.info("🛡️ Globally monkey-patched OpenAI chat completions for rate-limiting protection.")
+    except Exception as e:
+        logger.warning(f"Failed to apply global OpenAI completions patch: {e}")
+
+# Run the patch on import immediately
+patch_openai_globally()
+

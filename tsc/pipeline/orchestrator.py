@@ -8,6 +8,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+# Directory where OASIS simulation runs (and pipeline.jsonl) are written
+_LOG_BASE = Path("log/oasis_runs")
+
 from tsc.config import Settings, settings
 from tsc.layers.layer1_ingestor import ContextualIngestor
 from tsc.layers.layer2_graph import KnowledgeGraphBuilder
@@ -20,6 +23,8 @@ from tsc.llm.base import LLMClient
 from tsc.llm.factory import create_llm_client
 from tsc.memory.graph_store import GraphStore
 from tsc.memory.hindsight_session import HindsightSessionManager
+from tsc.memory.world_rag import WorldRAGEngine
+from tsc.memory.world_bank import WorldDataBank, set_engine as _set_world_bank_engine
 from tsc.oasis.oasis_persona_gen import OASISUserPersonaGenerator
 from tsc.oasis.simulation_engine import RunOASISSimulation, OASISSimulationConfig
 from tsc.models.inputs import DocumentType, InputDocument
@@ -39,11 +44,19 @@ class TSCPipeline:
         self._cfg = cfg or settings
         self._llm = llm_client or create_llm_client(settings=self._cfg)
 
-        # Memory: Universal Hindsight Session Backbone
+        # Memory: Universal Hindsight Session Backbone (agent experience only)
         self._session = HindsightSessionManager()
+
+        # Memory: WorldRAGEngine — Qdrant + Neo4j + LazyGraphRAG
+        # Handles ALL company knowledge / pipeline artifact storage.
+        # Hindsight is preserved strictly for boardroom and OASIS agent memories.
+        self._rag_engine = WorldRAGEngine()
 
         # Progress callback (for web UI)
         self._on_progress: Optional[Any] = None
+
+        # Path to the pipeline.jsonl event stream for the current run (set in evaluate)
+        self._pipeline_jsonl: Optional[Path] = None
 
     def set_progress_callback(self, callback: Any) -> None:
         """Set a callback(layer_num, layer_name, status, details) for progress."""
@@ -84,8 +97,36 @@ class TSCPipeline:
             logger.info("Simulation Count: %d", num_simulations)
         logger.info("=" * 60)
 
+        # ── Bootstrap WorldRAGEngine (Qdrant + Neo4j) ─────────────────────────
+        try:
+            await self._rag_engine.initialize(run_id=session_id)
+            _set_world_bank_engine(self._rag_engine)   # wire WorldDataBank façade
+            logger.info("WorldRAGEngine ready (run_id=%s)", session_id)
+        except Exception as _rag_exc:
+            logger.warning(
+                "WorldRAGEngine init failed (%s) — pipeline continues in degraded mode",
+                _rag_exc,
+            )
+
+        # ── Create run directory & pipeline event stream immediately ───────────
+        run_dir = _LOG_BASE / session_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._pipeline_jsonl = run_dir / "pipeline.jsonl"
+        self._pipeline_jsonl.write_text("")  # truncate / create fresh
+        logger.info("Pipeline event stream: %s", self._pipeline_jsonl)
+
+        # Emit initial "all layers waiting" event so the UI resets immediately
+        self._write_jsonl_event({
+            "type": "pipeline_reset",
+            "session_id": session_id,
+            "stages": {"layer1": "waiting", "layer3": "waiting", "layer5": "waiting"},
+        })
+
         # Initialize Universal Memory Sessions
         await self._session.initialize(session_id)
+        
+        # Instantiate WorldDataBank facade for pipeline data
+        world_bank = WorldDataBank()
 
         # Build document list
         documents = self._build_document_list(
@@ -95,18 +136,26 @@ class TSCPipeline:
 
         # Layer 1: Ingest (Extract customer data & initial context)
         self._emit_progress(1, "Contextual Ingest", "running")
-        ingestor = ContextualIngestor(self._llm, session=self._session)
+        ingestor = ContextualIngestor(self._llm, session=world_bank)
         bundle, feature, company = await ingestor.process(documents)
 
         self._emit_progress(1, "Contextual Ingest", "done", {
             "chunks": bundle.statistics.total_chunks,
         })
 
+        # ── Emit Layer 1 ingestion nodes (real file names) ─────────────────────
+        ingestion_nodes = self._build_ingestion_nodes(documents)
+        self._write_jsonl_event({"type": "ingestion_sync", "nodes": ingestion_nodes})
+
         # Layer 2: OASIS Behavioral Analysis (Social Simulation)
         self._emit_progress(2, "Behavioral Analysis (OASIS)", "running")
         
         # Generate product-user personas grounded in customer interview data
-        oasis_gen = OASISUserPersonaGenerator(self._llm, self._session)
+        # FIX (Major): Persona generator uses world_bank (WorldDataBank/Qdrant).
+        # Hindsight is agent-memory-only; persona profiles are pipeline run data
+        # that must land in the persona_profiles Qdrant collection so downstream
+        # layers can retrieve them via world_bank.recall("personas", ...).
+        oasis_gen = OASISUserPersonaGenerator(self._llm, world_bank)
         profiles = await oasis_gen.generate(
             company=company,
             num_agents=num_simulations or 10,
@@ -119,27 +168,50 @@ class TSCPipeline:
         logger.info("=" * 60)
         logger.info("PERSONAS CREATED FOR SIMULATION")
         logger.info("=" * 60)
+        persona_payload = []
         for i, p in enumerate(profiles):
             info = p.user_info_dict
             other = info.get("profile", {}).get("other_info", {})
+            name = info.get('name', f'Agent-{p.agent_id}')
+            role = other.get('role', info.get('description', 'Simulation User'))
             logger.info(f"[{i+1}/{len(profiles)}] Agent ID: {p.agent_id}")
-            logger.info(f"  Name: {info.get('name', 'Unknown')}")
-            logger.info(f"  Segment: {other.get('role', info.get('description', 'Unknown'))}")
+            logger.info(f"  Name: {name}")
+            logger.info(f"  Segment: {role}")
             logger.info(f"  Description: {info.get('description', '')[:100]}...")
             logger.info(f"  Influence: {p.influence_strength:.2f} | Receptiveness: {p.receptiveness:.2f}")
             logger.info("-" * 40)
+            persona_payload.append({
+                "id": f"per_{p.agent_id}",
+                "name": name,
+                "role": role,
+                "traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
+                "impact": round(p.influence_strength * 100),
+                "bio": info.get("profile", {}).get("user_profile", "") or info.get("description", "")
+            })
+
+        # ── Emit Layer 3 personas (real LLM-generated data) ────────────────────
+        self._write_jsonl_event({"type": "persona_sync", "personas": persona_payload})
         
         sim_config = OASISSimulationConfig(
             simulation_name=session_id,
             num_agents=len(profiles),
+            num_timesteps=10,
         )
+        # FIX (Critical): Pass world_bank as the session for RunOASISSimulation.
+        # The simulation retains its output (agent traces, comments, prediction
+        # report summary) via session.retain("simulation", ...). This MUST write
+        # to WorldDataBank's simulation_data Qdrant collection so that:
+        #   - FeatureDiscoveryEngine (session=world_bank) can recall() it in Layer 3
+        #   - AG2DebateEngine (world_bank=world_bank) can query_simulation() in Layer 5
+        # The per-agent turn memory (HindsightOASISManager) remains internal to the
+        # simulation engine — it reads HINDSIGHT_URL from env and is NOT affected here.
         behavioral_results = await RunOASISSimulation(
             config=sim_config,
             agent_profiles=profiles,
             feature=feature if proposal else None,
             context=company,
             mode="behavioral",
-            session=self._session,
+            session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
         )
         self._emit_progress(2, "Behavioral Analysis", "done", {
             "agents": len(profiles),
@@ -148,7 +220,7 @@ class TSCPipeline:
 
         # Layer 3: Feature Discovery Engine
         self._emit_progress(3, "Feature Discovery", "running")
-        discovery = FeatureDiscoveryEngine(self._llm, self._session)
+        discovery = FeatureDiscoveryEngine(self._llm, session=world_bank)
         discovered_features = await discovery.process(
             company=company,
             behavioral_results=behavioral_results,
@@ -169,13 +241,11 @@ class TSCPipeline:
             logger.info("Using LEGACY Layer 3 PersonaGenerator (user opt-in)")
             from tsc.layers.layer2_graph import KnowledgeGraphBuilder
             from tsc.layers.layer3_personas import PersonaGenerator
-            from tsc.memory.world_bank import WorldDataBank
             from tsc.memory.graph_store import GraphStore
             
             # Init legacy memory just for this run
-            wb = WorldDataBank()
-            await wb.initialize_session(session_id)
-            gs = GraphStore(wb)
+            await world_bank.initialize_session(session_id)
+            gs = GraphStore(world_bank)
             
             graph_builder = KnowledgeGraphBuilder(self._llm, gs)
             graph = await graph_builder.process(bundle)
@@ -186,6 +256,18 @@ class TSCPipeline:
             personas = BoardroomPersonaFactory.create_boardroom(
                 company=company, feature=feature
             )
+        
+        # Emit Layer 4 boardroom personas
+        boardroom_payload = []
+        for p in personas:
+            boardroom_payload.append({
+                "name": p.name,
+                "role": p.role,
+                "role_short": getattr(p, "role_short", "") or "",
+                "traits": getattr(p, "domain_expertise", []) or [],
+                "bio": p.psychological_profile.full_profile_text if (p.psychological_profile and hasattr(p.psychological_profile, "full_profile_text")) else ""
+            })
+        self._write_jsonl_event({"type": "boardroom_persona_sync", "personas": boardroom_payload})
         
         self._emit_progress(4, "Boardroom Assembly", "done", {
             "personas": len(personas),
@@ -201,7 +283,9 @@ class TSCPipeline:
             personas=personas, 
             graph=graph, 
             simulation_results=behavioral_results,
-            session=self._session
+            session=self._session,
+            world_bank=world_bank,
+            pipeline_jsonl=self._pipeline_jsonl
         )
         self._emit_progress(5, "Stakeholder Debate", "done", {
             "verdict": consensus.overall_verdict,
@@ -232,6 +316,59 @@ class TSCPipeline:
         logger.info("Total time: %.1f minutes", total / 60)
         logger.info("Tokens used: %d", self._llm.get_usage().total_tokens)
         logger.info("=" * 60)
+
+        # G5: Persist FinalRecommendation to disk so the port-8080 WS bridge
+        # can tail it and broadcast a final_recommendation event to the frontend.
+        # This is the only route for the full verdict/spec/monitoring plan to reach
+        # the UI — the port-8000 WebSocket is not consumed by the active frontend hook.
+        try:
+            rec_path = run_dir / "final_recommendation.json"
+            rec_path.write_text(
+                json.dumps({
+                    "feature_name": recommendation.feature_name,
+                    "final_verdict": recommendation.final_verdict,
+                    "overall_confidence": recommendation.overall_confidence,
+                    "summary_for_leadership": recommendation.summary_for_leadership,
+                    "top_risks": [r.model_dump() for r in recommendation.top_risks],
+                    "next_steps": [s.model_dump() for s in recommendation.next_steps],
+                    "stakeholder_approvals": [a.model_dump() for a in recommendation.stakeholder_approvals],
+                    "total_time_minutes": round(total / 60, 2),
+                }, default=str),
+                encoding="utf-8",
+            )
+            # G10: Emit full recommendation (was 4-field stub — now all fields)
+            self._write_jsonl_event({
+                "type": "final_recommendation",
+                "feature_name": recommendation.feature_name,
+                "final_verdict": recommendation.final_verdict,
+                "overall_confidence": recommendation.overall_confidence,
+                "summary_for_leadership": recommendation.summary_for_leadership,
+                "top_risks": [r.model_dump() for r in recommendation.top_risks],
+                "next_steps": [s.model_dump() for s in recommendation.next_steps],
+                "stakeholder_approvals": [a.model_dump() for a in recommendation.stakeholder_approvals],
+                "total_time_minutes": round(total / 60, 2),
+            })
+            # G5: Emit full consensus result (boardroom vote breakdown, debate rounds, phase spec)
+            self._write_jsonl_event({
+                "type": "consensus_result",
+                "feature_name": consensus.feature_name,
+                "overall_verdict": consensus.overall_verdict,
+                "approval_confidence": consensus.approval_confidence,
+                "stakeholder_verdicts": consensus.stakeholder_verdicts,
+                "approvals": [a.model_dump() for a in consensus.approvals],
+                "debate_rounds_count": len(consensus.debate_rounds),
+                "phase_1": consensus.phase_1.model_dump(),
+                "phase_2_gate": consensus.phase_2_gate.model_dump() if consensus.phase_2_gate else None,
+                "mitigations": consensus.mitigations,
+                "next_steps": consensus.next_steps,
+                "simulation_key_quotes": consensus.simulation_key_quotes,
+                "behavioral_insights": consensus.behavioral_insights,
+                "tension_shifts": consensus.tension_shifts,
+            })
+            logger.info("📋 FinalRecommendation + ConsensusResult persisted: %s", rec_path)
+
+        except Exception as _exc:
+            logger.warning("Failed to persist FinalRecommendation: %s", _exc)
 
         return recommendation
 
@@ -266,11 +403,56 @@ class TSCPipeline:
         details: Optional[dict] = None,
     ) -> None:
         logger.info("Layer %d/%d: %s — %s", layer, 7, name, status)
+        # Write structured event to pipeline.jsonl so the WebSocket server can stream it
+        self._write_jsonl_event({
+            "type": "pipeline_progress",
+            "layer": layer,
+            "name": name,
+            "status": status,
+            "details": details or {},
+        })
         if self._on_progress:
             try:
                 self._on_progress(layer, name, status, details or {})
             except Exception:
                 pass
+
+    def _write_jsonl_event(self, event: dict) -> None:
+        """Append a JSON event line to the active pipeline.jsonl stream."""
+        if self._pipeline_jsonl is None:
+            return
+        try:
+            with self._pipeline_jsonl.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to write pipeline event: %s", exc)
+
+    @staticmethod
+    def _build_ingestion_nodes(documents: list) -> list:
+        """Convert InputDocument list into IngestionNode dicts for the UI."""
+        from tsc.models.inputs import DocumentType
+        type_meta = {
+            DocumentType.INTERVIEWS:       ("input",   "Customer Interviews"),
+            DocumentType.SUPPORT_TICKETS:  ("input",   "Support Tickets"),
+            DocumentType.ANALYTICS:        ("input",   "Analytics Data"),
+            DocumentType.COMPANY_CONTEXT:  ("input",   "Company Context"),
+            DocumentType.FEATURE_PROPOSAL: ("input",   "Feature Proposal"),
+        }
+        nodes = []
+        for doc in documents:
+            meta = type_meta.get(doc.type, ("input", str(doc.type)))
+            file_name = Path(doc.file_path).name if doc.file_path else str(doc.type)
+            nodes.append({
+                "id": f"ing_{doc.type.value}",
+                "label": f"{meta[1]}: {file_name}",
+                "type": meta[0],
+                "status": "active",
+            })
+        # Add a semantic extractor process node
+        nodes.append({"id": "proc_semantic", "label": "Semantic Extractor", "type": "process", "status": "active"})
+        # Add a tension cluster output node placeholder
+        nodes.append({"id": "out_tension", "label": "Tension Cluster Analysis", "type": "output", "status": "active"})
+        return nodes
 
 
 async def run_evaluation(
