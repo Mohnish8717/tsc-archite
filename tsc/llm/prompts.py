@@ -224,7 +224,7 @@ Key entities from analysis:
 {% endfor %}
 
 Identify 3-5 stakeholders with:
-- Name (use known stakeholders if provided, otherwise generate realistic names)
+- Name (use known stakeholders if provided, otherwise generate realistic human names, e.g., "Marcus Vance", "Sarah Jenkins". Strictly do NOT use role titles or job titles as the name.)
 - Role and title
 - Relevance score (0-1)
 - Which domains they cover
@@ -262,7 +262,7 @@ Key market entities / pain points:
 {% endfor %}
 
 Identify 3-5 external customer personas with:
-- Name (e.g., "Enterprise CTO", "End User")
+- Name (strictly generate a realistic human name, e.g., "Sophia Patel", "Liam O'Connor", "Amina Diop", "Alex Mercer". Do NOT use titles like "Enterprise CTO" or "End User" in the name field.)
 - Persona Type (segment type, e.g., "enterprise", "startup")
 - Title / Role
 - Relevance score (0-1)

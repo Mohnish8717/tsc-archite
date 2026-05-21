@@ -48,14 +48,69 @@ class UserInfoAdapter:
         # Note: We return a dict instead of constructor UserInfo object to avoid
         # deadlocks caused by heavy library imports (torch, grpc) during the preparation phase.
 
+        pp = persona.psychological_profile
+
+        # ── Structured Emotional Triggers ─────────────────────────────────────
+        et = pp.emotional_triggers
+        emotional_triggers_dict: Dict[str, Any] = {
+            "excited_by": et.excited_by if et else [],
+            "frustrated_by": et.frustrated_by if et else [],
+            "scared_of": et.scared_of if et else [],
+        }
+
+        # ── Communication Style ───────────────────────────────────────────────
+        cs = pp.communication_style
+        communication_style_dict: Dict[str, Any] = {
+            "default": cs.default if cs else "Direct",
+            "formality": cs.formality if cs else "Semi-formal",
+            "conflict_handling": cs.conflict_handling if cs else "Pragmatic",
+            "preferred_channels": cs.preferred_channels if cs else [],
+        }
+
+        # ── Decision Pattern ──────────────────────────────────────────────────
+        dp = pp.decision_pattern
+        decision_pattern_dict: Dict[str, Any] = {
+            "speed": dp.speed if dp else "Moderate",
+            "preference": dp.preference if dp else "Data-driven",
+            "influencers": dp.influencers if dp else [],
+            "justification": dp.justification if dp else "",
+            "risk_tolerance": dp.risk_tolerance if dp else "Medium",
+        }
+
+        # ── Predicted Stance ──────────────────────────────────────────────────
+        ps = pp.predicted_stance
+        predicted_stance_dict: Dict[str, Any] = {
+            "feature": ps.feature if ps else "",
+            "prediction": ps.prediction if ps else "",
+            "confidence": ps.confidence if ps else 0.0,
+            "likely_conditions": ps.likely_conditions if ps else [],
+            "potential_objections": ps.potential_objections if ps else [],
+        }
+
         other_info: Dict[str, Any] = {
             "role": persona.role,
-            "traits": persona.psychological_profile.key_traits,
-            "user_profile": persona.psychological_profile.full_profile_text[:2000],
+            "traits": pp.key_traits,
+            "user_profile": pp.full_profile_text[:2000],
             "gender": getattr(persona, 'gender', 'unknown'),
             "age": getattr(persona, 'age', 30),
-            "mbti": persona.psychological_profile.mbti,
+            "mbti": pp.mbti,
+            "mbti_description": pp.mbti_description,
             "country": getattr(persona, 'country', 'US'),
+            # Structured psychological fields
+            "emotional_triggers": emotional_triggers_dict,
+            "communication_style": communication_style_dict,
+            "decision_pattern": decision_pattern_dict,
+            "predicted_stance": predicted_stance_dict,
+            "questions_they_will_ask": pp.questions_they_will_ask,
+            # FinalPersona metadata
+            "domain_expertise": persona.domain_expertise,
+            "profile_confidence": persona.profile_confidence,
+            "grounding_quality": persona.grounding_quality,
+            "persona_type": persona.persona_type,
+            "network_position_hint": persona.network_position_hint,
+            "influence_strength": persona.influence_strength,
+            "receptiveness": persona.receptiveness,
+            "evidence_sources": persona.evidence_sources,
         }
 
         # Inject market/buyer context for EXTERNAL personas
@@ -84,10 +139,10 @@ class UserInfoAdapter:
             }
 
         profile_data = {
-            "user_profile": persona.psychological_profile.full_profile_text[:1000],
+            "user_profile": pp.full_profile_text[:2000],
             "gender": getattr(persona, 'gender', 'unknown'),
             "age": getattr(persona, 'age', 30),
-            "mbti": persona.psychological_profile.mbti,
+            "mbti": pp.mbti,
             "country": getattr(persona, 'country', 'US'),
             "other_info": other_info,
         }
@@ -348,17 +403,30 @@ class DecisionJournal:
     def update_from_signal(self, signal: dict):
         """Apply a GM signal to the state vector."""
         self.signals.append(signal)
-        intensity = signal.get("intensity", 0.0)
         
-        # State vector update rules (domain-agnostic)
-        if intensity < -0.3:
-            self.frustration = min(1.0, self.frustration + abs(intensity) * 0.3)
-            self.satisfaction = max(0.0, self.satisfaction + intensity * 0.2)
-            self.trust = max(0.0, self.trust + intensity * 0.15)
-        elif intensity > 0.3:
-            self.satisfaction = min(1.0, self.satisfaction + intensity * 0.2)
-            self.advocacy = min(1.0, self.advocacy + intensity * 0.15)
-            self.frustration = max(0.0, self.frustration - intensity * 0.1)
+        if "satisfaction_delta" in signal:
+            # SOTA structured LLM classifier directly provides the deltas!
+            self.satisfaction = max(0.0, min(1.0, self.satisfaction + signal["satisfaction_delta"]))
+            self.frustration = max(0.0, min(1.0, self.frustration + signal["frustration_delta"]))
+            self.trust = max(0.0, min(1.0, self.trust + signal["trust_delta"]))
+            
+            adv_state = signal.get("primary_advocacy_state", "").lower()
+            if "promoter" in adv_state:
+                self.advocacy = min(1.0, self.advocacy + 0.15)
+            elif "detractor" in adv_state:
+                self.advocacy = max(0.0, self.advocacy - 0.15)
+        else:
+            intensity = signal.get("intensity", 0.0)
+            
+            # State vector update rules (domain-agnostic)
+            if intensity < -0.3:
+                self.frustration = min(1.0, self.frustration + abs(intensity) * 0.3)
+                self.satisfaction = max(0.0, self.satisfaction + intensity * 0.2)
+                self.trust = max(0.0, self.trust + intensity * 0.15)
+            elif intensity > 0.3:
+                self.satisfaction = min(1.0, self.satisfaction + intensity * 0.2)
+                self.advocacy = min(1.0, self.advocacy + intensity * 0.15)
+                self.frustration = max(0.0, self.frustration - intensity * 0.1)
         
         # Urgency tracks magnitude of recent signals
         recent = self.signals[-3:] if len(self.signals) >= 3 else self.signals

@@ -712,12 +712,12 @@ class PersonaGenerator:
         feature: FeatureProposal,
         company: CompanyContext,
     ) -> list[Stakeholder]:
-        """Create default external customer personas."""
+        """Create default external customer personas with realistic names."""
         feature_lower = feature.description.lower()
         
         external_configs = {
             "enterprise_customer": {
-                "name": "Enterprise CTO",
+                "name": "Sophia Patel",
                 "title": "Chief Technology Officer",
                 "segment": "enterprise",
                 "use_case": "Large-scale deployment, compliance, security",
@@ -725,7 +725,7 @@ class PersonaGenerator:
                 "keywords": ["enterprise", "scale", "compliance", "security", "integration"],
             },
             "midmarket_customer": {
-                "name": "Mid-Market Operations Manager",
+                "name": "Liam O'Connor",
                 "title": "VP Operations",
                 "segment": "mid-market",
                 "use_case": "Operational efficiency, cost control",
@@ -733,7 +733,7 @@ class PersonaGenerator:
                 "keywords": ["efficiency", "cost", "operations", "process", "optimization"],
             },
             "startup_customer": {
-                "name": "Startup Founder",
+                "name": "Amina Diop",
                 "title": "Co-Founder/CEO",
                 "segment": "startup",
                 "use_case": "Quick deployment, cost-effective, rapid iteration",
@@ -741,7 +741,7 @@ class PersonaGenerator:
                 "keywords": ["speed", "cost", "startup", "mvp", "rapid"],
             },
             "enduser": {
-                "name": "End User",
+                "name": "Alex Mercer",
                 "title": "Field Technician / Knowledge Worker",
                 "segment": "individual",
                 "use_case": "Ease of use, intuitive interface, minimal training",
@@ -941,13 +941,14 @@ class PersonaGenerator:
         feature: FeatureProposal,
         company: CompanyContext,
     ) -> list[Stakeholder]:
-        """Create context-aware default stakeholders."""
+        """Create context-aware default stakeholders with realistic human names."""
         feature_lower = feature.description.lower()
 
         role_configs: dict[str, dict[str, Any]] = {
             "engineering_lead": {
-                "name": "Engineering Lead",
-                "title": "Senior Engineer",
+                "name": "Marcus Vance",
+                "role": "Engineering Lead",
+                "title": "Senior Engineering Director",
                 "base_relevance": 0.85,
                 "keywords": [
                     "technical",
@@ -958,8 +959,9 @@ class PersonaGenerator:
                 ],
             },
             "product_manager": {
-                "name": "Product Manager",
-                "title": "Senior PM",
+                "name": "Sarah Jenkins",
+                "role": "Product Manager",
+                "title": "Senior Product Lead",
                 "base_relevance": 0.80,
                 "keywords": [
                     "market",
@@ -971,14 +973,16 @@ class PersonaGenerator:
                 ],
             },
             "finance_lead": {
-                "name": "Finance Lead",
-                "title": "CFO",
+                "name": "David Chen",
+                "role": "Finance Lead",
+                "title": "Chief Financial Officer",
                 "base_relevance": 0.75,
                 "keywords": ["budget", "cost", "roi", "financial", "revenue"],
             },
             "customer_success": {
-                "name": "VP Customer Success",
-                "title": "VP CS",
+                "name": "Elena Rostova",
+                "role": "VP Customer Success",
+                "title": "VP Customer Success",
                 "base_relevance": 0.70,
                 "keywords": [
                     "customer",
@@ -1014,7 +1018,7 @@ class PersonaGenerator:
             existing.append(
                 Stakeholder(
                     name=config["name"],
-                    role=config["name"],
+                    role=config["role"],
                     title=config["title"],
                     relevance_score=round(score, 2),
                     domain_relevance=", ".join(config["keywords"][:3]),

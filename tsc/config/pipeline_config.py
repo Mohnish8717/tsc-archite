@@ -16,6 +16,7 @@ class LLMProvider(str, Enum):
     GROQ = "groq"
     OPENROUTER = "openrouter"
     GOOGLE = "google"
+    OLLAMA = "ollama"
 
 
 class PipelineConfig(BaseSettings):
@@ -124,6 +125,7 @@ class PipelineConfig(BaseSettings):
             LLMProvider.GROQ: self.groq_api_key,
             LLMProvider.OPENROUTER: self.openrouter_api_key,
             LLMProvider.GOOGLE: self.google_api_key,
+            LLMProvider.OLLAMA: "ollama",
         }
         key = key_map.get(p)
         if not key:
@@ -134,6 +136,7 @@ class PipelineConfig(BaseSettings):
                 LLMProvider.GROQ: "GROQ_API_KEY",
                 LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
                 LLMProvider.GOOGLE: "GEMINI_API_KEY",
+                LLMProvider.OLLAMA: "OLLAMA_API_KEY",
             }
             key = os.getenv(env_map.get(p, ""))
 

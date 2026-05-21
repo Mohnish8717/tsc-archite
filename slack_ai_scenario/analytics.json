@@ -1,29 +1,27 @@
 {
   "user_engagement": {
-    "daily_active_users_millions": 32.5,
-    "weekly_active_users_millions": 45.0,
-    "average_time_spent_minutes": 95,
-    "messages_sent_daily_billions": 1.5
+    "daily_active_simulations": 1240,
+    "weekly_active_users_pm_roles": 480,
+    "average_simulation_runtime_minutes": 8.5,
+    "agents_spawned_daily": 15000
   },
   "feature_usage": {
-    "search_queries_daily_millions": 85,
-    "channel_recommendations_clicked_pct": 12.5,
-    "slack_ai_summaries_generated_daily": 450000
+    "telemetry_modal_clicks_daily": 3200,
+    "ocean_scores_analyzed_pct": 94.2,
+    "graphify_shortest_path_queries": 840
   },
   "geography": [
     "North America",
     "Europe",
-    "Asia Pacific",
-    "Latin America"
+    "Asia Pacific"
   ],
   "connectivity_patterns": {
-    "mobile_only_users_pct": 15,
-    "desktop_heavy_users_pct": 75,
-    "cross_device_users_pct": 10
+    "web_ui_users_pct": 82,
+    "cli_terminal_users_pct": 18
   },
   "recent_trends": {
-    "support_ticket_volume_increase_pct": 350,
-    "twitter_sentiment_score_change": -0.65,
-    "enterprise_grid_cancellation_requests_last_7_days": 14
+    "support_ticket_volume_decrease_pct": 45.0,
+    "user_satisfaction_score_change": 0.88,
+    "simulations_completed_with_realistic_names_pct": 100.0
   }
 }

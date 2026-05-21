@@ -95,3 +95,12 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Utilities for hiding scrollbars while allowing scrolling */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

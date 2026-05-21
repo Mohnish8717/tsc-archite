@@ -52,5 +52,9 @@ def create_llm_client(
         from tsc.llm.gemini_provider import GeminiClient
         return GeminiClient(api_key=k, model=m)
 
+    elif p == LLMProvider.OLLAMA:
+        from tsc.llm.ollama_provider import OllamaClient
+        return OllamaClient(api_key=k or "ollama", model=m or "llama3.2")
+
     else:
         raise ValueError(f"Unknown LLM provider: {p}")

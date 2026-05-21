@@ -54,9 +54,9 @@ from tsc.oasis.clustering import PerformBehavioralClustering, DetectConsensus, C
 from tsc.llm.factory import create_llm_client
 
 # ── 4. SOTA Mock Setup (10 Agents, 3 Rounds) ──────────────────────────────────
-N_AGENTS = 18
-sim_id = "sota_convergent_v18"
-N_ROUNDS = 20  # 35 rounds of deep interaction for 10 agents
+N_AGENTS = 2
+sim_id = "sota_convergent_v2"
+N_ROUNDS = 2  # Rapid integration test to verify GM Structured Resolution and Cohort Allocation
 MOCK_CONFIG = OASISSimulationConfig(
     simulation_name=sim_id,
     population_size=N_AGENTS,
@@ -173,7 +173,7 @@ MOCK_PROFILES = [
             }
         }
     )
-    for i, (name, role, mbti, goal) in enumerate(PERSONA_DATA)
+    for i, (name, role, mbti, goal) in enumerate(PERSONA_DATA[:N_AGENTS])
 ]
 
 async def run_sim():

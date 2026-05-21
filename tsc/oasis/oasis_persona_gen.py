@@ -599,6 +599,15 @@ class OASISUserPersonaGenerator:
         if not segments:
             return []
 
+        # Enforce that total is at least the number of segments
+        if total < len(segments):
+            logger.warning(
+                "Total simulation agents (%d) is less than the number of segments (%d). "
+                "Auto-adjusting total count to %d to guarantee representation of all segments.",
+                total, len(segments), len(segments)
+            )
+            total = len(segments)
+
         # Determine whether revenue proportions are available
         has_revenue = any(s.get("revenue_proportion") is not None for s in segments)
 
@@ -612,16 +621,26 @@ class OASISUserPersonaGenerator:
 
         raw_props = [_effective_prop(s, len(segments)) for s in segments]
         total_prop = sum(raw_props) or 1.0
-        distribution = []
-        allocated = 0
 
-        for i, (seg, raw) in enumerate(zip(segments, raw_props)):
-            prop = raw / total_prop
-            if i == len(segments) - 1:
-                count = total - allocated
-            else:
-                count = max(1, round(prop * total))
-            allocated += count
+        # Guarantee at least 1 agent per segment
+        counts = [1] * len(segments)
+        remaining = total - len(segments)
+
+        if remaining > 0:
+            allocated_remaining = 0
+            for i, raw in enumerate(raw_props):
+                prop = raw / total_prop
+                if i == len(segments) - 1:
+                    add_count = remaining - allocated_remaining
+                else:
+                    desired = round(prop * remaining)
+                    add_count = min(desired, remaining - allocated_remaining)
+                add_count = max(0, add_count)
+                allocated_remaining += add_count
+                counts[i] += add_count
+
+        distribution = []
+        for seg, count in zip(segments, counts):
             distribution.append((seg, count))
 
         return distribution

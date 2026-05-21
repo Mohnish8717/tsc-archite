@@ -14,6 +14,7 @@ function App() {
   const ws = useWebSocket();
   const { isConnected, simulationStatus, simulationTitle, simulationProgress } = usePipelineStore();
   const [activeLayer, setActiveLayer] = useState(0); // 0 = landing page
+  const [statusWidth, setStatusWidth] = useState(450);
 
   const navItems = [
     { id: 0, name: 'Home', icon: Home },
@@ -103,15 +104,15 @@ function App() {
         style={{ height: '72px' }}
       >
         {/* Logo area */}
-        <div className="flex items-center gap-3 px-6 border-r-8 border-black bg-black text-white">
+        <div className="flex items-center gap-3 px-6 border-r-8 border-black bg-black text-white shrink-0">
           <Activity className="text-brand w-5 h-5" strokeWidth={3} />
-          <span className="font-black text-base uppercase tracking-tighter whitespace-nowrap">
+          <span className="font-black text-base uppercase tracking-tighter whitespace-nowrap hidden sm:inline">
             PREDICTIVE<span className="text-brand">REALITY</span>ENGINE
           </span>
         </div>
 
         {/* Pipeline layer tabs */}
-        <nav className="flex-1 flex items-stretch overflow-x-auto">
+        <nav className="flex-1 flex items-stretch overflow-x-auto min-w-0 scrollbar-hide">
           {navItems.map((item, i) => (
             <button
               key={item.id}
@@ -130,30 +131,59 @@ function App() {
         </nav>
 
         {/* Status bar */}
-        <div className="flex items-center gap-4 px-6 border-l-8 border-black">
+        <div 
+          className="flex items-center gap-4 px-6 border-l-8 border-black shrink-0 relative"
+          style={{ width: statusWidth, minWidth: '350px', maxWidth: '80vw' }}
+        >
+          {/* Custom resize handle over the black border */}
+          <div 
+            className="absolute -left-2 top-0 bottom-0 w-4 cursor-col-resize z-50"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startWidth = statusWidth;
+              
+              const onMouseMove = (moveEvent: MouseEvent) => {
+                setStatusWidth(Math.max(350, Math.min(window.innerWidth * 0.8, startWidth - (moveEvent.clientX - startX))));
+              };
+              
+              const onMouseUp = () => {
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+              };
+              
+              document.addEventListener('mousemove', onMouseMove);
+              document.addEventListener('mouseup', onMouseUp);
+            }}
+          />
+
           {simulationStatus !== 'idle' && (
-            <div className="flex items-center gap-2 border-4 border-black px-3 py-1">
+            <div className="flex items-center gap-2 border-4 border-black px-3 py-1 flex-1 min-w-0 overflow-hidden">
               {simulationStatus === 'running' ? (
                 <>
-                  <span className="w-2 h-2 bg-brand animate-pulse" />
-                  <span className="font-black text-xs uppercase tracking-widest text-brand">{simulationTitle}</span>
-                  <span className="font-black text-xs text-black/50">{simulationProgress?.percent ?? 0}%</span>
+                  <span className="w-2 h-2 bg-brand animate-pulse shrink-0" />
+                  <div 
+                    className="font-black text-xs uppercase tracking-widest text-brand overflow-x-auto whitespace-nowrap scrollbar-hide flex-1 min-w-0"
+                  >
+                    {simulationTitle}
+                  </div>
+                  <span className="font-black text-xs text-black/50 shrink-0">{simulationProgress?.percent ?? 0}%</span>
                 </>
               ) : (
                 <>
-                  <span className="w-2 h-2 bg-green-600" />
-                  <span className="font-black text-xs uppercase tracking-widest text-green-600">Complete</span>
+                  <span className="w-2 h-2 bg-green-600 shrink-0" />
+                  <span className="font-black text-xs uppercase tracking-widest text-green-600 shrink-0">Complete</span>
                 </>
               )}
             </div>
           )}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <span className={`w-3 h-3 border-2 border-black ${isConnected ? 'bg-brand animate-pulse' : 'bg-red-500'}`} />
             <span className="font-black text-xs uppercase tracking-widest">{isConnected ? 'Live' : 'Offline'}</span>
           </div>
           <button
             onClick={() => setActiveLayer(0)}
-            className="px-4 py-2 bg-black text-white border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-all hover:translate-x-1 hover:translate-y-1 hover:bg-brand hover:text-black"
+            className="shrink-0 px-4 py-2 bg-black text-white border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-all hover:translate-x-1 hover:translate-y-1 hover:bg-brand hover:text-black"
           >
             Home
           </button>

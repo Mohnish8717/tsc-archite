@@ -54,6 +54,10 @@ class ShadowAgent:
     decisions: list = field(default_factory=list)
     signals: list = field(default_factory=list)
 
+    def state_vector(self) -> list:
+        """Return numerical state for clustering."""
+        return [self.satisfaction, self.frustration, self.trust, self.urgency, self.advocacy]
+
 
 class PopulationSampler:
     """Manages the split between active (LLM-powered) and shadow agents.
@@ -152,51 +156,124 @@ class PopulationSampler:
         
         logger.info(f"🔁 State propagated to {propagated:,} shadow agents")
     
-    def build_extrapolated_report(self, decision_journals: Dict[str, Any]) -> Dict[str, Any]:
+    def build_extrapolated_report(
+        self,
+        decision_journals: Dict[str, Any],
+        timesteps_completed: int = 10,
+        segments: list = None
+    ) -> Dict[str, Any]:
         """Build population-scale metrics from active + shadow agents combined.
         
         Returns extrapolated values that represent the FULL declared population,
         not just the LLM-active cohort.
         """
-        from .models import DecisionJournal
-        
         # Collect all states (active journals + shadow agents)
-        all_satisfaction, all_frustration, all_trust, all_advocacy = [], [], [], []
-        all_decisions = []
-        
-        # Active agents
+        combined_agents = []
         for journal in decision_journals.values():
-            all_satisfaction.append(journal.satisfaction)
-            all_frustration.append(journal.frustration)
-            all_trust.append(journal.trust)
-            all_advocacy.append(journal.advocacy)
-            all_decisions.extend(journal.decisions)
-        
-        # Shadow agents (post propagation)
+            combined_agents.append(journal)
         for shadow in self.shadow_agents:
-            all_satisfaction.append(shadow.satisfaction)
-            all_frustration.append(shadow.frustration)
-            all_trust.append(shadow.trust)
-            all_advocacy.append(shadow.advocacy)
-            all_decisions.extend(shadow.decisions)
+            combined_agents.append(shadow)
+            
+        total = len(combined_agents) or 1
+        n = self.declared_n
         
-        total = len(all_satisfaction) or 1
+        # 1. NPS & Risk counts
+        high_risk_count = 0
+        low_risk_count = 0
+        moderate_count = 0
+        promoter_count = 0
+        detractor_count = 0
         
-        # Population-scale metrics
-        pop_high_risk = sum(1 for f in all_frustration if f > 0.6) / total
-        pop_low_risk = sum(1 for s in all_satisfaction if s > 0.6) / total
-        pop_promoters = sum(1 for a in all_advocacy if a > 0.6) / total
-        pop_detractors = sum(1 for f in all_frustration if f > 0.6) / total
+        for agent in combined_agents:
+            if agent.frustration > 0.6:
+                high_risk_count += 1
+                detractor_count += 1
+            elif agent.frustration <= 0.3 and agent.satisfaction > 0.5:
+                low_risk_count += 1
+                if agent.advocacy > 0.6:
+                    promoter_count += 1
+            else:
+                moderate_count += 1
+                
+        pop_high_risk = high_risk_count / total
+        pop_low_risk = low_risk_count / total
+        pop_promoters = promoter_count / total
+        pop_detractors = detractor_count / total
         pop_nps = round((pop_promoters - pop_detractors) * 100, 1)
         
-        # Confidence interval (95%) via normal approximation
-        import math
-        n = self.declared_n
-        se = math.sqrt((pop_high_risk * (1 - pop_high_risk)) / max(self.llm_sample_size, 1))
-        ci_margin = 1.96 * se  # 95% CI
+        risk_dist = {
+            "HIGH_RISK": round(high_risk_count / total, 3),
+            "MODERATE": round(moderate_count / total, 3),
+            "LOW_RISK": round(low_risk_count / total, 3)
+        }
         
+        # 2. Churn velocity & Adoption momentum
+        churn_velocity = sum(agent.frustration for agent in combined_agents) / (total * max(timesteps_completed, 1))
+        adoption_momentum = sum(agent.satisfaction - 0.5 for agent in combined_agents) / (total * max(timesteps_completed, 1))
+        
+        # 3. Top risk factors
+        risk_counts = {}
+        for agent in combined_agents:
+            has_risk = False
+            for s in agent.signals:
+                if s.get("intensity", 0.0) < -0.2:
+                    sig_type = s.get("type")
+                    if sig_type and sig_type != "neutral":
+                        risk_counts[sig_type] = risk_counts.get(sig_type, 0) + 1
+                        has_risk = True
+                        
+        top_risk_factors = []
+        for factor, count in sorted(risk_counts.items(), key=lambda x: x[1], reverse=True):
+            top_risk_factors.append({
+                "factor": factor,
+                "frequency": round(count / total, 3)
+            })
+            
+        # 4. Decision events
+        decision_events = []
+        for agent in combined_agents:
+            for d in agent.decisions:
+                decision_events.append({
+                    "timestep": d.get("timestep", 0),
+                    "decision": d.get("decision", ""),
+                    "confidence": d.get("confidence", 0.0),
+                    "trigger": d.get("trigger", ""),
+                    "agent_id": agent.agent_id,
+                    "agent_name": agent.agent_name,
+                })
+        decision_events.sort(key=lambda x: x["timestep"])
+        
+        # Confidence interval (95%) via normal approximation
+        se = math.sqrt((pop_high_risk * (1 - pop_high_risk)) / max(self.llm_sample_size, 1))
+        ci_margin = 1.96 * se
+        
+        # Fallback segments if None
+        if segments is None:
+            high_risk_agents = [a for a in combined_agents if a.frustration > 0.6]
+            low_risk_agents = [a for a in combined_agents if a.frustration <= 0.3 and a.satisfaction > 0.5]
+            moderate_agents = [a for a in combined_agents if a not in high_risk_agents and a not in low_risk_agents]
+            
+            segments = []
+            for name, group in [("High-Risk Segments", high_risk_agents), ("Moderate Segments", moderate_agents), ("Low-Risk Segments", low_risk_agents)]:
+                if group:
+                    gn = len(group)
+                    segments.append({
+                        "name": name,
+                        "size": gn,
+                        "pct": round(gn / total, 2),
+                        "avg_satisfaction": round(sum(a.satisfaction for a in group) / gn, 3),
+                        "avg_frustration": round(sum(a.frustration for a in group) / gn, 3),
+                        "avg_trust": round(sum(a.trust for a in group) / gn, 3),
+                        "avg_urgency": round(sum(a.urgency for a in group) / gn, 3),
+                        "avg_advocacy": round(sum(a.advocacy for a in group) / gn, 3),
+                        "top_signals": [],
+                        "decision_events": sum(len(a.decisions) for a in group),
+                        "member_ids": [a.agent_id for a in group]
+                    })
+                    
         return {
             "declared_population": self.declared_n,
+            "population_size": self.declared_n,
             "llm_active_cohort": self.llm_sample_size,
             "shadow_agents": len(self.shadow_agents),
             "extrapolated_high_risk_pct": round(pop_high_risk * 100, 1),
@@ -206,6 +283,15 @@ class PopulationSampler:
             "extrapolated_champion_count": int(pop_promoters * n),
             "statistical_confidence": "95%",
             "margin_of_error": f"±{ci_margin*100:.1f}%",
+            
+            # Rich high-fidelity metrics
+            "segments": segments,
+            "risk_distribution": risk_dist,
+            "net_promoter_score": pop_nps,
+            "churn_velocity": round(churn_velocity, 4),
+            "adoption_momentum": round(adoption_momentum, 4),
+            "decision_events": decision_events,
+            "top_risk_factors": top_risk_factors,
         }
 
 

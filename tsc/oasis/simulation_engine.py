@@ -20,6 +20,17 @@ import traceback
 from typing import List, Dict, Any, Optional, Union, cast
 from datetime import datetime
 from unittest.mock import MagicMock
+from pydantic import BaseModel, Field
+
+# ── Game Master Structured Resolution Model ───────────────────────────────────
+class GameMasterResolution(BaseModel):
+    satisfaction_delta: float = Field(..., description="Change in satisfaction from -0.5 to 0.5. Positive for improvement, negative for decline.")
+    frustration_delta: float = Field(..., description="Change in frustration from -0.5 to 0.5. Positive for increasing frustration, negative for resolving/decreasing frustration.")
+    trust_delta: float = Field(..., description="Change in trust from -0.5 to 0.5. Positive for increasing trust, negative for erosion.")
+    primary_advocacy_state: str = Field(..., description="Core customer state: detractor, passive, or promoter.")
+    primary_signal_type: str = Field(..., description="Select the most accurate behavioral signal classification from: 'exit_intent', 'friction', 'purchase_intent', 'competitive_threat', 'trust_signal', 'trust_erosion', 'utility', 'negative_utility', 'privacy_concern', 'roi_inquiry', 'evaluation_intent', 'expansion_signal', 'executive_escalation', 'workaround_dependency', 'conditional_approval', 'neutral'.")
+    sycophancy_collapse_detected: bool = Field(False, description="True if the agent suddenly capitulates or agrees with a statement despite previous high frustration or skepticism.")
+    reasoning: str = Field(..., description="Core customer reasoning justifying state change.")
 
 # ── Module Logger ────────────────────────────────────────────────────────────
 logger = logging.getLogger("tsc.oasis.engine")
@@ -91,6 +102,7 @@ async def RunOASISSimulation(
     market_context: Optional[Dict[str, Any]] = None,
     base_dir: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "log", "oasis_runs"),
     available_actions: Optional[List[Any]] = None,
+    llm_client: Optional[Any] = None,  # Added structured Game Master LLM Client
 ) -> MarketSentimentSeries:
     """
     Run a CAMEL-AI OASIS social simulation with full macOS deadlock immunity.
@@ -122,6 +134,34 @@ async def RunOASISSimulation(
     from camel.models import ModelFactory
     from camel.types import ModelType, ModelPlatformType
     from camel.messages import BaseMessage
+    from tsc.llm.base import LLMClient
+
+    # Auto-initialize LLM client for Game Master Structured classification if None
+    if llm_client is None:
+        try:
+            from tsc.llm.factory import create_llm_client
+            llm_client = create_llm_client()
+        except Exception:
+            logger.info("Could not auto-initialize LLMClient for Game Master. Fallback to regex resolution enabled.")
+
+    gm_llm_client = None
+    gm_prov_env = os.getenv("TSC_GM_LLM_PROVIDER")
+    gm_mod_env = os.getenv("TSC_GM_LLM_MODEL")
+    if gm_prov_env:
+        try:
+            from tsc.config import LLMProvider
+            from tsc.llm.factory import create_llm_client
+            gm_llm_client = create_llm_client(
+                provider=LLMProvider(gm_prov_env),
+                model=gm_mod_env
+            )
+            logger.info(f"Initialized dedicated Game Master LLM client: {gm_prov_env} / {gm_mod_env}")
+        except Exception as e:
+            logger.warning(f"Could not initialize dedicated Game Master LLM: {e}")
+
+    if gm_llm_client is None:
+        gm_llm_client = llm_client
+
 
     # ── 1. Config Access (clean, no __import__ hacks) ────────────────────────
     from tsc.config import settings as tsc_settings
@@ -339,8 +379,17 @@ async def RunOASISSimulation(
         display_name = info.get("name", f"Agent {profile.agent_id}")
         other = info.get("profile", {}).get("other_info", {})
         role = other.get("role", info.get("description", "User"))
-        traits = other.get("pain_points", [])[:3]
+        # FIX: key is "traits" not "pain_points" — was always returning []
+        traits = other.get("traits", [])[:3] if isinstance(other.get("traits"), list) else []
         bio = info.get("profile", {}).get("user_profile", "") or info.get("description", "")
+        # FIX: buyer_journey stored as dict for EXTERNAL personas — extract stage string safely
+        bj_raw = other.get("buyer_journey")
+        if isinstance(bj_raw, dict):
+            buyer_journey_stage = bj_raw.get("awareness_channel", "")
+            buyer_journey_detail = bj_raw
+        else:
+            buyer_journey_stage = bj_raw or ""
+            buyer_journey_detail = None
         local_logger.log_spawn(
             agent_id=str(profile.agent_id),
             agent_name=display_name,
@@ -349,9 +398,25 @@ async def RunOASISSimulation(
             traits=traits,
             impact=getattr(profile, 'influence_strength', 0.5),
             mbti=other.get("mbti", ""),
+            mbti_description=other.get("mbti_description", ""),
             ocean_scores=other.get("ocean_scores", {}),
-            buyer_journey=other.get("buyer_journey", ""),
+            buyer_journey=buyer_journey_stage,
+            buyer_journey_detail=buyer_journey_detail,
             bio=bio,
+            emotional_triggers=other.get("emotional_triggers"),
+            communication_style=other.get("communication_style"),
+            decision_pattern=other.get("decision_pattern"),
+            predicted_stance=other.get("predicted_stance"),
+            questions_they_will_ask=other.get("questions_they_will_ask", []),
+            domain_expertise=other.get("domain_expertise", []),
+            profile_confidence=other.get("profile_confidence", 0.0),
+            grounding_quality=other.get("grounding_quality", 1.0),
+            persona_type=other.get("persona_type", "INTERNAL"),
+            network_position_hint=other.get("network_position_hint", "peripheral"),
+            influence_strength=getattr(profile, 'influence_strength', 0.5),
+            receptiveness=getattr(profile, 'receptiveness', 0.5),
+            market_context=other.get("market_context"),
+            evidence_sources=other.get("evidence_sources", []),
         )
     logger.info(f"✅ Emitted {len(agent_profiles)} agent_spawn events to actions.jsonl")
 
@@ -717,30 +782,130 @@ async def RunOASISSimulation(
         re.I,
     )
 
-    def _gm_resolve(content: str, timestep: int, agent_id: str = "") -> dict:
+    # Closure-scoped semantic deduplication cache
+    # Key: canonicalized comment string. Value: deep copy of GM resolution dict.
+    semantic_cache = {}
+
+    def canonicalize_text(text: str) -> str:
+        # Lowercase, strip punctuation and extra whitespace
+        import re
+        t = text.lower().strip()
+        t = re.sub(r"[^\w\s]", "", t)
+        return " ".join(t.split())
+
+    def get_jaccard_similarity(s1: str, s2: str) -> float:
+        w1 = set(s1.split())
+        w2 = set(s2.split())
+        if not w1 or not w2:
+            return 0.0
+        return len(w1.intersection(w2)) / len(w1.union(w2))
+
+    async def _gm_resolve(content: str, timestep: int, agent_id: str = "") -> dict:
         """Game Master: Classify behavioral intent from natural language.
 
-        Fix #8: Also flags sycophancy_collapse when agent uses agreement language
-        while their DecisionJournal is in HIGH_RISK or SKEPTICAL state.
+        Uses zero-shot structured LLM classification when a GM LLM client is available,
+        with 100% resilient fallback to the classic regex-based parser.
+        Supports semantic similarity cache lookup and fast selective bypass.
         """
         if not content:
             return {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
-        
-        signals_found = []
+
+        canonical_key = canonicalize_text(content)
+
+        import copy
+        # 1. Exact match cache check
+        if canonical_key in semantic_cache:
+            cached_res = copy.deepcopy(semantic_cache[canonical_key])
+            cached_res["timestep"] = timestep
+            logger.info(f"    🎲 GM Cache HIT (Exact): '{content[:50]}...' resolved instantly")
+            return cached_res
+
+        # 2. Semantic Jaccard match cache check
+        for cached_key, cached_val in semantic_cache.items():
+            if get_jaccard_similarity(canonical_key, cached_key) >= 0.90:
+                cached_res = copy.deepcopy(cached_val)
+                cached_res["timestep"] = timestep
+                logger.info(f"    🎲 GM Cache HIT (Semantic Jaccard): '{content[:50]}...' resolved instantly")
+                return cached_res
+
+        # Retrieve prior internal state frustration if agent exists
+        journal = decision_journals.get(agent_id) if agent_id else None
+        agent_frustration = journal.frustration if journal else 0.0
+
+        # Run fast regex scanner
+        matched_signals = []
         factors = set()
         for pattern, signal_type, intensity in _GM_SIGNALS:
             if pattern.search(content):
-                signals_found.append((signal_type, intensity))
-                factors.add(signal_type.split("_")[0])  # Extract factor root
+                matched_signals.append((signal_type, intensity))
+                factors.add(signal_type.split("_")[0])
 
-        # Sycophancy collapse detection (Fix #8)
-        # A HIGH_RISK or frustrated agent suddenly expressing agreement = data validity flag
-        if _SYCOPHANCY_PATTERNS.search(content):
-            journal = decision_journals.get(agent_id) if agent_id else None
-            if journal and (journal.frustration > 0.5 or journal.trust < 0.35):
-                signals_found.append(("sycophancy_collapse", -0.3))
-                factors.add("sycophancy")
-                # G9: emit WS event with triggering content so UI can show the actual message
+        # Detect sycophancy collapse pattern via regex scanner
+        sycophancy_match = _SYCOPHANCY_PATTERNS.search(content)
+        if sycophancy_match and (agent_frustration > 0.5 or (journal and journal.trust < 0.35)):
+            matched_signals.append(("sycophancy_collapse", -0.3))
+            factors.add("sycophancy")
+
+        # Determine dominant regex signal
+        if matched_signals:
+            dominant = max(matched_signals, key=lambda s: abs(s[1]))
+            dominant_type = dominant[0]
+            dominant_val = dominant[1]
+        else:
+            dominant_type = "neutral"
+            dominant_val = 0.0
+
+        CRITICAL_SIGNALS = {
+            "exit_intent", "refusal", "concern", "regulatory_risk", "friction",
+            "competitive_threat", "trust_erosion", "negative_utility", "privacy_concern",
+            "workaround_dependency", "sycophancy_collapse", "executive_escalation"
+        }
+
+        # 3. Selective routing logic:
+        # Route to LLM if it matches a critical signal OR agent frustration is high (>0.5)
+        has_critical = any(sig in CRITICAL_SIGNALS for sig, _ in matched_signals)
+        route_to_llm = (has_critical or agent_frustration > 0.5) and (gm_llm_client is not None)
+
+        if not route_to_llm:
+            # Bypass LLM and resolve via fast static deltas
+            if dominant_type in ["enthusiasm", "advocacy", "expansion_signal"]:
+                sat_d = 0.20
+                fru_d = -0.10
+                tru_d = 0.20
+            elif dominant_type in ["utility", "purchase_intent", "roi_inquiry", "evaluation_intent"]:
+                sat_d = 0.15
+                fru_d = -0.05
+                tru_d = 0.10
+            elif dominant_type == "trust_signal":
+                sat_d = 0.10
+                fru_d = -0.05
+                tru_d = 0.15
+            elif dominant_type == "conditional_approval":
+                sat_d = 0.08
+                fru_d = 0.0
+                tru_d = 0.05
+            else:
+                sat_d = 0.0
+                fru_d = 0.0
+                tru_d = 0.0
+
+            bypassed_res = {
+                "type": dominant_type,
+                "intensity": dominant_val,
+                "timestep": timestep,
+                "factors": list(factors),
+                "quote": content[:200],
+                "satisfaction_delta": sat_d,
+                "frustration_delta": fru_d,
+                "trust_delta": tru_d,
+                "primary_advocacy_state": "promoter" if dominant_val > 0.4 else ("detractor" if dominant_val < -0.4 else "passive"),
+                "reasoning": f"Resolved via high-performance fast static filter for signal '{dominant_type}'.",
+                "sycophancy_collapse_detected": dominant_type == "sycophancy_collapse",
+                "all_signals": [s[0] for s in matched_signals] if matched_signals else [],
+            }
+
+            # Log sycophancy collapse if detected via regex fallback
+            if dominant_type == "sycophancy_collapse" and journal:
                 if local_logger is not None:
                     local_logger.log_simulation_event("sycophancy_alert", {
                         "agent_id": agent_id,
@@ -754,21 +919,125 @@ async def RunOASISSimulation(
                         "signal_history": [s.get("type", "neutral") for s in journal.signals[-5:]],
                     })
 
-        if not signals_found:
-            return {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
-        
-        # Use strongest signal as dominant
-        dominant = max(signals_found, key=lambda s: abs(s[1]))
-        avg_intensity = sum(s[1] for s in signals_found) / len(signals_found)
-        
-        return {
-            "type": dominant[0],
-            "intensity": round(avg_intensity, 2),
-            "timestep": timestep,
-            "factors": list(factors),
-            "quote": content[:200],
-            "all_signals": [s[0] for s in signals_found],
-        }
+            # Save in semantic cache under canonical key
+            semantic_cache[canonical_key] = copy.deepcopy(bypassed_res)
+            logger.info(f"    🎲 GM Bypass (Static Filter): '{content[:50]}...' routed to static delta (type={dominant_type})")
+            return bypassed_res
+
+        # Try structured LLM classification
+        try:
+            schema = None
+            try:
+                if hasattr(GameMasterResolution, "model_json_schema"):
+                    schema = GameMasterResolution.model_json_schema()
+                else:
+                    schema = GameMasterResolution.schema()
+            except Exception:
+                pass
+
+            system_prompt = (
+                "You are the OASIS Social Simulation Game Master. Your job is to analyze agent posts/comments "
+                "to extract direct updates to their state vector (satisfaction, frustration, trust) and classify "
+                "their customer signaling state.\n\n"
+                "You MUST perform zero-shot analysis and return structured JSON conforming to the requested schema.\n\n"
+                "Schema Fields:\n"
+                "- satisfaction_delta: float between -0.5 and 0.5. Positive if the comment indicates improved/rising satisfaction. Negative if declining.\n"
+                "- frustration_delta: float between -0.5 and 0.5. Positive if indicating rising frustration, negative if frustration is resolving.\n"
+                "- trust_delta: float between -0.5 and 0.5. Positive if building trust, negative if eroding trust.\n"
+                "- primary_advocacy_state: 'detractor', 'passive', or 'promoter'.\n"
+                "- primary_signal_type: Select the single most accurate signal classification from:\n"
+                "  'exit_intent', 'friction', 'purchase_intent', 'competitive_threat', 'trust_signal', 'trust_erosion', 'utility', 'negative_utility', 'privacy_concern', 'roi_inquiry', 'evaluation_intent', 'expansion_signal', 'executive_escalation', 'workaround_dependency', 'conditional_approval', 'neutral'.\n"
+                "- sycophancy_collapse_detected: True if the agent suddenly capitulates or agrees with social pressure despite having prior frustration/skepticism.\n"
+                "- reasoning: Short explanation of your classification decision."
+            )
+
+            user_prompt_parts = []
+            if journal:
+                user_prompt_parts.append(
+                    f"Prior Internal State:\n"
+                    f"- Satisfaction: {journal.satisfaction:.2f}\n"
+                    f"- Frustration: {journal.frustration:.2f}\n"
+                    f"- Trust: {journal.trust:.2f}\n"
+                    f"- Advocacy: {journal.advocacy:.2f}\n"
+                )
+            user_prompt_parts.append(f"Agent Comment/Post:\n\"\"\"\n{content}\n\"\"\"")
+            user_prompt = "\n".join(user_prompt_parts)
+
+            # Call LLM client
+            res = await gm_llm_client.analyze(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                json_schema=schema,
+                temperature=0.0  # Zero-shot, highly deterministic
+            )
+
+            # Parse and validate the response dictionary
+            satisfaction_delta = float(res.get("satisfaction_delta", 0.0))
+            frustration_delta = float(res.get("frustration_delta", 0.0))
+            trust_delta = float(res.get("trust_delta", 0.0))
+            primary_advocacy_state = str(res.get("primary_advocacy_state", "passive"))
+            primary_signal_type = str(res.get("primary_signal_type", "neutral"))
+            sycophancy_collapse_detected = bool(res.get("sycophancy_collapse_detected", False))
+            reasoning = str(res.get("reasoning", ""))
+
+            # Compute synthetic intensity
+            intensity = round(satisfaction_delta + trust_delta - frustration_delta, 2)
+
+            # Log sycophancy collapse if detected
+            if sycophancy_collapse_detected and journal:
+                if local_logger is not None:
+                    local_logger.log_simulation_event("sycophancy_alert", {
+                        "agent_id": agent_id,
+                        "agent_name": journal.agent_name,
+                        "timestep": timestep,
+                        "pattern": "capitulation_under_pressure",
+                        "frustration_at_collapse": round(journal.frustration, 3),
+                        "trust_at_collapse": round(journal.trust, 3),
+                        "data_validity_warning": True,
+                        "triggering_content": content[:300] if content else "",
+                        "signal_history": [s.get("type", "neutral") for s in journal.signals[-5:]],
+                    })
+
+            llm_res = {
+                "type": primary_signal_type,
+                "intensity": intensity,
+                "timestep": timestep,
+                "factors": [primary_signal_type.split("_")[0]] if primary_signal_type != "neutral" else [],
+                "quote": content[:200],
+                "satisfaction_delta": satisfaction_delta,
+                "frustration_delta": frustration_delta,
+                "trust_delta": trust_delta,
+                "primary_advocacy_state": primary_advocacy_state,
+                "reasoning": reasoning,
+                "sycophancy_collapse_detected": sycophancy_collapse_detected,
+                "all_signals": [primary_signal_type] if primary_signal_type != "neutral" else [],
+            }
+
+            # Cache the structured LLM result
+            semantic_cache[canonical_key] = copy.deepcopy(llm_res)
+            logger.info(f"    🎲 GM LLM Resolved: '{content[:50]}...' routed to LLM GM (type={primary_signal_type})")
+            return llm_res
+
+        except Exception as llm_err:
+            logger.warning(f"Structured GM LLM resolution failed (falling back to regex): {llm_err}")
+
+        # Fallback to regex-based parsing
+        if not matched_signals:
+            fallback_res = {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
+        else:
+            fallback_res = {
+                "type": dominant_type,
+                "intensity": round(sum(s[1] for s in matched_signals) / len(matched_signals), 2),
+                "timestep": timestep,
+                "factors": list(factors),
+                "quote": content[:200],
+                "all_signals": [s[0] for s in matched_signals],
+            }
+
+        # Cache the fallback result as well
+        semantic_cache[canonical_key] = copy.deepcopy(fallback_res)
+        return fallback_res
+
 
     def _detect_action_type(content: str, action_resp=None) -> str:
         """Detect CAMEL platform action type.
@@ -912,6 +1181,7 @@ async def RunOASISSimulation(
                 break
 
             logger.info(f"━━━ Timestep {t+1}/{config.num_timesteps} ━━━")
+            timestep_comments = []
             async def process_agent(idx, agent):
                 agent_id   = str(agent.social_agent_id)
                 agent_name = agent_id_to_name.get(agent_id, "Unknown")
@@ -1099,26 +1369,6 @@ async def RunOASISSimulation(
                         # ── Extract target_id for frontend network rendering ──
                         # Parse target agent or thread from the tool call result
                         action_target_id = None
-                        
-                        # —— Game Master: Resolve behavioral signal ——
-                        # Fix #8: pass agent_id so sycophancy_collapse can check journal state
-                        gm_signal = _gm_resolve(content, timestep=t, agent_id=agent_id)
-                        if agent_id in decision_journals and gm_signal["type"] != "neutral":
-                            # Weight signal intensity by agent influence strength:
-                            # a power user's exit intent carries more predictive weight
-                            # than a new evaluator's identical wording.
-                            _inf = getattr(profile, "influence_strength", 0.5)
-                            weighted_signal = {
-                                **gm_signal,
-                                "intensity": round(gm_signal["intensity"] * _inf, 3),
-                                "raw_intensity": gm_signal["intensity"],
-                            }
-                            decision_journals[agent_id].update_from_signal(weighted_signal)
-                            logger.info(f"    🎲 GM State Shift: {agent_name} → {gm_signal['type']} "
-                                        f"(raw={gm_signal['intensity']:+.2f}, "
-                                        f"weighted={weighted_signal['intensity']:+.3f}, "
-                                        f"inf={_inf:.2f})")
-
                         if action_resp and hasattr(action_resp, 'info') and action_resp.info:
                             # OASIS returns tool call info with post_id or comment_id.
                             # action_resp.info['tool_calls'] is a list of ToolCallingRecord
@@ -1143,38 +1393,17 @@ async def RunOASISSimulation(
                             if mention:
                                 action_target_id = mention.group(1)
 
-
-
-                        local_logger.log_action(
-                            agent_id=agent_id,
-                            agent_name=agent_name,
-                            action_type=action_type,
-                            content=content,
-                            timestep=t,
-                            metadata={
-                                "target_id": str(action_target_id) if action_target_id else None,
-                                "confidence": abs(gm_signal.get("intensity", 0.5)),
-                                "signal_type": gm_signal.get("type", "neutral"),
-                                # G6: full signal detail for UI forensics
-                                "all_signals": gm_signal.get("all_signals", []),
-                                "signal_factors": gm_signal.get("factors", []),
-                                "signal_quote": gm_signal.get("quote", ""),
-                                "raw_intensity": gm_signal.get("intensity", 0.0),
-                            }
-                        )
-                        
-                        if HINDSIGHT_AVAILABLE and memory_manager:
-                            await memory_manager.structured_retain(
-                                str(agent_id), agent_name, action_type, content, t
-                            )
-                            logger.info(f"    💾 Hindsight retained action for {agent_name}")
-
-                        if agent_id not in series.agent_interactions:
-                            series.agent_interactions[agent_id] = []
-                        series.agent_interactions[agent_id].append(f"ROUND {t+1} | {action_type}: {content}")
-
-                        logger.info(f"  ✓ [{idx+1}/{len(social_agents)}] {agent_name} → {action_type}")
-                        logger.info(f"    💬 \"{content[:150]}...\"")
+                        # Accumulate comment information for post-gather Batched Parallel GM Resolution
+                        timestep_comments.append({
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "content": content,
+                            "action_type": action_type,
+                            "profile": profile,
+                            "action_target_id": action_target_id,
+                            "action_resp": action_resp,
+                            "idx": idx,
+                        })
                         break
 
                     except Exception as e:
@@ -1199,6 +1428,72 @@ async def RunOASISSimulation(
             # Execute all agents concurrently using the defined semaphore
             tasks = [process_agent(idx, agent) for idx, agent in enumerate(social_agents)]
             await asyncio.gather(*tasks)
+
+            # ── Batched Parallel GM Resolution & Safe Sequential Updates ──
+            if timestep_comments:
+                gm_tasks = []
+                for item in timestep_comments:
+                    gm_tasks.append(_gm_resolve(item["content"], timestep=t, agent_id=item["agent_id"]))
+                
+                gm_signals = await asyncio.gather(*gm_tasks)
+                
+                for item, gm_signal in zip(timestep_comments, gm_signals):
+                    agent_id = item["agent_id"]
+                    agent_name = item["agent_name"]
+                    content = item["content"]
+                    action_type = item["action_type"]
+                    profile = item["profile"]
+                    action_target_id = item["action_target_id"]
+                    idx = item["idx"]
+                    
+                    if agent_id in decision_journals and gm_signal["type"] != "neutral":
+                        # Weight signal intensity by agent influence strength
+                        _inf = getattr(profile, "influence_strength", 0.5)
+                        weighted_signal = {
+                            **gm_signal,
+                            "intensity": round(gm_signal["intensity"] * _inf, 3),
+                            "raw_intensity": gm_signal["intensity"],
+                        }
+                        if "satisfaction_delta" in gm_signal:
+                            weighted_signal["satisfaction_delta"] = round(gm_signal["satisfaction_delta"] * _inf, 3)
+                            weighted_signal["frustration_delta"] = round(gm_signal["frustration_delta"] * _inf, 3)
+                            weighted_signal["trust_delta"] = round(gm_signal["trust_delta"] * _inf, 3)
+
+                        decision_journals[agent_id].update_from_signal(weighted_signal)
+                        logger.info(f"    🎲 GM State Shift: {agent_name} → {gm_signal['type']} "
+                                    f"(raw={gm_signal['intensity']:+.2f}, "
+                                    f"weighted={weighted_signal['intensity']:+.3f}, "
+                                    f"inf={_inf:.2f})")
+
+                    local_logger.log_action(
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        action_type=action_type,
+                        content=content,
+                        timestep=t,
+                        metadata={
+                            "target_id": str(action_target_id) if action_target_id else None,
+                            "confidence": abs(gm_signal.get("intensity", 0.5)),
+                            "signal_type": gm_signal.get("type", "neutral"),
+                            "all_signals": gm_signal.get("all_signals", []),
+                            "signal_factors": gm_signal.get("factors", []),
+                            "signal_quote": gm_signal.get("quote", ""),
+                            "raw_intensity": gm_signal.get("intensity", 0.0),
+                        }
+                    )
+                    
+                    if HINDSIGHT_AVAILABLE and memory_manager:
+                        await memory_manager.structured_retain(
+                            str(agent_id), agent_name, action_type, content, t
+                        )
+                        logger.info(f"    💾 Hindsight retained action for {agent_name}")
+
+                    if agent_id not in series.agent_interactions:
+                        series.agent_interactions[agent_id] = []
+                    series.agent_interactions[agent_id].append(f"ROUND {t+1} | {action_type}: {content}")
+
+                    logger.info(f"  ✓ [{idx+1}/{len(social_agents)}] {agent_name} → {action_type}")
+                    logger.info(f"    💬 \"{content[:150]}...\"")
 
             # ── GM → Platform Feedback (post-step, deadlock-free) ──────────────
             # Direct platform_obj method calls — identical pattern to seed posts
@@ -1377,7 +1672,21 @@ async def RunOASISSimulation(
 
         # Propagate states to shadow agents (must happen before metrics)
         sampler.propagate_states(decision_journals)
-        extrapolated = sampler.build_extrapolated_report(decision_journals)
+
+        # Cluster the combined agents (active + shadow) behavioral states
+        combined_agents = all_journals + sampler.shadow_agents
+        try:
+            from tsc.oasis.clustering import ClusterOnBehavioralState
+            segments = await ClusterOnBehavioralState(combined_agents)
+        except Exception as e:
+            logger.warning(f"Failed behavioral clustering: {e}")
+            segments = None
+
+        extrapolated = sampler.build_extrapolated_report(
+            decision_journals,
+            timesteps_completed=len(series.timesteps),
+            segments=segments
+        )
         # G3: Emit population-scale statistics with confidence intervals
         local_logger.log_simulation_event("population_stats", {
             "simulation_id": config.simulation_name,
@@ -1462,25 +1771,25 @@ async def RunOASISSimulation(
         print(f"Statistical margin:   {extrapolated.get('margin_of_error', 'N/A')} @ 95% confidence")
         print(f"Timesteps:            {len(series.timesteps)}")
         print(f"\nRISK DISTRIBUTION:")
-        for k, v in risk_dist.items():
+        for k, v in report.risk_distribution.items():
             bar = "█" * int(v * 20) + "░" * (20 - int(v * 20))
             print(f"  {k:12s}  {bar} {v*100:.0f}%")
         print(f"\nBUSINESS METRICS:")
-        print(f"  Net Promoter Score:   {nps:+.0f}")
-        print(f"  Churn Velocity:       {churn_vel:+.3f}/timestep")
-        print(f"  Adoption Momentum:    {adopt_mom:+.3f}/timestep")
-        if top_factors:
+        print(f"  Net Promoter Score:   {report.net_promoter_score:+.0f}")
+        print(f"  Churn Velocity:       {report.churn_velocity:+.3f}/timestep")
+        print(f"  Adoption Momentum:    {report.adoption_momentum:+.3f}/timestep")
+        if report.top_risk_factors:
             print(f"\nTOP RISK FACTORS:")
-            for f in top_factors[:5]:
+            for f in report.top_risk_factors[:5]:
                 print(f"  • {f['factor']:25s} {f['frequency']*100:.0f}%")
-        if segments:
-            print(f"\nDYNAMIC SEGMENTS ({len(segments)} discovered):")
-            for seg in segments:
+        if report.segments:
+            print(f"\nDYNAMIC SEGMENTS ({len(report.segments)} discovered):")
+            for seg in report.segments:
                 print(f"  [{seg.get('size', '?')} agents] {seg.get('name', 'Unknown')} — "
                       f"sat={seg.get('avg_satisfaction', 0):.2f}, fru={seg.get('avg_frustration', 0):.2f}")
-        if all_decisions:
-            print(f"\nDECISION EVENTS ({len(all_decisions)}):")
-            for d in all_decisions[:10]:
+        if report.decision_events:
+            print(f"\nDECISION EVENTS ({len(report.decision_events)}):")
+            for d in report.decision_events[:10]:
                 print(f"  T{d['timestep']+1}: {d['decision']} (conf={d['confidence']:.2f}) — {d['trigger']}")
         print("═" * 60 + "\n")
 
@@ -1539,9 +1848,9 @@ async def RunOASISSimulation(
             # 3. Retain Prediction Report Overview
             report_summary = (
                 f"SIMULATION PREDICTION REPORT FOR: {feature_title}\n"
-                f"NPS: {nps:.1f} | Churn Velocity: {churn_vel:.3f} | Adoption Momentum: {adopt_mom:.3f}\n"
-                f"Risk Distribution: {json.dumps(risk_dist)}\n"
-                f"Top Risk Factors: {json.dumps(top_factors)}\n"
+                f"NPS: {report.net_promoter_score:.1f} | Churn Velocity: {report.churn_velocity:.3f} | Adoption Momentum: {report.adoption_momentum:.3f}\n"
+                f"Risk Distribution: {json.dumps(report.risk_distribution)}\n"
+                f"Top Risk Factors: {json.dumps(report.top_risk_factors)}\n"
             )
             await session.retain("simulation", report_summary, metadata={"type": "prediction_report_summary", "feature": feature_title})
             

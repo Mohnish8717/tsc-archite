@@ -207,47 +207,13 @@ function bootstrapClient(ws, run) {
     console.log(`[WS] 💾 Sent SQLite data: ${sqliteData.users?.length ?? 0} users, ${sqliteData.comments?.length ?? 0} comments, ${sqliteData.posts?.length ?? 0} posts`);
   }
 
-  // 4. Seed boardroom debate from real agent comments (only if no real debate messages in pipeline)
+  // 4. Seed boardroom debate from real agent comments - DISABLED
+  // (Prevents premature population of the debate UI before the actual boardroom simulation runs)
+  /*
   if (!hasRealDebateMessages) {
-    const commentActions = actions
-      .filter(a => a.action_type && a.action_type.toUpperCase().includes('COMMENT') && a.content)
-      .slice(0, 10);
-
-    commentActions.forEach((action, i) => {
-      const thoughtEnd = action.content.indexOf('</thought>');
-      const clean = thoughtEnd !== -1
-        ? action.content.slice(thoughtEnd + 10).trim()
-        : action.content.replace(/<[^>]+>/g, '').trim();
-      const preview = clean.slice(0, 200);
-      if (!preview) return;
-
-      const isChallenge = /risk|gdpr|compliance|concern|privacy|legal/i.test(preview);
-
-      // Map the agent's name/role to a boardroom persona (CEO, CTO, CISO, etc.)
-      const roleLower = (action.role || '').toLowerCase();
-      const nameLower = (action.agent_name || '').toLowerCase();
-      let boardRole = 'CS'; // Default fallback
-      if (roleLower.includes('security') || roleLower.includes('ciso')) boardRole = 'CISO';
-      else if (roleLower.includes('tech') || roleLower.includes('cto') || roleLower.includes('engineer')) boardRole = 'CTO';
-      else if (roleLower.includes('finance') || roleLower.includes('cfo')) boardRole = 'CFO';
-      else if (roleLower.includes('product') || roleLower.includes('cpo')) boardRole = 'CPO';
-      else if (roleLower.includes('legal') || roleLower.includes('law')) boardRole = 'Legal';
-      else if (roleLower.includes('marketing') || roleLower.includes('cmo') || roleLower.includes('medical')) boardRole = 'CMO';
-      else if (roleLower.includes('sales') || roleLower.includes('revenue')) boardRole = 'Sales';
-      else if (roleLower.includes('data') || roleLower.includes('ml') || roleLower.includes('ai')) boardRole = 'Data';
-      else if (roleLower.includes('ceo') || roleLower.includes('executive') || nameLower.includes('ceo')) boardRole = 'CEO';
-
-      send({
-        type: 'debate_message',
-        message: {
-          id: `boot_${i}`,
-          sender: boardRole,
-          text: `"${preview}${clean.length > 200 ? '…' : ''}"`,
-          type: isChallenge ? 'challenge' : 'normal',
-        }
-      });
-    });
+    ... logic removed ...
   }
+  */
 
   // 5. Send prediction report if available (if not already sent via actions.jsonl replay)
   const hasReport = fs.existsSync(run.reportFile);

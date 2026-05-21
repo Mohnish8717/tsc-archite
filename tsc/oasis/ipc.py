@@ -107,8 +107,41 @@ class LocalActionLogger:
         except Exception as e:
             logger.error(f"Failed to write local action log: {e}")
 
-    def log_spawn(self, agent_id: str, agent_name: str, agent_type: str, role: str, traits: list, impact: float,
-                  mbti: str = "", ocean_scores: Dict[str, float] = None, buyer_journey: str = "", bio: str = ""):
+    def log_spawn(
+        self,
+        agent_id: str,
+        agent_name: str,
+        agent_type: str,
+        role: str,
+        traits: list,
+        impact: float,
+        # Core psychological identifiers
+        mbti: str = "",
+        mbti_description: str = "",
+        ocean_scores: Dict[str, float] = None,
+        # Buyer journey — stage string for UI indicator
+        buyer_journey: str = "",
+        # Full structured buyer journey dict (external personas)
+        buyer_journey_detail: Optional[Dict[str, Any]] = None,
+        bio: str = "",
+        # Structured psychological sub-models
+        emotional_triggers: Optional[Dict[str, Any]] = None,
+        communication_style: Optional[Dict[str, Any]] = None,
+        decision_pattern: Optional[Dict[str, Any]] = None,
+        predicted_stance: Optional[Dict[str, Any]] = None,
+        questions_they_will_ask: Optional[list] = None,
+        # FinalPersona-level metadata
+        domain_expertise: Optional[list] = None,
+        profile_confidence: float = 0.0,
+        grounding_quality: float = 1.0,
+        persona_type: str = "INTERNAL",
+        network_position_hint: str = "peripheral",
+        influence_strength: float = 0.5,
+        receptiveness: float = 0.5,
+        # External persona context
+        market_context: Optional[Dict[str, Any]] = None,
+        evidence_sources: Optional[list] = None,
+    ):
         """Emit an agent_spawn event so the frontend can build the initial agent registry."""
         try:
             entry = {
@@ -120,15 +153,37 @@ class LocalActionLogger:
                 "role": role,
                 "traits": traits,
                 "impact": round(impact * 100),
+                # Core profile
                 "mbti": mbti,
+                "mbti_description": mbti_description,
                 "ocean_scores": ocean_scores or {},
                 "buyer_journey": buyer_journey,
+                "buyer_journey_detail": buyer_journey_detail,
                 "bio": bio,
+                # Structured psychological fields
+                "emotional_triggers": emotional_triggers or {},
+                "communication_style": communication_style or {},
+                "decision_pattern": decision_pattern or {},
+                "predicted_stance": predicted_stance or {},
+                "questions_they_will_ask": questions_they_will_ask or [],
+                # Persona metadata
+                "domain_expertise": domain_expertise or [],
+                "profile_confidence": profile_confidence,
+                "grounding_quality": grounding_quality,
+                "persona_type": persona_type,
+                "network_position_hint": network_position_hint,
+                "influence_strength": round(influence_strength, 3),
+                "receptiveness": round(receptiveness, 3),
+                # External persona context
+                "market_context": market_context,
+                "evidence_sources": evidence_sources or [],
             }
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.error(f"Failed to write spawn log: {e}")
+
+
 
 
     def log_simulation_event(self, event_type: str, data: Dict[str, Any]):

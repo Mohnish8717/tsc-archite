@@ -1,0 +1,79 @@
+version: "3.9"
+
+# ============================================================
+# WorldRAGEngine Infrastructure — Free Stack
+# ============================================================
+# Qdrant  : vector store (dense + BM25 hybrid, SQ8 quantization)
+# Neo4j   : knowledge graph (entity relationships, Cypher traversal)
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Qdrant — Vector Store
+  # Free community edition. Scalable to cluster by adding nodes.
+  # RAG Architect skill: HNSW indexing, SQ8 quantization, payload filters
+  # ----------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: tsc_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # HTTP / REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:-}"
+      QDRANT__LOG_LEVEL: "INFO"
+    deploy:
+      resources:
+        limits:
+          memory: 6G     # accommodate millions of SQ8-quantized vectors
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ----------------------------------------------------------
+  # Neo4j — Knowledge Graph
+  # Free Community edition. Upgrade path: swap image for neo4j:enterprise
+  # or point NEO4J_URL to Neo4j Aura (managed cloud, free tier available).
+  # ----------------------------------------------------------
+  neo4j:
+    image: neo4j:5-community
+    container_name: tsc_neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # HTTP Browser UI
+      - "7687:7687"   # Bolt (Python driver)
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-changeme}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_initial__size: "512m"
+      NEO4J_dbms_memory_heap_max__size: "2G"
+      NEO4J_dbms_memory_pagecache_size: "1G"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1",
+             "--spider", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+# ----------------------------------------------------------
+# Persistent volumes
+# ----------------------------------------------------------
+volumes:
+  qdrant_storage:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local

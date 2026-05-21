@@ -36,6 +36,52 @@ export interface IngestionNode {
   status: 'active' | 'pending' | 'error';
 }
 
+// ── Psychological sub-model types (mirror of Python models) ──────────────────
+export interface PersonaEmotionalTriggers {
+  excited_by: string[];
+  frustrated_by: string[];
+  scared_of: string[];
+}
+export interface PersonaCommunicationStyle {
+  default: string;
+  formality: string;
+  conflict_handling: string;
+  preferred_channels: string[];
+}
+export interface PersonaDecisionPattern {
+  speed: string;
+  preference: string;
+  influencers: string[];
+  justification: string;
+  risk_tolerance: string;
+}
+export interface PersonaPredictedStance {
+  feature: string;
+  prediction: string;          // 'APPROVE' | 'REJECT' | 'CONDITIONAL_APPROVE'
+  confidence: number;          // 0-1
+  likely_conditions: string[];
+  potential_objections: string[];
+}
+export interface PersonaBuyerJourneyDetail {
+  awareness_channel: string;
+  evaluation_trigger: string;
+  key_proof_points: string[];
+  deal_breakers: string[];
+  success_metric: string;
+  roi_threshold_months: number;
+  willingness_to_pay_band: string;
+}
+export interface PersonaMarketContext {
+  company_size_band: string;
+  buyer_role: string;
+  annual_solution_budget_usd: number;
+  pricing_sensitivity: string;
+  sales_cycle_weeks: number;
+  deployment_preference: string;
+  industry_vertical: string;
+  regulatory_burden: string;
+}
+
 export interface SyntheticPersona {
   id: string;
   name: string;
@@ -43,6 +89,29 @@ export interface SyntheticPersona {
   traits: string[];
   impact: number;
   bio?: string;
+  role_short?: string;
+  // ── Rich psychological profile ────────────────────────────────────────────
+  mbti?: string;
+  mbti_description?: string;
+  key_traits?: string[];
+  emotional_triggers?: PersonaEmotionalTriggers;
+  communication_style?: PersonaCommunicationStyle;
+  decision_pattern?: PersonaDecisionPattern;
+  predicted_stance?: PersonaPredictedStance;
+  questions_they_will_ask?: string[];
+  // ── FinalPersona metadata ─────────────────────────────────────────────────
+  domain_expertise?: string[];
+  profile_confidence?: number;
+  grounding_quality?: number;
+  persona_type?: string;
+  network_position_hint?: string;
+  influence_strength?: number;
+  receptiveness?: number;
+  evidence_sources?: string[];
+  // ── Buyer Journey & Market (external personas) ────────────────────────────
+  buyer_journey?: string;               // stage string for indicator
+  buyer_journey_detail?: PersonaBuyerJourneyDetail;
+  market_context?: PersonaMarketContext;
 }
 
 export interface SpawnedAgent {
@@ -52,11 +121,27 @@ export interface SpawnedAgent {
   role: string;
   traits: string[];
   impact: number;
-  // G11: psychological profile
+  // ── Rich psychological profile ────────────────────────────────────────────
   mbti?: string;
+  mbti_description?: string;
   ocean_scores?: Record<string, number>;
-  buyer_journey?: string;
+  buyer_journey?: string;               // stage string for indicator
+  buyer_journey_detail?: PersonaBuyerJourneyDetail;
   bio?: string;
+  emotional_triggers?: PersonaEmotionalTriggers;
+  communication_style?: PersonaCommunicationStyle;
+  decision_pattern?: PersonaDecisionPattern;
+  predicted_stance?: PersonaPredictedStance;
+  questions_they_will_ask?: string[];
+  domain_expertise?: string[];
+  profile_confidence?: number;
+  grounding_quality?: number;
+  persona_type?: string;
+  network_position_hint?: string;
+  influence_strength?: number;
+  receptiveness?: number;
+  market_context?: PersonaMarketContext;
+  evidence_sources?: string[];
 }
 
 export interface SimulationProgress {

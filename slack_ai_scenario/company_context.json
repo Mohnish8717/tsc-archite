@@ -1,39 +1,40 @@
 {
-  "company_name": "Slack (Salesforce)",
-  "industry": "Enterprise Collaboration Software",
-  "company_size": "Enterprise",
-  "business_model": "B2B SaaS",
-  "target_audience": ["Knowledge Workers", "Enterprise IT Admins", "Developers"],
-  "core_products": ["Slack App", "Slack Connect", "Slack AI"],
-  "tech_stack": ["AWS", "Machine Learning", "LLMs"],
+  "company_name": "Predictive Reality Engine (TSC Architecture)",
+  "industry": "Autonomous Social Simulation & Adversarial Boardroom Debate",
+  "company_size": "Enterprise Ready",
+  "business_model": "B2B Developer SaaS",
+  "target_audience": ["Product Managers", "Software Architects", "Chief Information Security Officers", "General Counsels", "Engineering Leaders"],
+  "core_products": ["Contextual Ingestion (L1)", "Feature Discovery (L2)", "Persona Generation (L3)", "OASIS Market Simulation (L5)", "AG2 Adversarial Debate (L6)", "Spec Generation (L7)"],
+  "tech_stack": ["Python", "React", "Three.js", "AG2 (AutoGen)", "CAMEL OASIS", "Hindsight Memory Bank", "Qdrant", "SQLite", "Gemini API"],
   "current_priorities": [
-    "Increase AI feature adoption",
-    "Maintain enterprise trust and security compliance",
-    "Improve search relevance through ML"
+    "Increase simulation fidelity using structured user profiles and MBTI maps",
+    "Provide clear, real-time spawning telemetry to administrators",
+    "Maintain strict security/compliance gates to prevent prompt leakage or adversarial bypasses",
+    "Integrate advanced codebase intelligence tools like Graphify for structure mining"
   ],
-  "competitors": ["Microsoft Teams", "Google Workspace", "Discord"],
+  "competitors": ["Manual user testing", "Focus groups", "Traditional staging testing"],
   "constraints": [
-    "GDPR and CCPA compliance",
-    "Strict enterprise data residency requirements",
-    "Public relations sensitivity regarding AI data usage"
+    "High token usage during concurrent agent runs",
+    "gRPC and PyTorch fork safety on macOS systems",
+    "Need for realistic agent persona names to prevent boardroom cognitive bias"
   ],
   "stakeholders": [
     {
-      "name": "Chief Product Officer",
-      "facts": "Wants aggressive AI feature rollout to stay ahead of Microsoft Teams."
+      "name": "Marcus Vance",
+      "facts": "Wants realistic persona names to prevent cognitive bias and expects deep codebase analysis using tools like Graphify."
     },
     {
-      "name": "Chief Information Security Officer",
-      "facts": "Highly concerned about enterprise data leaks and compliance violations."
+      "name": "Sophia Patel",
+      "facts": "Requires high-fidelity spawning telemetry and robust security validation (Red Team Gate 4.6)."
     },
     {
-      "name": "VP of Public Relations",
-      "facts": "Fearful of negative press regarding AI scraping user data without consent."
+      "name": "Sarah Jenkins",
+      "facts": "Demands high-fidelity psychological modeling including OCEAN scale progress tracking and buyer journey mapping."
     }
   ],
   "market_context": {
-    "pricing_tiers": ["Pro", "Business+", "Enterprise Grid"],
-    "industry_vertical": "technology",
-    "deployment_preference": "cloud"
+    "pricing_tiers": ["Developer", "Team", "Enterprise Grid"],
+    "industry_vertical": "software-engineering",
+    "deployment_preference": "hybrid"
   }
 }

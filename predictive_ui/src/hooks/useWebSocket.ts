@@ -134,11 +134,30 @@ export function useWebSocket(url: string = 'ws://localhost:8080') {
                 role: data.role,
                 traits: data.traits ?? [],
                 impact: data.impact ?? 50,
-                // G11: psychological profile
+                // Core profile
                 mbti: data.mbti ?? '',
+                mbti_description: data.mbti_description ?? '',
                 ocean_scores: data.ocean_scores ?? {},
                 buyer_journey: data.buyer_journey ?? '',
+                buyer_journey_detail: data.buyer_journey_detail ?? undefined,
                 bio: data.bio ?? '',
+                // Structured psychological fields
+                emotional_triggers: data.emotional_triggers ?? undefined,
+                communication_style: data.communication_style ?? undefined,
+                decision_pattern: data.decision_pattern ?? undefined,
+                predicted_stance: data.predicted_stance ?? undefined,
+                questions_they_will_ask: data.questions_they_will_ask ?? [],
+                // Persona metadata
+                domain_expertise: data.domain_expertise ?? [],
+                profile_confidence: data.profile_confidence ?? 0,
+                grounding_quality: data.grounding_quality ?? 1,
+                persona_type: data.persona_type ?? 'INTERNAL',
+                network_position_hint: data.network_position_hint ?? 'peripheral',
+                influence_strength: data.influence_strength ?? 0.5,
+                receptiveness: data.receptiveness ?? 0.5,
+                // External persona context
+                market_context: data.market_context ?? undefined,
+                evidence_sources: data.evidence_sources ?? [],
               });
               break;
 

@@ -180,13 +180,45 @@ class TSCPipeline:
             logger.info(f"  Description: {info.get('description', '')[:100]}...")
             logger.info(f"  Influence: {p.influence_strength:.2f} | Receptiveness: {p.receptiveness:.2f}")
             logger.info("-" * 40)
+            # ── Safely extract buyer_journey: stored as dict in other_info ──────
+            bj_raw = other.get("buyer_journey")
+            if isinstance(bj_raw, dict):
+                buyer_journey_stage = bj_raw.get("awareness_channel", "")
+                buyer_journey_detail = bj_raw
+            else:
+                buyer_journey_stage = bj_raw or ""
+                buyer_journey_detail = None
+
             persona_payload.append({
                 "id": f"per_{p.agent_id}",
                 "name": name,
                 "role": role,
                 "traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
                 "impact": round(p.influence_strength * 100),
-                "bio": info.get("profile", {}).get("user_profile", "") or info.get("description", "")
+                "bio": info.get("profile", {}).get("user_profile", "") or info.get("description", ""),
+                # ── Psychological Profile ─────────────────────────────────────
+                "mbti": other.get("mbti", ""),
+                "mbti_description": other.get("mbti_description", ""),
+                "key_traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
+                "emotional_triggers": other.get("emotional_triggers", {}),
+                "communication_style": other.get("communication_style", {}),
+                "decision_pattern": other.get("decision_pattern", {}),
+                "predicted_stance": other.get("predicted_stance", {}),
+                "questions_they_will_ask": other.get("questions_they_will_ask", []),
+                # ── FinalPersona metadata ─────────────────────────────────────
+                "domain_expertise": other.get("domain_expertise", []),
+                "profile_confidence": other.get("profile_confidence", 0.0),
+                "grounding_quality": other.get("grounding_quality", 1.0),
+                "persona_type": other.get("persona_type", "INTERNAL"),
+                "network_position_hint": other.get("network_position_hint", "peripheral"),
+                "influence_strength": p.influence_strength,
+                "receptiveness": p.receptiveness,
+                "evidence_sources": other.get("evidence_sources", []),
+                # ── Buyer Journey (external personas) ─────────────────────────
+                "buyer_journey": buyer_journey_stage,        # string for stage indicator
+                "buyer_journey_detail": buyer_journey_detail,  # full dict for detail panel
+                # ── Market Context (external personas) ───────────────────────
+                "market_context": other.get("market_context", None),
             })
 
         # ── Emit Layer 3 personas (real LLM-generated data) ────────────────────
@@ -212,6 +244,7 @@ class TSCPipeline:
             context=company,
             mode="behavioral",
             session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
+            llm_client=self._llm,
         )
         self._emit_progress(2, "Behavioral Analysis", "done", {
             "agents": len(profiles),

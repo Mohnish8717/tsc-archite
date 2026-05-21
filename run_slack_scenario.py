@@ -58,7 +58,7 @@ async def run_scenario():
             analytics=str(data_dir / "analytics.json"),
             context=str(data_dir / "company_context.json"),
             proposal=str(data_dir / "feature_proposal.json"),
-            num_simulations=20, # requested by user
+            num_simulations=10, # requested by user to spawn 10 agents
             use_legacy_personas=False
         )
         

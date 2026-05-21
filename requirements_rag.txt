@@ -1,0 +1,41 @@
+# WorldRAGEngine dependencies
+# Free stack — no paid API keys required
+
+# ── Vector Store ──────────────────────────────────────────
+qdrant-client>=1.9.0          # async client, SQ8, payload filters
+
+# ── Knowledge Graph ──────────────────────────────────────
+neo4j>=5.0.0                  # async driver for Neo4j Community
+
+# ── Embeddings (free, local, BAAI/BGE-M3) ────────────────
+# RAG Architect skill: BGE-M3 — 1024-dim, 8192-tok, MTEB top-tier (free)
+sentence-transformers>=3.0.0
+torch>=2.2.0                  # CPU build is fine; GPU speeds up batch embed
+
+# ── Reranker (free, local) ────────────────────────────────
+# cross-encoder/ms-marco-MiniLM-L-6-v2 (included in sentence-transformers)
+
+# ── Chunking ─────────────────────────────────────────────
+scikit-learn>=1.4.0           # cosine_similarity for SemanticChunker
+numpy>=1.26.0
+nltk>=3.8.0                   # sentence tokenization fallback
+
+# ── PDF parsing ──────────────────────────────────────────
+pdfplumber>=0.10.0            # free PDF extractor (no API needed)
+
+# ── GraphRAG (Microsoft LazyGraphRAG) ────────────────────
+# pip install graphrag   (free, open-source, MIT license)
+# Uncomment when graphrag package is stable on your Python version:
+# graphrag>=0.3.0
+
+# ── RAG Evaluation ───────────────────────────────────────
+ragas>=0.1.0                  # context_precision, faithfulness, etc.
+datasets>=2.0.0               # required by ragas
+
+# ── BM25 sparse retrieval (RAG Architect: hybrid search) ─
+rank-bm25>=0.2.2
+
+# ── Already in requirements.txt (verify present) ─────────
+# langchain-core
+# langchain-community
+# tqdm

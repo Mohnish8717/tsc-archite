@@ -158,3 +158,22 @@ sample_data/
 node_modules/
 graphify-out/
 
+# Agent files
+.agent/
+
+# Temp files and script logs
+*.pid
+comments_query_result.txt
+comments_retrieved.txt
+comments_retrieved1.txt
+debate_messages.txt
+extracted_comments.txt
+extracted_comments_latest.txt
+extracted_comments_new.txt
+hindsight_logs.txt
+rag_eval_results.json
+scratch/
+log/
+
+
+
