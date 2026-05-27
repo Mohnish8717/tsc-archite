@@ -313,6 +313,10 @@ interface PipelineState {
   setPipelineStage: (layer: 'layer1' | 'layer3' | 'layer5', status: PipelineStageStatus) => void;
   resetPipelineStages: () => void;
 
+  // Interactive Backend Calls
+  pendingAction: { action: string; payload: any } | null;
+  setPendingAction: (actionData: { action: string; payload: any } | null) => void;
+
   // Layer 5: OASIS Simulation State
   actions: AgentAction[];
   activeAgents: number;
@@ -428,6 +432,9 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     pipelineStages: { layer1: 'waiting', layer3: 'waiting', layer5: 'waiting' },
   }),
 
+  pendingAction: null,
+  setPendingAction: (actionData) => set({ pendingAction: actionData }),
+
   // OASIS actions
   actions: [],
   activeAgents: 0,
@@ -439,12 +446,40 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     const sigType = (action.metadata?.signal_type || '').toLowerCase();
     
     let mappedType = action.action_type;
-    if (typeUpper.includes('LIKE') || typeUpper === 'UPVOTE' || sigType === 'positive') {
-      mappedType = 'upvote';
-    } else if (typeUpper.includes('DISLIKE') || typeUpper === 'DOWNVOTE' || sigType === 'negative') {
-      mappedType = 'downvote';
-    } else if (typeUpper.includes('COMMENT') || typeUpper.includes('POST')) {
-      mappedType = 'comment';
+    const isLike = typeUpper.includes('LIKE') || typeUpper === 'UPVOTE';
+    const isDislike = typeUpper.includes('DISLIKE') || typeUpper === 'DOWNVOTE';
+    const isComment = typeUpper.includes('COMMENT') || typeUpper.includes('POST');
+
+    if (isLike || isDislike) {
+      // Determine the sentiment of the post they are reacting to
+      let targetSentiment = 'positive'; // default to trusting the product
+      
+      if (action.metadata?.target_id) {
+        // Find the target agent's last meaningful action to infer sentiment
+        const targetActions = state.actions.filter(a => String(a.agent_id) === String(action.metadata!.target_id));
+        if (targetActions.length > 0) {
+          const lastAction = targetActions[targetActions.length - 1];
+          if (lastAction.action_type === 'downvote') targetSentiment = 'negative';
+          if (lastAction.action_type === 'upvote') targetSentiment = 'positive';
+        }
+      }
+
+      // If they LIKE a negative post, they are agreeing with the friction (downvote).
+      // If they DISLIKE a negative post, they are disagreeing with friction (upvote).
+      if (isLike) {
+        mappedType = targetSentiment === 'negative' ? 'downvote' : 'upvote';
+      } else {
+        mappedType = targetSentiment === 'negative' ? 'upvote' : 'downvote';
+      }
+    } else {
+      // Standard mapping for comments/posts
+      if (sigType === 'positive') {
+        mappedType = 'upvote';
+      } else if (sigType === 'negative') {
+        mappedType = 'downvote';
+      } else if (isComment) {
+        mappedType = 'comment';
+      }
     }
 
     const mappedAction = {

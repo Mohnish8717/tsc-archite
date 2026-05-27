@@ -7,6 +7,7 @@ import type { AgentAction } from '../../store/usePipelineStore';
 import { cleanPersonaName } from '../../utils/nameHelper';
 import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2 } from 'lucide-react';
 import { normalizeBio } from './AssemblyMatrix';
+import { EagleEyeInterrogationModal } from './EagleEyeInterrogationModal';
 
 
 // ─── Stable hash → position ──────────────────────────────────────────────────
@@ -194,8 +195,8 @@ function roleSkin(role: string) {
 }
 
 // ─── Premium Abstract Node Pin (Replaces Blocky humanoid geometry) ──────────
-function PersonPin({ agent, isSelected, onClick }: {
-  agent: any; isSelected: boolean; onClick: () => void;
+function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
+  agent: any; isSelected: boolean; onClick: () => void; onInterrogate?: (id: string) => void;
 }) {
   const groupRef = useRef<THREE.Group>(null);
   const ringRef = useRef<THREE.Mesh>(null);
@@ -330,11 +331,12 @@ function PersonPin({ agent, isSelected, onClick }: {
 
       {/* Clicked selected profile tooltip (High-fidelity glass-brutalist panel) */}
       {isSelected && (
-        <Html position={[2.2, 0.8, 0]} style={{ pointerEvents: 'auto' }}>
+        <Html position={[2.2, 0.8, 0]} style={{ pointerEvents: 'auto', zIndex: 2147483647 }} zIndexRange={[2147483647, 2147483647]}>
           <div
             onWheel={(e) => e.stopPropagation()}
             onPointerDown={(e) => e.stopPropagation()}
             style={{
+              transform: 'translateY(-40%)',
               background: 'rgba(255, 255, 255, 0.90)',
               backdropFilter: 'blur(16px)',
               border: '6px solid #000000',
@@ -342,48 +344,71 @@ function PersonPin({ agent, isSelected, onClick }: {
               borderRadius: '16px',
               padding: '20px',
               width: '320px',
-              maxHeight: '70vh',
+              maxHeight: '65vh',
               overflowY: 'auto',
               fontFamily: 'monospace',
               color: '#000000',
-              zIndex: 50,
+              zIndex: 2147483647,
             }}>
             {/* Header */}
             <div style={{ borderBottom: '4px solid #000000', paddingBottom: '12px', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
+              <div style={{ flex: 1, minWidth: 0, marginRight: '16px' }}>
                 <div style={{ fontWeight: 900, fontSize: '16px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.name}</div>
-                <span style={{ 
+                <div style={{ 
                   fontSize: '9px', 
                   fontWeight: 900, 
                   background: skin, 
                   color: isSelected ? '#000000' : '#FFFFFF', 
-                  padding: '2px 6px',
+                  padding: '4px 8px',
                   border: '2px solid #000000',
                   boxShadow: '2px 2px 0px #000000',
                   textTransform: 'uppercase', 
                   letterSpacing: '0.1em',
                   display: 'inline-block',
-                  marginTop: '6px'
+                  marginTop: '6px',
+                  maxWidth: '100%',
+                  wordWrap: 'break-word',
+                  whiteSpace: 'normal'
                 }}>
                   {agent.role}
-                </span>
+                </div>
               </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); onClick(); }}
-                style={{ 
-                  background: '#EF4444', 
-                  color: '#FFFFFF', 
-                  border: '3px solid #000000', 
-                  boxShadow: '2px 2px 0px #000000',
-                  padding: '4px 8px', 
-                  fontWeight: 900, 
-                  cursor: 'pointer', 
-                  fontSize: '11px',
-                  transition: 'transform 0.1s'
-                }}
-              >
-                X
-              </button>
+              <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                {onInterrogate && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onInterrogate(agent.id); }}
+                    style={{ 
+                      background: '#10B981', 
+                      color: '#000000', 
+                      border: '3px solid #000000', 
+                      boxShadow: '2px 2px 0px #000000',
+                      padding: '4px 8px', 
+                      fontWeight: 900, 
+                      cursor: 'pointer', 
+                      fontSize: '11px',
+                      textTransform: 'uppercase'
+                    }}
+                  >
+                    Interrogate
+                  </button>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onClick(); }}
+                  style={{ 
+                    background: '#EF4444', 
+                    color: '#FFFFFF', 
+                    border: '3px solid #000000', 
+                    boxShadow: '2px 2px 0px #000000',
+                    padding: '4px 8px', 
+                    fontWeight: 900, 
+                    cursor: 'pointer', 
+                    fontSize: '11px',
+                    transition: 'transform 0.1s'
+                  }}
+                >
+                  X
+                </button>
+              </div>
             </div>
 
             {/* MBTI & Journey Details */}
@@ -541,7 +566,7 @@ function CamController({ selectedPos }: { selectedPos: [number, number, number] 
 }
 
 // ─── Main scene ───────────────────────────────────────────────────────────────
-function NetworkScene({ onSelect, showTopologyLines }: { onSelect: (pos: [number, number, number] | null) => void; showTopologyLines: boolean }) {
+function NetworkScene({ onSelect, showTopologyLines, onInterrogate }: { onSelect: (pos: [number, number, number] | null) => void; showTopologyLines: boolean; onInterrogate: (id: string) => void }) {
   const { actions, spawnedAgents, networkTopology } = usePipelineStore();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pulses, setPulses] = useState<{ id: string; from: [number, number, number]; to: [number, number, number]; type: string }[]>([]);
@@ -667,6 +692,7 @@ function NetworkScene({ onSelect, showTopologyLines }: { onSelect: (pos: [number
           key={agent.id}
           agent={agent}
           isSelected={selectedId === agent.id}
+          onInterrogate={onInterrogate}
           onClick={() => {
             const closing = selectedId === agent.id;
             setSelectedId(closing ? null : agent.id);
@@ -689,6 +715,8 @@ export default function OASIS3D() {
   const [showMonitorPanel, setShowMonitorPanel] = useState(true);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showTopologyLines, setShowTopologyLines] = useState(false);
+  const [isInterrogationModalOpen, setIsInterrogationModalOpen] = useState(false);
+  const [interrogationAgentId, setInterrogationAgentId] = useState<string>('');
   
   // Custom drag reveal width states
   const [panelWidth, setPanelWidth] = useState(400);
@@ -1008,7 +1036,14 @@ export default function OASIS3D() {
           />
           <pointLight position={[-15, 25, -15]} intensity={1.8} color="#F97316" distance={80} decay={1.5} />
           <CamController selectedPos={selectedPos} />
-          <NetworkScene onSelect={setSelectedPos} showTopologyLines={showTopologyLines} />
+          <NetworkScene 
+            onSelect={setSelectedPos} 
+            showTopologyLines={showTopologyLines} 
+            onInterrogate={(id) => {
+              setInterrogationAgentId(id);
+              setIsInterrogationModalOpen(true);
+            }}
+          />
         </Canvas>
       </div>
 
@@ -1075,10 +1110,10 @@ export default function OASIS3D() {
       {/* ── Consolidated Monitor Sidebar (right) ─── */}
       {showMonitorPanel && (
         <div 
-          className={`absolute top-14 right-4 bottom-14 z-20 bg-white border-8 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-mono ${
+          className={`absolute top-14 right-4 bottom-14 bg-white border-8 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-mono ${
             isDragging ? '' : 'transition-all duration-300'
           }`}
-          style={{ width: `${panelWidth}px` }}
+          style={{ width: `${panelWidth}px`, zIndex: 2147483646 }}
         >
           {/* Dynamic Drag Edge Resizer */}
           <div
@@ -1160,6 +1195,12 @@ export default function OASIS3D() {
                   <Eye className="w-4 h-4 text-brand" strokeWidth={3} />
                   <span>Eagle's Eye Insights ({eagleEyeResults.length})</span>
                 </div>
+                <button 
+                  onClick={() => setIsInterrogationModalOpen(true)}
+                  className="bg-brand text-black hover:bg-white px-2 py-1 font-bold text-[10px] transition-colors"
+                >
+                  INTERROGATE
+                </button>
               </div>
               {eaglesEyeBody}
             </div>
@@ -1208,6 +1249,12 @@ export default function OASIS3D() {
           </span>
         </div>
       </div>
+
+      <EagleEyeInterrogationModal 
+        isOpen={isInterrogationModalOpen} 
+        onClose={() => setIsInterrogationModalOpen(false)} 
+        initialAgentId={interrogationAgentId}
+      />
     </div>
   );
 }

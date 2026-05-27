@@ -189,6 +189,116 @@ async def get_status():
     }
 
 
+class CommandPayload(BaseModel):
+    action: str
+    type: Optional[str] = None
+    data: Optional[dict] = None
+    target_agent_id: Optional[str] = None
+    questions: Optional[list[str]] = None
+
+class RefineSeedsPayload(BaseModel):
+    seeds: list[str]
+    instruction: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+@app.post("/api/simulation/refine_seeds")
+async def refine_seeds(payload: RefineSeedsPayload):
+    """Refine seed posts using the specified LLM."""
+    try:
+        from tsc.config import LLMProvider, Settings, settings
+        from tsc.llm.factory import create_llm_client
+        import json
+        
+        req_settings = Settings(**{k: v for k, v in settings.model_dump().items()})
+        if payload.provider:
+            req_settings.llm_provider = LLMProvider(payload.provider)
+        if payload.model:
+            req_settings.llm_model = payload.model
+            
+        llm = create_llm_client(req_settings)
+        
+        system_prompt = (
+            "## 1. Identity & Role\n"
+            "You are an expert community manager and content strategist specializing in social media and platform engagement.\n\n"
+            
+            "## 2. Capabilities & Constraints\n"
+            "- You can rewrite, refine, or adjust the tone of social media posts based on user instructions.\n"
+            "- You must strictly adhere to the user's specific skill instructions, persona requests, or constraints.\n"
+            "- You must NOT hallucinate facts not present in the original posts unless instructed to do so.\n"
+            "- You must return exactly the same number of posts as provided.\n\n"
+            
+            "## 3. Behavioral Guidelines\n"
+            "- Apply the requested tone and instruction seamlessly to all provided posts.\n"
+            "- Ensure the final posts feel authentic, human, and match the structural format of the originals.\n\n"
+            
+            "## 4. Output Format\n"
+            "You must return ONLY a valid JSON array of strings. Do not include markdown formatting, explanations, or conversational text.\n"
+            "[\n"
+            '  "post 1 content...",\n'
+            '  "post 2 content..."\n'
+            "]"
+        )
+        
+        user_prompt = (
+            "<current_seed_posts>\n"
+            f"{json.dumps(payload.seeds, indent=2)}\n"
+            "</current_seed_posts>\n\n"
+            "<instruction>\n"
+            f"{payload.instruction}\n"
+            "</instruction>\n\n"
+            "Based on the instruction, rewrite the seed posts. Return ONLY the JSON array."
+        )
+        
+        schema = {
+            "type": "array",
+            "items": {"type": "string"}
+        }
+        
+        res = await llm.analyze(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            json_schema=schema,
+            temperature=0.7
+        )
+        
+        return {"status": "success", "seeds": res}
+    except Exception as e:
+        logger.error(f"Failed to refine seeds: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/simulation/{run_id}/command")
+async def send_simulation_command(run_id: str, payload: CommandPayload):
+    """Write an IPC command to the simulation's active directory."""
+    from fastapi import HTTPException
+    
+    # Locate the run directory
+    search_paths = [
+        Path(f"/Users/mohnish/Downloads/tsc architecture/log/oasis_runs/{run_id}"),
+        Path(f"/tmp/oasis_runs/{run_id}")
+    ]
+    
+    run_dir = None
+    for p in search_paths:
+        if p.exists() and p.is_dir():
+            run_dir = p
+            break
+            
+    if not run_dir:
+        raise HTTPException(status_code=404, detail=f"Simulation run directory '{run_id}' not found.")
+        
+    command_file = run_dir / "commands.json"
+    
+    try:
+        command_file.write_text(payload.model_dump_json())
+        return {"status": "success", "message": "Command sent successfully."}
+    except Exception as e:
+        logger.error(f"Failed to write command file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send command to simulation engine.")
+
+
 # ── WebSocket for Real-Time Evaluation ───────────────────────────────
 
 class ConnectionManager:
@@ -247,6 +357,19 @@ async def ws_evaluate(ws: WebSocket):
         pipeline.set_progress_callback(
             lambda l, n, s, d: asyncio.ensure_future(on_progress(l, n, s, d))
         )
+
+        async def on_interactive(action: str, payload: dict) -> dict:
+            await manager.send_json(ws, {
+                "type": "action_required",
+                "action": action,
+                "payload": payload
+            })
+            while True:
+                response = await ws.receive_json()
+                if response.get("type") == "action_response" and response.get("action") == action:
+                    return response.get("data", {})
+
+        pipeline.set_interactive_callback(on_interactive)
 
         # Run
         await manager.send_json(ws, {"type": "started"})

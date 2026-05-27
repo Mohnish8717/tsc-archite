@@ -103,6 +103,7 @@ async def RunOASISSimulation(
     base_dir: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "log", "oasis_runs"),
     available_actions: Optional[List[Any]] = None,
     llm_client: Optional[Any] = None,  # Added structured Game Master LLM Client
+    interactive_cb: Optional[Any] = None, # Added interactive callback for human-in-the-loop
 ) -> MarketSentimentSeries:
     """
     Run a CAMEL-AI OASIS social simulation with full macOS deadlock immunity.
@@ -641,6 +642,13 @@ async def RunOASISSimulation(
         history_lines = [f"{k}: {v}" for k, v in history_raw.items()] if history_raw else []
         history_block = "\n  - ".join(history_lines) if history_lines else ""
 
+        # Pre-format conditional XML blocks to avoid f-string syntax errors in Python < 3.12
+        budget_str = f"Budget / Revenue: {budget}" if budget else ""
+        regulatory_str = f"Regulatory environment: {regulatory_raw}" if regulatory_raw else ""
+        domains_str = f"Affected surfaces: {feat_domains}" if feat_domains else ""
+        platform_scale_xml = f"<platform_scale>\n  - {platform_scale}\n</platform_scale>" if platform_scale else ""
+        historical_context_xml = f"<historical_context>\n  - {history_block}\n</historical_context>" if history_block else ""
+
         # ── 2. Prompt: Role + Structured Brief + Data-Coverage Instructions ─────────
         # Key technique from context-management.md: inject the full brief as a
         # structured XML <reference_brief> block so the LLM treats it as ground truth
@@ -666,14 +674,14 @@ This is the GROUND TRUTH. Every field below MUST appear in at least one seed pos
 <product>
 Name: {product_name}
 Team size: {team_size}
-{f"Budget / Revenue: {budget}" if budget else ""}
+{budget_str}
 Tech stack: {tech_stack}
-{f"Regulatory environment: {regulatory_raw}" if regulatory_raw else ""}
+{regulatory_str}
 </product>
 
 <feature>
 Title: {feat_title}
-{f"Affected surfaces: {feat_domains}" if feat_domains else ""}
+{domains_str}
 Full description:
 {feat_desc}
 </feature>
@@ -686,13 +694,9 @@ Full description:
   - {competitors}
 </competitors>
 
-{f"""<platform_scale>
-  - {platform_scale}
-</platform_scale>""" if platform_scale else ""}
+{platform_scale_xml}
 
-{f"""<historical_context>
-  - {history_block}
-</historical_context>""" if history_block else ""}
+{historical_context_xml}
 </reference_brief>
 
 <data_coverage_rules>
@@ -931,7 +935,16 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         # AI-First: Generate grounded seeds
         ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
-        if ai_seeds:
+        if interactive_cb:
+            logger.info("⏸️ Halting for Human-in-the-Loop review of behavioral seed posts")
+            res = await interactive_cb("review_seeds", {
+                "seeds": ai_seeds or [],
+                "feature": feature.model_dump() if feature else None,
+                "context": context.model_dump() if context else None
+            })
+            seed_posts = res.get("seeds", ai_seeds)
+            logger.info(f"🧑‍💻 Human-in-the-Loop: Using {len(seed_posts)} refined seed posts")
+        elif ai_seeds:
             seed_posts = ai_seeds
             logger.info(f"🤖 Behavioral Mode: Using {len(seed_posts)} AI-generated seed posts")
         else:
@@ -967,7 +980,16 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         # AI-First: Generate contextual seeds from feature + community feedback
         ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
-        if ai_seeds:
+        if interactive_cb:
+            logger.info("⏸️ Halting for Human-in-the-Loop review of feature test seed posts")
+            res = await interactive_cb("review_seeds", {
+                "seeds": ai_seeds or [],
+                "feature": feature.model_dump() if feature else None,
+                "context": context.model_dump() if context else None
+            })
+            controversy_seeds = res.get("seeds", ai_seeds)
+            logger.info(f"🧑‍💻 Human-in-the-Loop: Using {len(controversy_seeds)} refined seed posts")
+        elif ai_seeds:
             controversy_seeds = ai_seeds
             logger.info(f"🤖 Feature Mode: Using {len(controversy_seeds)} AI-generated seed posts")
         else:
@@ -1138,7 +1160,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
         # 3. Selective routing logic:
         # Route to LLM if it matches a critical signal OR agent frustration is high (>0.5)
         has_critical = any(sig in CRITICAL_SIGNALS for sig, _ in matched_signals)
-        route_to_llm = (has_critical or agent_frustration > 0.5) and (gm_llm_client is not None)
+        route_to_llm = (gm_llm_client is not None)
 
         if not route_to_llm:
             # Bypass LLM and resolve via fast static deltas

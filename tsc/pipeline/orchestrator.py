@@ -54,6 +54,7 @@ class TSCPipeline:
 
         # Progress callback (for web UI)
         self._on_progress: Optional[Any] = None
+        self._interactive_cb: Optional[Callable] = None
 
         # Path to the pipeline.jsonl event stream for the current run (set in evaluate)
         self._pipeline_jsonl: Optional[Path] = None
@@ -61,6 +62,10 @@ class TSCPipeline:
     def set_progress_callback(self, callback: Any) -> None:
         """Set a callback(layer_num, layer_name, status, details) for progress."""
         self._on_progress = callback
+
+    def set_interactive_callback(self, callback: Callable) -> None:
+        """Register a callback for interactive Human-in-the-Loop steps."""
+        self._interactive_cb = callback
 
     async def evaluate(
         self,
@@ -127,6 +132,30 @@ class TSCPipeline:
         
         # Instantiate WorldDataBank facade for pipeline data
         world_bank = WorldDataBank()
+
+        # If no interactive callback is set (e.g. CLI run), use a file-polling fallback
+        if not self._interactive_cb:
+            async def default_interactive_cb(action: str, payload: dict) -> dict:
+                self._write_jsonl_event({
+                    "type": "action_required",
+                    "action": action,
+                    "payload": payload
+                })
+                logger.info(f"⏸️ Pipeline paused for interactive action: {action}. Polling commands.json in {run_dir}...")
+                commands_file = run_dir / "commands.json"
+                while True:
+                    if commands_file.exists():
+                        try:
+                            import json
+                            data = json.loads(commands_file.read_text())
+                            if data.get("type") == "action_response" and data.get("action") == action:
+                                commands_file.unlink() # clear it after reading
+                                return data.get("data", {})
+                        except Exception as e:
+                            logger.error(f"Error reading commands.json: {e}")
+                    await asyncio.sleep(1)
+
+            self._interactive_cb = default_interactive_cb
 
         # Build document list
         documents = self._build_document_list(
@@ -245,6 +274,7 @@ class TSCPipeline:
             mode="behavioral",
             session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
             llm_client=self._llm,
+            interactive_cb=self._interactive_cb,
         )
         self._emit_progress(2, "Behavioral Analysis", "done", {
             "agents": len(profiles),

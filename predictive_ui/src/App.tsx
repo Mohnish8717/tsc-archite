@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Layers, Activity, Users, Terminal, MessageSquare, Home } from 'lucide-react';
+import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText } from 'lucide-react';
 import OASIS3D from './components/layers/OASIS3D';
 import BoardroomDebate from './components/layers/BoardroomDebate';
 import IngestorGraph from './components/layers/IngestorGraph';
 import AssemblyMatrix from './components/layers/AssemblyMatrix';
 import HandoffTerminal from './components/layers/HandoffTerminal';
+import SeedReviewPage from './components/layers/SeedReviewPage';
 import LandingPage from './components/LandingPage';
 import InputSetupPage from './components/InputSetupPage';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -209,6 +210,9 @@ function App() {
             </div>
           </div>
         )}
+        
+        {/* HITL Action Overlays */}
+        <SeedReviewPage />
       </main>
     </div>
   );

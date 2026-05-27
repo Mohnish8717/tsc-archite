@@ -31,8 +31,8 @@ import dotenv
 dotenv.load_dotenv(PROJECT_ROOT / ".env")
 # os.environ["TSC_LLM_PROVIDER"] = "google"
 # os.environ["TSC_LLM_MODEL"] = "gemini-2.5-flash"
-# os.environ["TSC_GM_LLM_PROVIDER"] = "ollama"
-# os.environ["TSC_GM_LLM_MODEL"] = "llama3.2"
+os.environ["TSC_GM_LLM_PROVIDER"] = "ollama"
+os.environ["TSC_GM_LLM_MODEL"] = "gemma4:e2b"
 os.environ["HINDSIGHT_URL"] = "" # Disable Hindsight to avoid 402 API errors
 os.environ["GEMINI_FREE_RPM"] = "35"
 os.environ["TSC_GEMINI_RPM_LIMIT"] = "35"
