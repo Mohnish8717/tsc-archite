@@ -56,5 +56,9 @@ def create_llm_client(
         from tsc.llm.ollama_provider import OllamaClient
         return OllamaClient(api_key=k or "ollama", model=m or "llama3.2")
 
+    elif p == LLMProvider.NVIDIA:
+        from tsc.llm.nvidia_provider import NvidiaClient
+        return NvidiaClient(api_key=k, model=m)
+
     else:
         raise ValueError(f"Unknown LLM provider: {p}")

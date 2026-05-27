@@ -1,0 +1,54 @@
+{
+  "company_name": "YouTube (Alphabet / Google)",
+  "team_size": 10000,
+  "budget": "Part of Alphabet ($258B revenue in 2021). YouTube generated $28.8B in advertising revenue in 2021 alone — a 46% YoY increase.",
+  "tech_stack": [
+    "YouTube Web (Polymer/LitElement)",
+    "YouTube iOS (Swift)",
+    "YouTube Android (Kotlin/Java)",
+    "YouTube Data API v3 (REST, OAuth2)",
+    "Spanner (distributed database)",
+    "Borg (cluster management)",
+    "Custom ML Recommendation Engine",
+    "YouTube Studio (React)"
+  ],
+  "platform_scale": {
+    "monthly_active_users": "2.5 billion (2021)",
+    "videos_uploaded_per_minute": "500 hours of video uploaded every minute",
+    "partner_program_creators": "2 million+ creators in the YouTube Partner Program (YPP)",
+    "annual_creator_payouts": "$15 billion paid to creators in 2021 (55% rev-share)",
+    "us_gdp_contribution": "$25 billion contribution to US GDP in 2021 (Oxford Economics)",
+    "us_jobs_supported": "425,000 full-time equivalent jobs supported by YouTube's creative ecosystem in the US"
+  },
+  "current_priorities": [
+    "Protect creator mental health and well-being — reduce harassment of creators, especially smaller creators with under 10,000 subscribers",
+    "Advertiser brand safety — ensure major brand advertising partners are not publicly embarrassed by platform content or metrics",
+    "Prevent coordinated 'dislike bombing' attacks — groups of users coordinating to mass-dislike a specific creator's content as a harassment mechanism",
+    "Maintain platform trust — increase creator retention in the YouTube Partner Program by making the platform feel safer to produce content on",
+    "Grow YouTube Shorts — compete with TikTok's short-form dominance by growing Shorts engagement metrics"
+  ],
+  "competitors": [
+    "TikTok (1B+ MAU in 2021, most downloaded app globally, primary short-form threat, never had public dislike counts)",
+    "Twitch (dominant in live streaming: ~76% of live-streaming hours watched in 2021, zero concept of a dislike button)",
+    "Instagram Reels (Meta, direct Shorts competitor, no dislike mechanism)",
+    "Vimeo (creator-focused, no public dislike count)",
+    "Facebook Watch (Meta, declining engagement)"
+  ],
+  "key_stakeholders": [
+    "YouTube Creator Community: 2M+ YPP creators whose livelihood depends on the platform",
+    "Advertisers: Large brands paying $28.8B/year who do not want their ad placements associated with high-dislike content",
+    "YouTube co-founder Jawed Karim: Publicly criticized the removal on his channel description, writing 'Why would YouTube do this?'",
+    "MKBHD (Marques Brownlee): High-profile creator who argued the dislike bar is a 'one-glanceable quality indicator'",
+    "Linus Sebastian (Linus Tech Tips): Argued on the WAN Show that the real beneficiary is corporate channels, not small creators",
+    "Developer Community: Third-party developers who built browser extensions and analytics tools on the YouTube Data API v3 dislikeCount field"
+  ],
+  "regulatory_environment": "Operating under GDPR (EU), COPPA (US — child safety on platform), and FTC advertising disclosure requirements. No specific regulation mandates showing or hiding dislike counts.",
+  "historical_context": {
+    "youtube_rewind_2018_dislikes": "20 million+ dislikes — the most disliked video in YouTube history at time of removal decision",
+    "bieber_baby_former_record": "Justin Bieber's 'Baby' previously held the record, surpassed by YouTube Rewind within one week of Rewind's December 2018 release",
+    "experiment_start": "March 2021 — internal A/B test began hiding dislike counts on a subset of videos",
+    "public_acknowledgment": "July 2021 — YouTube publicly confirmed it was running the experiment",
+    "global_rollout": "November 10, 2021",
+    "api_deprecation": "December 13, 2021 — YouTube Data API v3 dislikeCount field made private for public requests"
+  }
+}

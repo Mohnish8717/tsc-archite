@@ -14,7 +14,11 @@ async def extract_business_metrics(agent_profile: OASISAgentProfile, interview_t
     Predictive Reality Engine's configured LLM to extract structured business metrics.
     """
     llm_model_name = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
-    llm_provider = LLMProvider.GOOGLE
+    provider_str = os.getenv("TSC_LLM_PROVIDER", "google").upper()
+    try:
+        llm_provider = LLMProvider[provider_str]
+    except KeyError:
+        llm_provider = LLMProvider.GOOGLE
     api_key = tsc_settings.get_api_key(llm_provider)
 
     # Initialize CAMEL-AI Model (same as simulation_engine.py)
@@ -27,6 +31,10 @@ async def extract_business_metrics(agent_profile: OASISAgentProfile, interview_t
         model = GroqModel(model_type=llm_model_name, api_key=api_key)
     elif llm_provider == LLMProvider.ANTHROPIC:
         model = AnthropicModel(model_type=llm_model_name, api_key=api_key)
+    elif llm_provider == LLMProvider.OPENAI or "gpt" in llm_model_name:
+        model = OpenAIModel(model_type=llm_model_name, api_key=api_key)
+    elif llm_provider == LLMProvider.NVIDIA:
+        model = OpenAIModel(model_type=llm_model_name, api_key=api_key, url="https://integrate.api.nvidia.com/v1")
     else:
         model = OpenAIModel(model_type=llm_model_name, api_key=api_key)
 

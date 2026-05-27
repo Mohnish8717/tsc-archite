@@ -197,6 +197,8 @@ export interface SimulationConfig {
   llm_active_cohort: number;
   shadow_agents: number;
   interview_phase_enabled: boolean;
+  feature_title?: string;
+  feature_description?: string;
 }
 
 // G12: Seed posts that bootstrapped the debate
@@ -516,19 +518,7 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     simulationStatus: 'running',
     simulationTitle: title,
     simulationProgress: null,
-    simulationReport: null,
-    debateMessages: [],
-    activeSpeaker: null,
     pipelineStages: { ...state.pipelineStages, layer5: 'running' },
-    networkTopology: null,
-    simulationConfig: null,
-    seedPosts: [],
-    focusGroupResults: null,
-    populationStats: null,
-    agentJournals: null,
-    consensusResult: null,
-    sycophancyAlerts: [],
-    eagleEyeResults: [],
   })),
 
   // Boardroom

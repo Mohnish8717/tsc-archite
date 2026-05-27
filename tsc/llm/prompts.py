@@ -347,6 +347,7 @@ Generate a comprehensive ~2500-word psychological profile covering ALL sections 
 
 1. PERSONALITY TYPE & COGNITIVE STYLE (400 words)
    - MBTI type and explanation grounded in ONE specific past professional experience that reveals this tendency
+   - OCEAN scores (Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism) rated 0.0 to 1.0. Format EXACTLY as: "OCEAN: O=0.xx, C=0.xx, E=0.xx, A=0.xx, N=0.xx"
    - How they process information and make decisions
    - Key strengths and blindspots with concrete behavioural examples
 
@@ -673,6 +674,7 @@ Sections 0–9 cover psychology. Sections 10–14 cover the BUYER'S MARKET WORLD
 
 1. PERSONALITY TYPE & COGNITIVE STYLE (300 words)
    - MBTI type grounded in a specific professional behaviour observable in this segment
+   - OCEAN scores (Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism) rated 0.0 to 1.0. Format EXACTLY as: "OCEAN: O=0.xx, C=0.xx, E=0.xx, A=0.xx, N=0.xx"
    - How they process new offerings (analytical vs. gut feel vs. consensus)
    - Key strengths and blindspots as a BUYER
 

@@ -1538,6 +1538,7 @@ MANDATORY WRITING RULES:
             f"{context_para}\n\n"
             f"1. PERSONALITY TYPE\n"
             f"MBTI: {mbti_guess} (inferred from role — LLM profile generation failed).\n"
+            f"OCEAN: O=0.50, C=0.50, E=0.50, A=0.50, N=0.50\n"
             f"Decision authority: {authority}. Relevance score: "
             f"{stakeholder.relevance_score:.2f}.\n\n"
             f"6. PREDICTED STANCE\n"
@@ -1563,10 +1564,12 @@ MANDATORY WRITING RULES:
         """Parse free-form profile text into structured PsychologicalProfile."""
         # CRITICAL FIX #4: Robust MBTI extraction
         mbti = self._extract_mbti(text)
+        ocean_scores = self._extract_ocean_scores(text)
 
         return PsychologicalProfile(
             mbti=mbti,
             mbti_description=self._get_mbti_description(mbti),
+            ocean_scores=ocean_scores,
             key_traits=self._extract_list_items(
                 text, "trait", "strength", "characteristic"
             ),
@@ -1612,6 +1615,32 @@ MANDATORY WRITING RULES:
     # ═════════════════════════════════════════════════════════════════
     # CRITICAL FIX #4: Robust MBTI Extraction
     # ═════════════════════════════════════════════════════════════════
+
+    def _extract_ocean_scores(self, text: str) -> dict[str, float]:
+        """Extract OCEAN scores from format: OCEAN: O=0.xx, C=0.xx, E=0.xx, A=0.xx, N=0.xx"""
+        ocean = {"openness": 0.5, "conscientiousness": 0.5, "extraversion": 0.5, "agreeableness": 0.5, "neuroticism": 0.5}
+        if not text:
+            return ocean
+        
+        # Look for the OCEAN string
+        pattern = r"OCEAN:\s*(?:O=|Openness=)?(0\.\d+)[,\s]*(?:C=|Conscientiousness=)?(0\.\d+)[,\s]*(?:E=|Extraversion=)?(0\.\d+)[,\s]*(?:A=|Agreeableness=)?(0\.\d+)[,\s]*(?:N=|Neuroticism=)?(0\.\d+)"
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        
+        if matches:
+            match = matches[-1] # Take the last one if multiple exist
+            try:
+                ocean["openness"] = float(match.group(1))
+                ocean["conscientiousness"] = float(match.group(2))
+                ocean["extraversion"] = float(match.group(3))
+                ocean["agreeableness"] = float(match.group(4))
+                ocean["neuroticism"] = float(match.group(5))
+                logger.debug("Successfully extracted OCEAN scores: %s", ocean)
+            except ValueError:
+                pass
+        else:
+            logger.debug("No OCEAN scores found in profile text, using defaults")
+            
+        return ocean
 
     def _extract_mbti(self, text: str) -> str:
         """Extract MBTI with context-aware confidence."""

@@ -70,8 +70,17 @@ def build_llm_config() -> Optional[dict]:
     model = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
+    nvidia_key = os.getenv("NVIDIA_API_KEY")
     
-    if gemini_key:
+    if nvidia_key:
+        return {
+            "config_list": [{
+                "model": model,
+                "api_key": nvidia_key,
+                "base_url": "https://integrate.api.nvidia.com/v1",
+            }]
+        }
+    elif gemini_key:
         return {
             "config_list": [{
                 "model": model,

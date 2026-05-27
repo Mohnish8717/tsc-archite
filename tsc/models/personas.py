@@ -42,6 +42,7 @@ class PsychologicalProfile(BaseModel):
 
     mbti: str = ""
     mbti_description: str = ""
+    ocean_scores: dict[str, float] = Field(default_factory=dict)
     key_traits: list[str] = Field(default_factory=list)
     emotional_triggers: EmotionalTriggers = Field(default_factory=EmotionalTriggers)
     communication_style: CommunicationStyle = Field(

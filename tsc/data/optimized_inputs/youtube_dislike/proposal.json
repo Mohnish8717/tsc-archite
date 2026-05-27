@@ -1,0 +1,30 @@
+{
+  "proposal_id": "YT-TRUST-SAFETY-2021-007",
+  "title": "Deprecate Public Dislike Count Visibility Across All YouTube Surfaces",
+  "description": "Remove the public-facing dislike number from all YouTube video surfaces globally — web, iOS, Android, Smart TV, and Embed players. The dislike button itself is NOT removed: users can still click it to signal dislike to the recommendation algorithm, and creators can still view their exact dislike count privately inside YouTube Studio Analytics. The dislikeCount property in the YouTube Data API v3 will also be made private, taking effect December 13, 2021. An exemption process will be provided for third-party developers who need the data for non-display analytical purposes.\n\nTimeline:\n- March 2021: Internal A/B experiment begins hiding dislike counts on subset of videos.\n- July 2021: Experiment expanded. YouTube publicly acknowledges the test.\n- November 10, 2021: Global rollout begins to all logged-in users.\n- December 13, 2021: YouTube Data API v3 dislikeCount field deprecated for public access.\n\nInternal experiment data (as cited in the official blog.youtube announcement):\n- Experiments showed a measurable reduction in 'dislike attack' behavior when the public count was hidden, because users were less incentivized to participate in a coordinated dislike campaign if there was no visible scoreboard to drive up.\n- Removal did not significantly impact overall video viewership numbers in controlled tests.\n\nStated rationale:\n1. Protect smaller and newer creators who are disproportionately targeted by coordinated dislike campaigns from rival fanbases or troll groups.\n2. Foster a more inclusive and respectful environment for creators who are just starting out.\n3. Reduce the incentive structure that makes 'dislike bombing' a viable harassment tool.\n\nScope of change:\n- All video player UIs across all clients (YouTube Web Polymer, YouTube iOS, YouTube Android, YouTube TV, Embedded players)\n- YouTube Data API v3: dislikeCount field made private (returns null for unauthenticated requests)\n- YouTube Studio: dislikeCount remains fully accessible to the authenticated video owner\n- Recommendation algorithm: dislike signal from user button clicks is preserved unchanged",
+
+  "target_users": "All 2.5 billion monthly active YouTube viewers globally, and 2+ million creators in the YouTube Partner Program.",
+
+  "affected_domains": [
+    "Video Player UI (Web, iOS, Android, TV, Embed)",
+    "YouTube Studio Analytics (creator-side — unaffected)",
+    "YouTube Data API v3 (dislikeCount field deprecated for public access, effective Dec 13 2021)",
+    "Third-Party Developer Ecosystem (browser extensions, analytics dashboards, creator tools)",
+    "Recommendation Algorithm (dislike signal preserved; only display count removed)",
+    "Trust & Safety / Community Health"
+  ],
+
+  "tech_stack": [
+    "YouTube Web Frontend (Polymer / LitElement)",
+    "YouTube iOS Client (Swift / Objective-C)",
+    "YouTube Android Client (Java / Kotlin)",
+    "YouTube TV (React)",
+    "YouTube Data API v3 (REST, OAuth2)",
+    "YouTube Internal Recommendation System (custom ML, Spanner, Borg)"
+  ],
+
+  "priority": "P1 — Trust & Safety / Creator Wellbeing",
+  "decision_maker": "YouTube VP of Product, Trust & Safety Team",
+  "announcement_date": "2021-11-10",
+  "api_deprecation_date": "2021-12-13"
+}

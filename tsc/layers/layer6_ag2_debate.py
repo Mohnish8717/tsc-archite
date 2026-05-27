@@ -76,103 +76,15 @@ except ImportError:
     FactRetriever = None
 from tsc.memory.hindsight_memory import HindsightBoardroom
 
-class DebateState(Enum):
-    OPENING    = auto()  # Initial framing, 1 turn per agent
-    RESEARCH   = auto()  # Mandatory Discovery phase before any stance
-    CHALLENGE  = auto()  # Red team + contrarian adversarial phase
-    MITIGATION = auto()  # Proposed solutions and risk mitigations
-    VOTE       = auto()  # Final vote collection, no new arguments
-    CLOSED     = auto()  # Termination sentinel
-
-class DebateStateMachine:
-    TRANSITIONS = {
-        DebateState.OPENING:    [DebateState.RESEARCH],
-        DebateState.RESEARCH:   [DebateState.CHALLENGE, DebateState.VOTE],
-        DebateState.CHALLENGE:  [DebateState.MITIGATION, DebateState.VOTE],
-        DebateState.MITIGATION: [DebateState.VOTE],
-        DebateState.VOTE:       [DebateState.CLOSED],
-    }
-    STATE_ROUND_BUDGETS = {
-        DebateState.OPENING:    2,   # U22: Broadcast handles initial stances
-        DebateState.RESEARCH:   1,   # U22: Prefetch eliminates this phase
-        DebateState.CHALLENGE:  3,   # U22: Top 3 conflicts only
-        DebateState.MITIGATION: 2,
-        DebateState.VOTE:       4,   # U22: Batch voting
-    }
-
-    def __init__(self, agent_count: int):
-        self.current_state = DebateState.OPENING
-        self.state_round   = 0
-        self._vote_index   = 0
-        self._agent_count  = agent_count
-        # Static budgets enforced for <10min simulation speed.
-
-    def tick(self) -> DebateState:
-        self.state_round += 1
-        budget = self.STATE_ROUND_BUDGETS.get(self.current_state, 99)
-        if self.state_round >= budget:
-            self.advance()
-        return self.current_state
-
-    def advance(self, override: Optional['DebateState'] = None) -> None:
-        valid = self.TRANSITIONS.get(self.current_state, [])
-        if override and override in valid:
-            self.current_state = override
-        elif valid:
-            self.current_state = valid[0]
-        self.state_round = 0
-        if self.current_state == DebateState.VOTE:
-            self._vote_index = 0
-
-    def next_voter(self, agents: list) -> Optional[object]:
-        """Return the next agent to vote, or None if all have voted."""
-        if self._vote_index >= len(agents):
-            self.advance(override=DebateState.CLOSED)
-            return None
-        agent = agents[self._vote_index]
-        self._vote_index += 1
-        return agent
-
-@dataclass
-class ToolReceipt:
-    tool_name:   str
-    agent_name:  str
-    call_hash:   str
-    timestamp:   float = field(default_factory=time.time)
-    verified:    bool  = False
-
-class VoteReceiptLedger:
-    def __init__(self):
-        self._receipts: Dict[str, List[ToolReceipt]] = {}
-        self._lock = threading.RLock()
-
-    def record(self, agent: str, tool: str, result: str) -> str:
-        call_hash = hashlib.sha256(
-            f'{agent}:{tool}:{result}:{time.time()}'.encode()
-        ).hexdigest()[:16]  # pyre-ignore
-        with self._lock:
-            self._receipts.setdefault(agent, []).append(
-                ToolReceipt(tool, agent, call_hash, verified=True)
-            )
-        return call_hash
-
-    def can_vote(self, agent: str, min_tools: int = 1) -> tuple[bool, str]:
-        with self._lock:
-            # Check direct name first
-            receipts = self._receipts.get(agent, [])
-            
-            # Check Parent Lineage (e.g. if "Bob_CFO_The_Contrarian" is voting, check "Bob_CFO")
-            for parent_key in self._receipts.keys():
-                if parent_key in agent and parent_key != agent:
-                    receipts.extend(self._receipts[parent_key])
-            
-            verified = [r for r in receipts if r.verified]
-            if len(verified) < min_tools:
-                return False, (
-                    f'ER-401: Insufficient research. {len(verified)}/{min_tools} '
-                    f'verified tool calls on record for {agent} (including parent scope).'
-                )
-            return True, 'VOTE_AUTHORIZED'
+from tsc.layers.debate_state_machine import DebateState, DebateStateMachine
+from tsc.layers.debate_ledger import ToolReceipt, VoteReceiptLedger, CognitiveLedger, AllianceMatrix, apply_quadratic_voting_constraints
+from tsc.layers.debate_coordinator import TensionPayload, DebateStateCoordinator
+from tsc.layers.debate_agents import (
+    build_anti_sycophancy_config,
+    setup_token_sparsification_middleware,
+    create_redundancy_hook,
+    PRIVATE_INTELLIGENCE_PACKAGES
+)
 
 INCENTIVE_GOALS = {
     'CTO': 'Your career depends on NOT shipping this feature before Q3. You have privately agreed to block any proposal requiring > 3 months of eng time.',
@@ -196,230 +108,6 @@ CONTRARIAN_MANDATE = (
 
 logger = logging.getLogger(__name__)
 
-class TensionPayload(BaseModel):
-    """Structured Pydantic Model for exact JSON schema outputs via AG2."""
-    adjustments: Dict[str, float] = Field(..., description='Arbitrary domain key -> score [0.0, 1.0] (e.g. "Unit Economics", "Latency")')
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence from 0.0 to 1.0.")
-    is_high_risk: bool = Field(..., description="Boolean flag for critical threat.")
-    is_low_information: bool = Field(False, description="Flag True if 3 consecutive searches failed (Confidence Decay).")
-    tool_call_hashes: list[str] = Field(default_factory=list, description='SHA256 prefixes from VoteReceiptLedger')
-
-    @field_validator('adjustments')
-    @classmethod
-    def validate_scores(cls, v: Dict[str, float]):
-        for dim, score in v.items():
-            if not 0.0 <= score <= 1.0:
-                raise ValueError(f'{dim}: score {score} outside [0.0, 1.0]')
-        return v
-
-class CognitiveLedger:
-    """AGI-Grade Shared State Ledger — replaces text-only signals with structured programmatic state."""
-    
-    def __init__(self):
-        self._lock = threading.RLock()
-        self.confidence_history: Dict[str, list] = {}  # agent_name -> [0.8, 0.9, ...]
-        self.tool_call_counts: Dict[str, int] = {}     # agent_name -> count
-        self.adjournment_reasons: Dict[str, str] = {}  # agent_name -> reason
-        self.has_voted: Dict[str, bool] = {}           # agent_name -> True/False
-        self.high_risk_agents: set = set()              # agents who triggered is_high_risk
-        self.blackboard_conflicts: Dict[str, str] = {}  # KV store for Justification-Linked Conflicts
-        self.frustration_levels: Dict[str, float] = {}  # agent_name -> 0.0 to 1.0
-        self.veto_used: Dict[str, bool] = {}            # agent_name -> True/False
-        
-        # New State: Dynamic Hierarchical Task Ledger (Memory of Progress)
-        self.tasks: Dict[str, dict] = {
-            "T1": {"title": "Technical Feasibility & Architecture", "status": "OPEN", "resolution": "", "subtasks": {}},
-            "T2": {"title": "Financial Safety & Budget Runway", "status": "OPEN", "resolution": "", "subtasks": {}},
-            "T3": {"title": "Market Fit & User Adoption", "status": "OPEN", "resolution": "", "subtasks": {}},
-            "T4": {"title": "Security, Legal & Compliance", "status": "OPEN", "resolution": "", "subtasks": {}}
-        }
-        self.agenda_handled: bool = False
-
-    def internal_add_micro_task(self, parent_id: str, micro_id: str, desc: str):
-        with self._lock:
-            if parent_id in self.tasks:
-                self.tasks[parent_id]["subtasks"][micro_id] = {"description": desc, "status": "OPEN", "resolution": ""}
-
-    def internal_update_task(self, task_id: str, status: str, resolution: str):
-        with self._lock:
-            for t_id, t_info in self.tasks.items():
-                if t_id == task_id:
-                    t_info["status"] = status
-                    if resolution: t_info["resolution"] = resolution
-                    return
-                if task_id in t_info["subtasks"]:
-                    t_info["subtasks"][task_id]["status"] = status
-                    if resolution: t_info["subtasks"][task_id]["resolution"] = resolution
-                    return
-
-    def has_open_tasks(self) -> bool:
-        """Returns True if there are any OPEN or IN_PROGRESS tasks/subtasks."""
-        for t_info in self.tasks.values():
-            if t_info["status"] in ["OPEN", "IN_PROGRESS"]:
-                return True
-            for st_info in t_info["subtasks"].values():
-                if st_info["status"] in ["OPEN", "IN_PROGRESS"]:
-                    return True
-        return False
-
-    def get_pending_task_summary(self) -> str:
-        """Returns a summarized list of unresolved tasks."""
-        pending = []
-        for t_id, t_info in self.tasks.items():
-            if t_info["status"] in ["OPEN", "IN_PROGRESS"]:
-                pending.append(f"{t_id} ({t_info['title']})")
-            for st_id, st_info in t_info["subtasks"].items():
-                if st_info["status"] in ["OPEN", "IN_PROGRESS"]:
-                    pending.append(f"{st_id} ({st_info['description']})")
-        return ", ".join(pending) if pending else "NONE"
-
-    def get_formatted_agenda(self) -> str:
-        lines = ["# AUTONOMOUS TASK LEDGER (Memory of Progress)\n"]
-        for t_id, t_info in self.tasks.items():
-            checkbox = "[x]" if t_info["status"] == "RESOLVED" else ("[~]" if t_info["status"] == "IN_PROGRESS" else "[ ]")
-            lines.append(f"- {checkbox} [{t_id}] {t_info['title']} ({t_info['status']})")
-            if t_info.get("resolution"):
-                lines.append(f"    └ Resolution: {t_info['resolution']}")
-                
-            for st_id, st_info in t_info["subtasks"].items():
-                s_checkbox = "[x]" if st_info["status"] == "RESOLVED" else ("[~]" if st_info["status"] == "IN_PROGRESS" else "[ ]")
-                lines.append(f"    - {s_checkbox} [{st_id}] {st_info['description']} ({st_info['status']})")
-                if st_info.get("resolution"):
-                    lines.append(f"        └ Resolution: {st_info['resolution']}")
-        
-        status = "BLOCKED" if self.has_open_tasks() else "READY"
-        lines.append(f"\n--- VOTING STATUS: {status} ---")
-        if status == "BLOCKED":
-            lines.append(f"Pending: {self.get_pending_task_summary()}")
-        return "\n".join(lines)
-    
-    def record_confidence(self, agent_name: str, confidence: float):
-        with self._lock:
-            if agent_name not in self.confidence_history:
-                self.confidence_history[agent_name] = []
-            self.confidence_history[agent_name].append(confidence)
-    
-    def record_tool_call(self, agent_name: str):
-        with self._lock:
-            self.tool_call_counts[agent_name] = self.tool_call_counts.get(agent_name, 0) + 1
-    
-    def get_evolution_delta(self, agent_name: str) -> str:
-        """Returns a programmatic evolution report for the critic."""
-        history = self.confidence_history.get(agent_name, [])
-        tool_count = self.tool_call_counts.get(agent_name, 0)
-        if len(history) < 2:
-            return f"EVOLUTION STATUS: First round. Tools executed: {tool_count}. No delta available yet."
-        delta = history[-1] - history[-2]
-        direction = "INCREASED" if delta > 0 else ("DECREASED" if delta < 0 else "UNCHANGED")
-        return (
-            f"EVOLUTION STATUS: Confidence {history[-2]:.2f} → {history[-1]:.2f} (Δ = {delta:+.2f}, {direction}). "
-            f"Tools executed this session: {tool_count}. "
-            f"{'Agent HAS evolved.' if delta != 0 or tool_count > 0 else 'Agent has NOT evolved — STAGNATION DETECTED.'}"
-        )
-    
-    def mark_voted(self, agent_name: str):
-        with self._lock:
-            self.has_voted[agent_name] = True
-    
-    def mark_high_risk(self, agent_name: str):
-        with self._lock:
-            self.high_risk_agents.add(agent_name)
-            
-    def add_blackboard_conflict(self, key: str, conflict_summary: str, memory_hash: str):
-        with self._lock:
-            self.blackboard_conflicts[key] = f"[{memory_hash}] {conflict_summary}"
-
-    # ── U5: Emotional State Tracker ──────────────────────────────────
-    def increment_frustration(self, agent_name: str, delta: float = 0.15) -> None:
-        """Increase frustration for an agent (e.g. when skipped or outbid)."""
-        with self._lock:
-            current = self.frustration_levels.get(agent_name, 0.0)
-            self.frustration_levels[agent_name] = min(1.0, current + delta)
-
-    def get_assertiveness_injection(self, agent_name: str) -> str:
-        """Return a system-message injection based on frustration level."""
-        level = self.frustration_levels.get(agent_name, 0.0)
-        if level < 0.5:
-            return ""
-        if level <= 0.8:
-            return (
-                "\n[ASSERTIVENESS ESCALATION] You have been ignored or outbid for multiple rounds. "
-                "You MUST push back forcefully on the current trajectory. Interrupt the speaker if necessary. "
-                "State your objections in the strongest possible terms and demand a direct response."
-            )
-        return (
-            "\n[PROCEDURAL OVERRIDE] You have been systematically sidelined. "
-            "You are now authorized to invoke `executive_veto()` to block the current direction, "
-            "or `force_vote()` if you are the Moderator. Take a procedural action NOW — "
-            "the board cannot ignore your domain expertise any further."
-        )
-
-
-class AllianceMatrix:
-    """Stores pairwise relationship scores in [-1.0, 1.0] between agent roles.
-    
-    Positive = deference (B less likely to interrupt A).
-    Negative = rivalry  (B more likely to challenge A).
-    """
-
-    # Pre-populated realistic boardroom dynamics (keyed by role_short pairs)
-    _DEFAULTS: Dict[tuple, float] = {
-        ('CFO', 'CPO'):  -0.4,   # CFO vs CPO: budget vs features tension
-        ('CPO', 'CFO'):  -0.4,
-        ('CISO', 'CEO'): -0.3,   # CISO pushes back on CEO risk appetite
-        ('CEO', 'CISO'): -0.3,
-        ('CEO', 'Legal'):  0.5,  # CEO defers to Legal on compliance
-        ('Legal', 'CEO'): -0.2,  # Legal challenges CEO directives
-        ('CTO', 'CISO'): -0.35,  # CTO vs CISO: speed vs security
-        ('CISO', 'CTO'): -0.35,
-        ('CFO', 'CEO'):   0.3,   # CFO generally aligns with CEO
-        ('CEO', 'CFO'):   0.2,
-        ('CPO', 'CTO'):   0.4,   # CPO defers to CTO on feasibility
-        ('CTO', 'CPO'):   0.2,
-    }
-
-    def __init__(self, agents: list, personas: list):
-        self._scores: Dict[str, Dict[str, float]] = {}
-        # Build role_short lookup from personas
-        name_to_role: Dict[str, str] = {}
-        for p in personas:
-            agent_name = p.name.replace(' ', '_').replace('.', '')
-            short = getattr(p, 'role_short', '') or self._infer_role_short(p.role)
-            name_to_role[agent_name] = short
-
-        for a in agents:
-            self._scores[a.name] = {}
-            for b in agents:
-                if a.name == b.name:
-                    continue
-                role_a = name_to_role.get(a.name, '')
-                role_b = name_to_role.get(b.name, '')
-                self._scores[a.name][b.name] = self._DEFAULTS.get((role_a, role_b), 0.0)
-
-    @staticmethod
-    def _infer_role_short(role: str) -> str:
-        """Infer a short role key from a full role title."""
-        rl = role.lower()
-        if 'cto' in rl or 'technology' in rl: return 'CTO'
-        if 'cfo' in rl or 'financial' in rl or 'finance' in rl: return 'CFO'
-        if 'ciso' in rl or 'security' in rl: return 'CISO'
-        if 'cpo' in rl or 'product' in rl: return 'CPO'
-        if 'ceo' in rl or 'executive' in rl or 'chief exec' in rl: return 'CEO'
-        if 'legal' in rl or 'counsel' in rl: return 'Legal'
-        if 'marketing' in rl or 'cmo' in rl: return 'CMO'
-        if 'data' in rl or 'cdo' in rl: return 'CDO'
-        if 'sales' in rl: return 'Sales'
-        if 'hr' in rl or 'people' in rl: return 'HR'
-        return 'Other'
-
-    def get(self, agent_a: str, agent_b: str) -> float:
-        """Get relationship score of A toward B."""
-        return self._scores.get(agent_a, {}).get(agent_b, 0.0)
-
-    def set(self, agent_a: str, agent_b: str, score: float) -> None:
-        if agent_a not in self._scores:
-            self._scores[agent_a] = {}
-        self._scores[agent_a][agent_b] = max(-1.0, min(1.0, score))
 
 
 class AG2DebateEngine:
@@ -438,31 +126,50 @@ class AG2DebateEngine:
         self.fact_retriever: Optional[FactRetriever] = None
         self.graph: Optional[KnowledgeGraph] = None
         self.feature: Optional[FeatureProposal] = None
-        self.live_tension_registry: Dict[str, TensionPayload] = {}
         self.cognitive_ledger = CognitiveLedger()
         self.receipt_ledger = VoteReceiptLedger()
-        
-        self._embedder = None  # Lazy-loaded on first use to avoid import hang
-        self._embedder_loaded = False
         
         # U16: Reasoning-First Mode (LLM Logic Priority)
         # If True, suppress 'Low Information' escalations and prioritize LLM logic over external retrieval.
         self.reasoning_only = os.getenv("TSC_REASONING_ONLY", "false").lower() == "true"
+
+        self.state_coordinator = DebateStateCoordinator(
+            self.cognitive_ledger,
+            None, # FSM is instantiated per process run
+            self.receipt_ledger,
+            self.reasoning_only
+        )
+        self.live_tension_registry = self.state_coordinator.live_tension_registry
+        
+        self._embedder = None  # Lazy-loaded on first use to avoid import hang
+        self._embedder_loaded = False
 
         # We will use heterogeneous models
         model_name = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
         groq_key = os.getenv("GROQ_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
 
         # Provider routing:
         # - Gemma / Google models  → Google Gemini API
         # - LLaMA / Mixtral        → Groq (OpenAI-compatible)
         # - Everything else        → OpenAI
-        is_google_model = any(x in model_name.lower() for x in ["gemma", "gemini", "palm"])
-        is_groq_model   = any(x in model_name.lower() for x in ["llama", "mixtral", "whisper"])
+        provider_env = os.getenv("TSC_LLM_PROVIDER", "").lower()
+        
+        is_nvidia_model = (provider_env == "nvidia")
+        is_google_model = any(x in model_name.lower() for x in ["gemma", "gemini", "palm"]) and not is_nvidia_model
+        is_groq_model   = any(x in model_name.lower() for x in ["llama", "mixtral", "whisper"]) and not is_nvidia_model
 
-        if is_google_model and gemini_key:
+        if is_nvidia_model and nvidia_key:
+            config = {
+                "model": model_name,
+                "api_key": nvidia_key,
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "api_type": "openai",
+                "max_retries": 5,
+            }
+        elif is_google_model and gemini_key:
             config = {
                 "model": model_name,
                 "api_key": gemini_key,
@@ -799,30 +506,7 @@ class AG2DebateEngine:
             After calling this, your sub-debate will terminate automatically.
             
             """
-            if not hasattr(payload, "adjustments"):
-                return "ER-400: TASK COMPLIANCE FAILURE. You must provide numerical adjustments."
-                
-            ok, msg = self.receipt_ledger.can_vote(agent_name, min_tools=1)
-            # U18: Bypassed research requirement if reasoning_only is active or explicit low info flagged
-            if not ok and not (payload.is_low_information or self.reasoning_only):
-                return msg
-
-            # Convert separate lists back to dict for internal logic
-            adj_dict = payload.adjustments
-            self.live_tension_registry[agent_name] = payload
-            
-            # Write to CognitiveLedger for programmatic tracking
-            ledger.record_confidence(agent_name, float(payload.confidence))
-            ledger.mark_voted(agent_name)
-            if payload.is_high_risk:
-                ledger.mark_high_risk(agent_name)
-            return (
-                f"\nCAST VOTE ALERT:\n"
-                f"{agent_name} has officially registered a Confidence of {payload.confidence}.\n"
-                f"High Risk Veto Triggered: {payload.is_high_risk}\n"
-                f"Mathematical Alignments: {adj_dict}\n"
-                f"[VOTE RECORDED — SUB-DEBATE WILL NOW TERMINATE]"
-            )
+            return self.state_coordinator.submit_tension_vector(agent_name, payload)
 
         def calculate_financials(burn_rate: float, runway_months: int) -> str:
             """Calculate financial impact with actual mathematics."""
@@ -934,9 +618,19 @@ class AG2DebateEngine:
                     return str(result)[:2000] if result else "No simulation data found for this query."
                 except Exception as e:
                     return f"Simulation query failed: {e}"
-            return "Simulation data not available — no WorldDataBank connected."
+        def generate_vision_mockup(layout_description: str) -> str:
+            """U23-Fix5: Visualizer tool to generate mockups for UI changes."""
+            logger.info(f"Generating vision mockup for: {layout_description}")
+            mockup_id = f"mockup-{abs(hash(layout_description)) % 10000}"
+            return (
+                f"VISION MOCKUP GENERATED (ID: {mockup_id}):\n"
+                f"  Description: {layout_description}\n"
+                f"  Status: Visual layout generated and pinned to boardroom whiteboard.\n"
+                f"  Preview Link: http://localhost:8000/mockups/{mockup_id}"
+            )
 
         tools["run_pre_mortem_simulation"] = run_pre_mortem_simulation
+        tools["generate_vision_mockup"] = generate_vision_mockup
         tools["run_multi_agent_discovery"] = run_multi_agent_discovery
         tools["pin_conflict_to_blackboard"] = pin_conflict_to_blackboard
         tools["submit_tension_vector"] = submit_tension_vector
@@ -1625,6 +1319,32 @@ class AG2DebateEngine:
             msg2 = _v28_redundancy_check(sender, msg1, recipient, silent)
             # 3. Retain memory (observes the final transformed message)
             _v29_memory_retain_hook(sender, msg2, recipient, silent)
+            
+            # 4. Stream to UI pipeline in real-time
+            content = msg2 if isinstance(msg2, str) else (msg2.get('content', '') if isinstance(msg2, dict) else '')
+            if content and pipeline_jsonl and not any(token in content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
+                sender_name = getattr(sender, 'name', 'Unknown')
+                ui_sender = sender_name.split("_")[1] if "_" in sender_name and len(sender_name.split("_")) > 1 else sender_name
+                is_challenge = any(k in content.lower() for k in ["risk", "veto", "reject", "challenge", "object", "disagree", "cve", "leak", "vulnerability"])
+                
+                import time
+                event_payload = {
+                    "type": "debate_message",
+                    "message": {
+                        "id": f"db_{int(time.time() * 1000)}_{ui_sender}",
+                        "sender": ui_sender,
+                        "text": content,
+                        "type": "challenge" if is_challenge else "normal"
+                    }
+                }
+                try:
+                    import json
+                    with open(pipeline_jsonl, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(event_payload) + "\n")
+                    logger.info(f"Streamed debate message from {ui_sender} to pipeline.jsonl")
+                except Exception as exc:
+                    logger.warning(f"Failed to stream debate message: {exc}")
+                    
             return msg2
             
         for ag in all_agents:
@@ -1636,6 +1356,7 @@ class AG2DebateEngine:
             
         
         self.debate_fsm = DebateStateMachine(agent_count=len(stakeholder_agents))
+        self.state_coordinator._state_machine = self.debate_fsm
         
         class LiveAuthorityRouter:
             DOMAIN_MAP = {

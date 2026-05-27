@@ -65,17 +65,54 @@ interface BioSections {
   rawBio: string;
 }
 
-const parseBioSections = (bioText: string = ''): BioSections => {
+export const normalizeBio = (bio: any): string => {
+  if (!bio) return '';
+  
+  let parsed = bio;
+  if (typeof bio === 'string') {
+    const trimmed = bio.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (e) {
+        // Not valid JSON, keep as string
+      }
+    }
+  }
+
+  if (typeof parsed === 'object' && parsed !== null) {
+    return Object.entries(parsed)
+      .map(([key, val]) => {
+        const valueStr = typeof val === 'object' ? JSON.stringify(val) : String(val);
+        if (key.startsWith('[')) {
+          return `${key} ${valueStr}`;
+        }
+        // convert key from camelCase or snake_case to upper case spaces
+        const formattedKey = key
+          .replace(/([A-Z])/g, ' $1')
+          .replace(/[_\s]+/g, ' ')
+          .trim()
+          .toUpperCase();
+        return `[${formattedKey}] ${valueStr}`;
+      })
+      .join('\n');
+  }
+
+  return String(bio);
+};
+
+const parseBioSections = (bioText: any = ''): BioSections => {
+  const bioStr = normalizeBio(bioText);
   const sections = {
     identityAnchor: '',
     behavioralRules: '',
     communicationFingerprint: '',
     emotionalTriggers: '',
     currentPosition: '',
-    rawBio: bioText,
+    rawBio: bioStr,
   };
 
-  if (!bioText) return sections;
+  if (!bioStr) return sections;
 
   const tags = [
     { key: 'identityAnchor', label: '[IDENTITY ANCHOR]' },
@@ -87,7 +124,7 @@ const parseBioSections = (bioText: string = ''): BioSections => {
 
   const matches: { key: keyof Omit<BioSections, 'rawBio'>; index: number; label: string }[] = [];
   tags.forEach(tag => {
-    const idx = bioText.indexOf(tag.label);
+    const idx = bioStr.indexOf(tag.label);
     if (idx !== -1) {
       matches.push({ key: tag.key as any, index: idx, label: tag.label });
     }
@@ -96,14 +133,14 @@ const parseBioSections = (bioText: string = ''): BioSections => {
   matches.sort((a, b) => a.index - b.index);
 
   if (matches.length === 0) {
-    sections.identityAnchor = bioText;
+    sections.identityAnchor = bioStr;
     return sections;
   }
 
   for (let i = 0; i < matches.length; i++) {
     const startIdx = matches[i].index + matches[i].label.length;
-    const endIdx = i + 1 < matches.length ? matches[i + 1].index : bioText.length;
-    sections[matches[i].key] = bioText.substring(startIdx, endIdx).trim();
+    const endIdx = i + 1 < matches.length ? matches[i + 1].index : bioStr.length;
+    sections[matches[i].key] = bioStr.substring(startIdx, endIdx).trim();
   }
 
   return sections;
@@ -1250,7 +1287,7 @@ export default function AssemblyMatrix() {
                   <div>
                     <h5 className="font-black text-xs uppercase tracking-widest text-black/40 mb-2 font-mono">Psychological Profile & Directives</h5>
                     <div className="bg-black/5 border-4 border-black p-5 font-bold text-black/85 leading-relaxed text-sm whitespace-pre-line">
-                      {selectedPersona.bio || 'This executive behaves in accordance with their designated role and company domain requirements.'}
+                      {normalizeBio(selectedPersona.bio) || 'This executive behaves in accordance with their designated role and company domain requirements.'}
                     </div>
                   </div>
 

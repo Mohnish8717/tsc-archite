@@ -6,6 +6,7 @@ import { usePipelineStore } from '../../store/usePipelineStore';
 import type { AgentAction } from '../../store/usePipelineStore';
 import { cleanPersonaName } from '../../utils/nameHelper';
 import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2 } from 'lucide-react';
+import { normalizeBio } from './AssemblyMatrix';
 
 
 // ─── Stable hash → position ──────────────────────────────────────────────────
@@ -341,6 +342,8 @@ function PersonPin({ agent, isSelected, onClick }: {
               borderRadius: '16px',
               padding: '20px',
               width: '320px',
+              maxHeight: '70vh',
+              overflowY: 'auto',
               fontFamily: 'monospace',
               color: '#000000',
               zIndex: 50,
@@ -385,47 +388,51 @@ function PersonPin({ agent, isSelected, onClick }: {
 
             {/* MBTI & Journey Details */}
             <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-              <div style={{ flex: 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
-                <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase' }}>MBTI</div>
-                <div style={{ fontSize: '13px', fontWeight: 900, color: '#000000' }}>{agent.mbti}</div>
-              </div>
-              <div style={{ flex: 1.5, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
+              {agent.mbti && (
+                <div style={{ flex: 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
+                  <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase' }}>MBTI</div>
+                  <div style={{ fontSize: '13px', fontWeight: 900, color: '#000000' }}>{agent.mbti}</div>
+                </div>
+              )}
+              <div style={{ flex: agent.mbti ? 1.5 : 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
                 <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase' }}>Journey Stage</div>
-                <div style={{ fontSize: '11px', fontWeight: 900, color: '#F59E0B', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.buyerJourney}</div>
+                <div style={{ fontSize: '11px', fontWeight: 900, color: '#F59E0B', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.buyerJourney || 'UNKNOWN'}</div>
               </div>
             </div>
 
             {/* Bio */}
             <div style={{ marginBottom: '14px' }}>
               <div style={{ fontSize: '9px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase', marginBottom: '4px' }}>Agent Narrative</div>
-              <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, lineHeight: 1.4, color: '#374151' }}>{agent.bio}</p>
+              <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, lineHeight: 1.4, color: '#374151' }}>{normalizeBio(agent.bio)}</p>
             </div>
 
             {/* OCEAN Scores with custom bars */}
-            <div style={{ border: '3px solid #000000', padding: '12px', background: '#FFFFFF', marginBottom: '14px', borderRadius: '8px' }}>
-              <div style={{ fontSize: '9px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#000000', borderBottom: '2px solid #000000', paddingBottom: '4px', marginBottom: '8px' }}>
-                OCEAN Profile
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {[
-                  { label: 'O - Openness', val: agent.ocean.O, color: '#EC4899' },
-                  { label: 'C - Conscientious', val: agent.ocean.C, color: '#2563EB' },
-                  { label: 'E - Extraversion', val: agent.ocean.E, color: '#0D9488' },
-                  { label: 'A - Agreeable', val: agent.ocean.A, color: '#F59E0B' },
-                  { label: 'N - Neuroticism', val: agent.ocean.N, color: '#EF4444' }
-                ].map((trait, i) => (
-                  <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 900 }}>
-                      <span>{trait.label}</span>
-                      <span>{trait.val}%</span>
+            {agent.ocean && agent.ocean.O !== undefined && (
+              <div style={{ border: '3px solid #000000', padding: '12px', background: '#FFFFFF', marginBottom: '14px', borderRadius: '8px' }}>
+                <div style={{ fontSize: '9px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#000000', borderBottom: '2px solid #000000', paddingBottom: '4px', marginBottom: '8px' }}>
+                  OCEAN Profile
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {[
+                    { label: 'O - Openness', val: agent.ocean.O, color: '#EC4899' },
+                    { label: 'C - Conscientious', val: agent.ocean.C, color: '#2563EB' },
+                    { label: 'E - Extraversion', val: agent.ocean.E, color: '#0D9488' },
+                    { label: 'A - Agreeable', val: agent.ocean.A, color: '#F59E0B' },
+                    { label: 'N - Neuroticism', val: agent.ocean.N, color: '#EF4444' }
+                  ].map((trait, i) => (
+                    <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 900 }}>
+                        <span>{trait.label}</span>
+                        <span>{trait.val}%</span>
+                      </div>
+                      <div style={{ height: '8px', border: '2px solid #000000', background: '#E5E7EB', overflow: 'hidden', borderRadius: '2px' }}>
+                        <div style={{ height: '100%', width: `${trait.val}%`, background: trait.color }} />
+                      </div>
                     </div>
-                    <div style={{ height: '8px', border: '2px solid #000000', background: '#E5E7EB', overflow: 'hidden', borderRadius: '2px' }}>
-                      <div style={{ height: '100%', width: `${trait.val}%`, background: trait.color }} />
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Vote stats */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0', border: '4px solid #000000', marginBottom: '12px', borderRadius: '4px', overflow: 'hidden' }}>
@@ -555,9 +562,9 @@ function NetworkScene({ onSelect, showTopologyLines }: { onSelect: (pos: [number
         hot: false,
         role: s.role || 'Lurker',
         bio: s.bio || 'Synthetic agent participating in OASIS swarm analytics.',
-        mbti: s.mbti || 'INTJ',
+        mbti: s.mbti || null,
         traits: s.traits || ['Observer'],
-        ocean: s.ocean_scores || { O: 50, C: 50, E: 50, A: 50, N: 50 },
+        ocean: (s.ocean_scores && Object.keys(s.ocean_scores).length > 0) ? s.ocean_scores : null,
         buyerJourney: s.buyer_journey || 'Awareness'
       });
     });
@@ -575,9 +582,9 @@ function NetworkScene({ onSelect, showTopologyLines }: { onSelect: (pos: [number
           hot: false,
           role: 'Lurker',
           bio: 'A synthetic participant observing the conversation dynamics.',
-          mbti: 'INFP',
+          mbti: null,
           traits: ['Observer', 'Analytical'],
-          ocean: { O: 50, C: 50, E: 50, A: 50, N: 50 },
+          ocean: null,
           buyerJourney: 'Awareness'
         });
       }

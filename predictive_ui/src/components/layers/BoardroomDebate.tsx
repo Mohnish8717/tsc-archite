@@ -592,7 +592,7 @@ function DebateChat() {
 }
 
 export default function BoardroomDebate() {
-  const { isConnected } = usePipelineStore();
+  const { isConnected, simulationConfig } = usePipelineStore();
   return (
     <div className="w-full h-full flex" style={{ paddingTop: '72px' }}>
       {/* 3D Canvas */}
@@ -604,6 +604,26 @@ export default function BoardroomDebate() {
           <span className={`w-2 h-2 ${isConnected ? 'bg-[#FF4500] animate-pulse' : 'bg-black opacity-20'}`} />
           {isConnected ? 'Hindsight Link Active' : 'Bridge Offline'}
         </div>
+        
+        {/* Feature Discovery Banner */}
+        {simulationConfig?.feature_title && (
+          <div className="absolute bottom-4 left-4 max-w-lg border-4 border-black bg-white shadow-neo-black p-4 font-mono pointer-events-none">
+            <div className="flex items-center gap-2 mb-2">
+              <Cpu className="w-4 h-4 text-[#FF4500]" strokeWidth={3} />
+              <div className="font-black text-[10px] uppercase tracking-widest text-[#FF4500]">
+                Boardroom Agenda Item / Feature Discovery
+              </div>
+            </div>
+            <div className="font-black text-lg text-black leading-tight border-b-2 border-black pb-2 mb-2">
+              {simulationConfig.feature_title}
+            </div>
+            {simulationConfig.feature_description && (
+              <div className="text-xs font-bold text-black/70 leading-relaxed max-h-32 overflow-y-auto pr-2 pointer-events-auto">
+                {simulationConfig.feature_description}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       {/* Chat */}
       <div className="flex-1">

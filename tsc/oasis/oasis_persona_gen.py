@@ -407,7 +407,7 @@ class OASISUserPersonaGenerator:
         segment_counts = self._distribute_agents(segments, num_agents)
 
         # Step 4: Generate individual personas per segment
-        # Step 4: Generate individual personas per segment — ALL concurrently
+        # Step 4: Generate individual personas per segment — limited concurrency via Semaphore
         import asyncio
         offsets = []
         offset = 0
@@ -415,21 +415,25 @@ class OASISUserPersonaGenerator:
             offsets.append(offset)
             offset += cnt
 
+        # Keep concurrent request depth to 1 for large segment generation tasks on free tier
+        sem = asyncio.Semaphore(1)
+
         async def _gen(segment, count, start_id):
             if count <= 0:
                 return []
-            return await self._generate_personas_for_segment(
-                segment=segment,
-                count=count,
-                company=company,
-                feature=feature,
-                start_id=start_id,
-            )
+            async with sem:
+                return await self._generate_personas_for_segment(
+                    segment=segment,
+                    count=count,
+                    company=company,
+                    feature=feature,
+                    start_id=start_id,
+                )
 
-        results = await asyncio.gather(*[
-            _gen(seg, cnt, off)
-            for (seg, cnt), off in zip(segment_counts, offsets)
-        ])
+        results = []
+        for (seg, cnt), off in zip(segment_counts, offsets):
+            batch = await _gen(seg, cnt, off)
+            results.append(batch)
 
         all_profiles: list[OASISAgentProfile] = []
         for batch in results:
@@ -759,6 +763,7 @@ class OASISUserPersonaGenerator:
             "gender": gender,
             "age": age,
             "mbti": "",  # Not used — Big Five instead
+            "ocean_scores": personality,
             "country": persona_data.get("location", "US"),
             "other_info": {
                 "role": occupation,
@@ -834,6 +839,7 @@ class OASISUserPersonaGenerator:
                 "gender": random.choice(["male", "female"]),
                 "age": age,
                 "mbti": "",
+                "ocean_scores": {"openness": 0.5, "conscientiousness": 0.5, "extraversion": 0.5, "agreeableness": 0.5, "neuroticism": 0.5},
                 "country": "US",
                 "other_info": {
                     "segment": seg_name,

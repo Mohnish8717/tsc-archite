@@ -136,6 +136,24 @@ async def RunOASISSimulation(
     from camel.messages import BaseMessage
     from tsc.llm.base import LLMClient
 
+    # Monkey-patch camel's FunctionTool get_openai_tool_schema to disable strict tool schemas.
+    # This MUST happen before SocialAgent instantiates any tools.
+    try:
+        import camel.toolkits.function_tool as ft
+        original_get_openai_tool_schema = ft.get_openai_tool_schema
+
+        def patched_get_openai_tool_schema(func):
+            schema = original_get_openai_tool_schema(func)
+            if "function" in schema:
+                schema["function"]["strict"] = False
+            return schema
+
+        ft.get_openai_tool_schema = patched_get_openai_tool_schema
+        logger.info("🔧 Successfully monkey-patched camel.toolkits.function_tool.get_openai_tool_schema to enforce 'strict': False")
+    except Exception as e:
+        logger.error(f"Failed to monkey-patch get_openai_tool_schema: {e}")
+
+
     # Auto-initialize LLM client for Game Master Structured classification if None
     if llm_client is None:
         try:
@@ -149,7 +167,6 @@ async def RunOASISSimulation(
     gm_mod_env = os.getenv("TSC_GM_LLM_MODEL")
     if gm_prov_env:
         try:
-            from tsc.config import LLMProvider
             from tsc.llm.factory import create_llm_client
             gm_llm_client = create_llm_client(
                 provider=LLMProvider(gm_prov_env),
@@ -320,8 +337,10 @@ async def RunOASISSimulation(
         model = GroqModel(model_type=llm_model_name, api_key=api_key, max_retries=10)
     elif llm_provider == LLMProvider.ANTHROPIC:
         model = AnthropicModel(model_type=llm_model_name, api_key=api_key)
-    elif "gpt" in llm_model_name or llm_provider == LLMProvider.OPENAI:
+    elif llm_provider == LLMProvider.OPENAI or "gpt" in llm_model_name:
         model = OpenAIModel(model_type=llm_model_name, api_key=api_key)
+    elif llm_provider == LLMProvider.NVIDIA:
+        model = OpenAIModel(model_type=llm_model_name, api_key=api_key, url="https://integrate.api.nvidia.com/v1")
     else:
         model = OpenAIModel(model_type=llm_model_name, api_key=api_key)
     
@@ -337,7 +356,6 @@ async def RunOASISSimulation(
         ActionType.CREATE_POST,
         ActionType.REPOST,
         ActionType.QUOTE_POST,
-        ActionType.DO_NOTHING,
     ]
 
     social_agents: List[SocialAgent] = []
@@ -436,6 +454,7 @@ async def RunOASISSimulation(
         return record
 
     ChatAgent._aexecute_tool = patched_aexecute_tool
+
 
     agent_id_to_name = {
         str(a.social_agent_id): (a.user_info.name if a.user_info else "Agent")
@@ -562,21 +581,243 @@ async def RunOASISSimulation(
     })
 
     # ── 8.1 Seed Platform — Source-to-Synth Pipeline ────────────────────────────
-    # Research-backed approach: Extract REAL controversy quotes from input data
-    # and create diverse seed posts representing distinct opposing viewpoints.
-    # This prevents the echo chamber effect observed in previous simulations.
-    #
-    # Strategy (per CAMEL-AI best practices):
-    #   1. Extract verbatim high-friction quotes from customer interviews/tickets
-    #   2. Create seeds with OPPOSING viewpoints to force polarization
-    #   3. Target seeds to high-centrality agents (proposer = hub)
-    #   4. Vary tone (formal/angry/skeptical) to elicit differentiated responses
+    # Research-backed approach: Generate diverse seed posts based purely on feature
+    # and company context to act as the simulation stimulus.
     
+    async def _generate_ai_seed_posts(feat, ctx, llm) -> list:
+        """Generate feature-announcement seed posts using the LLM.
+
+        Prompt Engineering Approach (v4 - Full Data Coverage):
+
+        CORE INSIGHT (from context-management.md):
+          Seed posts are the ONLY information channel agents receive.
+          Every fact in proposal.json and context.json that is NOT
+          embedded in a seed post simply does not exist for the simulation.
+          This function must act as a perfect data injector: the entire
+          proposal + context brief must be distributed across the seed
+          posts so agents have a complete, accurate world model.
+
+        STRATEGY (Four-Bucket + Attention Budget, context-management.md):
+          Bucket 1 [Post 1] — Feature Brief (primacy bias: agents read this first)
+          Bucket 2 [Posts 2-4] — Stakeholder angles, business context, tech impact
+          Bucket 3 [Posts 5-7] — Competitive landscape, timeline, historical data
+          Bucket 4 [Post 8] — Stakes / exit signal (recency bias: last thing agents read)
+
+          8 posts total: enough to distribute all data clusters without overloading
+          any single post. Each post should be dense but readable (40-130 words).
+
+        EXCLUDED:
+          community_feedback.txt — confirmed dead input. market_context was removed
+          from this function's signature in v3. The feedback file goes nowhere in
+          the pipeline. It should not be passed to pipeline.evaluate() at all.
+        """
+        import re, json as _json
+
+        if llm is None:
+            return []
+
+        # ── 1. Build Complete Data Brief (proposal + context — full, not truncated) ─
+        product_name  = ctx.company_name if ctx else "this product"
+        feat_title    = feat.title if feat else "the proposed change"
+        feat_desc     = feat.description if feat else ""          # FULL description — no truncation
+        feat_domains  = ", ".join(feat.affected_domains) if (feat and hasattr(feat, "affected_domains") and feat.affected_domains) else ""
+        tech_stack    = ", ".join(ctx.tech_stack) if (ctx and ctx.tech_stack) else "the platform stack"
+        competitors   = "\n  - ".join(ctx.competitors) if (ctx and ctx.competitors) else "competitors"
+        priorities    = "\n  - ".join(ctx.current_priorities) if (ctx and ctx.current_priorities) else "product growth"
+        team_size     = str(ctx.team_size) if (ctx and ctx.team_size) else "unknown"
+        budget        = ctx.budget if (ctx and hasattr(ctx, "budget") and ctx.budget) else ""
+        stakeholders  = "\n  - ".join(ctx.key_stakeholders) if (ctx and hasattr(ctx, "stakeholders") and ctx.stakeholders) else ""
+
+        # Pull any extra structured fields that exist on the models
+        platform_scale_raw = getattr(ctx, "platform_scale", {}) or {}
+        history_raw        = getattr(ctx, "historical_context", {}) or {}
+        regulatory_raw     = getattr(ctx, "regulatory_environment", "") or ""
+
+        # Compact but complete platform scale block
+        platform_lines = [f"{k}: {v}" for k, v in platform_scale_raw.items()] if platform_scale_raw else []
+        platform_scale = "\n  - ".join(platform_lines) if platform_lines else ""
+
+        # Compact historical context
+        history_lines = [f"{k}: {v}" for k, v in history_raw.items()] if history_raw else []
+        history_block = "\n  - ".join(history_lines) if history_lines else ""
+
+        # ── 2. Prompt: Role + Structured Brief + Data-Coverage Instructions ─────────
+        # Key technique from context-management.md: inject the full brief as a
+        # structured XML <reference_brief> block so the LLM treats it as ground truth
+        # and derives post content from it — not from parametric memory.
+        # Key technique from system-prompts.md: Static Context Injection pattern.
+        prompt = f"""<role>
+You are a Senior Social Simulation Architect. Your task is to generate the
+COMPLETE INFORMATION BRIEF for a simulation: a set of seed posts that, taken
+together, expose the simulated agents to ALL relevant facts about a product
+feature announcement. Agents read ONLY these posts — they have no other
+information channel. If a fact is not in a post, it does not exist for them.
+
+Your job is equal parts JOURNALIST and DEBATE MODERATOR:
+- Distribute every fact from the reference brief across the posts.
+- Each post is written by a distinct archetype with a distinct angle on the data.
+- Together, the posts form a complete, multi-perspective briefing that enables
+  agents to form informed, specific positions.
+</role>
+
+<reference_brief>
+This is the GROUND TRUTH. Every field below MUST appear in at least one seed post.
+
+<product>
+Name: {product_name}
+Team size: {team_size}
+{f"Budget / Revenue: {budget}" if budget else ""}
+Tech stack: {tech_stack}
+{f"Regulatory environment: {regulatory_raw}" if regulatory_raw else ""}
+</product>
+
+<feature>
+Title: {feat_title}
+{f"Affected surfaces: {feat_domains}" if feat_domains else ""}
+Full description:
+{feat_desc}
+</feature>
+
+<company_priorities>
+  - {priorities}
+</company_priorities>
+
+<competitors>
+  - {competitors}
+</competitors>
+
+{f"""<platform_scale>
+  - {platform_scale}
+</platform_scale>""" if platform_scale else ""}
+
+{f"""<historical_context>
+  - {history_block}
+</historical_context>""" if history_block else ""}
+</reference_brief>
+
+<data_coverage_rules>
+MANDATORY: All 8 posts together MUST cover every field in <reference_brief>.
+Assign data clusters to posts using this Four-Bucket layout:
+
+POST 1 [OFFICIAL ANNOUNCEMENT — Primacy Anchor]:
+  Must embed: feature title, full scope of what changes and what DOESN'T change,
+  stated rationale, platform scale (users affected), tech stack surfaces affected.
+  Tone: Formal, authoritative, like a product blog post. Opens with the news.
+
+POST 2 [BUSINESS ANALYST — Revenue & Motive]:
+  Must embed: company revenue/budget, company priorities, the business logic,
+  who the real beneficiaries might be vs. stated beneficiaries.
+  Tone: Skeptical but data-driven. Cites specific numbers.
+
+POST 3 [TECHNICAL DEVELOPER — API & Stack Impact]:
+  Must embed: tech stack details, API changes/deprecations, migration timelines,
+  third-party developer ecosystem impact.
+  Tone: Technical precision. Asks the specific developer-facing question.
+
+POST 4 [COMPETITOR OBSERVER — Market Landscape]:
+  Must embed: ALL competitors and their stance on this feature type,
+  market positioning implications, who benefits/loses competitively.
+  Tone: Analytical, comparative, slightly threatening.
+
+POST 5 [HISTORICAL CONTEXT CARRIER]:
+  Must embed: historical_context data (events, dates, precedents),
+  any prior experiments or rollouts, what the timeline looked like.
+  Tone: "Let's remember the history here." Archival, matter-of-fact.
+
+POST 6 [SAFETY / REGULATORY WATCHDOG]:
+  Must embed: regulatory environment, any safety/moderation implications,
+  second-order effects of the feature on platform integrity.
+  Tone: Formal concern. Asks who reviewed the risk.
+
+POST 7 [AFFECTED STAKEHOLDER — Concrete Impact]:
+  Must embed: the most specific, concrete use case harmed or helped by this
+  feature. A real-sounding story from a named role (creator, developer, viewer).
+  Tone: Personal, specific. One concrete scenario, fully described.
+
+POST 8 [EXIT / ULTIMATUM — Recency Anchor]:
+  Must embed: the stakes (what happens if this isn't reversed/implemented),
+  competitor alternatives available, the decision point framing.
+  Tone: "Here is the line." Stakes-setting. Not angry — cold and deliberate.
+</data_coverage_rules>
+
+<constraints>
+MUST DO:
+- Every post must be 40-130 words. Dense but readable.
+- Every post must reference at least ONE specific data point from <reference_brief>.
+- Posts must collectively cover ALL fields in <reference_brief>.
+- Each post must end with a question OR a statement that demands engagement.
+- Posts must feel like they come from real platform users, not a press release.
+
+MUST NOT:
+- Do NOT invent facts, statistics, or events not in <reference_brief>.
+- Do NOT write vague generalities ("users are concerned") — use specific claims.
+- Do NOT repeat the same data point across multiple posts.
+- Do NOT include archetype labels inside the post text.
+- Do NOT write posts shorter than 40 words or longer than 130 words.
+</constraints>
+
+<output_format>
+Return ONLY this XML structure. No explanation, no markdown, no preamble.
+The JSON array inside <seed_posts> must contain exactly 8 strings.
+
+<seed_posts>
+["post 1", "post 2", "post 3", "post 4", "post 5", "post 6", "post 7", "post 8"]
+</seed_posts>
+</output_format>"""
+
+        # ── 3. Execute with retry-with-error-correction (structured-outputs.md) ──────
+        last_error = ""
+        for attempt in range(2):
+            try:
+                if attempt > 0 and last_error:
+                    correction_prompt = (
+                        f"Your previous response failed to parse.\n"
+                        f"Error: {last_error}\n\n"
+                        f"Return ONLY the <seed_posts>[...]</seed_posts> XML block. "
+                        f"8 strings in the JSON array. No other text.\n\n"
+                        f"Task context:\n{prompt}"
+                    )
+                    response_text = await llm.async_generate(correction_prompt)
+                else:
+                    response_text = await llm.async_generate(prompt)
+
+                # XML-tag extraction (immune to markdown code fences and prose)
+                xml_match = re.search(r'<seed_posts>(.*?)</seed_posts>', response_text, re.DOTALL)
+                raw_json  = xml_match.group(1).strip() if xml_match else response_text.strip()
+
+                # Fallback: bare JSON array
+                if not xml_match:
+                    arr_match = re.search(r'\[.*?\]', raw_json, re.DOTALL)
+                    raw_json  = arr_match.group() if arr_match else raw_json
+
+                posts = _json.loads(raw_json)
+
+                if isinstance(posts, list) and len(posts) >= 4:
+                    valid = [str(p).strip() for p in posts if len(str(p).strip()) >= 40]
+                    if len(valid) >= 4:
+                        logger.info(f"✅ AI Seed Posts (v4 full-coverage): {len(valid)} posts injecting complete proposal+context brief")
+                        return valid
+
+                last_error = f"Got {len(posts)} posts but need at least 4 valid (>=40 chars). Check JSON formatting."
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"⚠️ Seed post attempt {attempt + 1} failed: {e}")
+
+        logger.warning("⚠️ AI seed generation failed after 2 attempts — using template fallback")
+        return []
+
+
+
+
+
+
     def _extract_controversy_seeds(feat, ctx, market_ctx):
-        """Source-to-Synth: Extract real controversy data for seed posts."""
+        """Source-to-Synth: Extract real controversy data for seed posts (FALLBACK)."""
         seeds = []
         raw_quotes = []
-        
+
+
         # Extract raw quotes from market_context (customer interviews/tickets)
         if market_ctx:
             for key in ['raw_interviews', 'customer_interviews', 'support_tickets',
@@ -677,48 +918,81 @@ async def RunOASISSimulation(
         "seeds": [{"index": i, "content": s[:500]} for i, s in enumerate(controversy_seeds)],
     })
 
+    # ── 8.2 Seed Post Dispatch: AI-First, Template-Fallback ────────────────────
+    # Try to generate highly contextual seed posts using the LLM.
+    # The LLM reads the actual feature spec, community feedback, and company
+    # context to write posts that sound like REAL users, not generic SaaS templates.
+    # If LLM call fails for any reason, the proven template logic kicks in silently.
+
     if mode == "behavioral" or feature is None:
         product_desc = context.company_name if context else "the product"
         product_stack = ", ".join(context.tech_stack) if (context and context.tech_stack) else "the platform"
         competitors = ", ".join(context.competitors) if (context and context.competitors) else "alternatives"
-        
-        seed_posts = [
-            # Seed 1: Friction-first — forces agents to declare position on real pain points
-            # (prompt-optimization.md §Constraint Tightening: specific, not vague opener)
-            f"[Honest review after 6 months with {product_desc}]: "
-            f"The {product_stack} integration is genuinely useful day-to-day, "
-            f"but onboarding new team members is still painful every single time. "
-            f"What's everyone's actual experience? Specifically: "
-            f"what do you wish worked differently, and what would it take for you to recommend this internally?",
 
-            # Seed 2: Competitive threat — anchors the comparative analysis discussion
-            # and ensures GM signal 'competitive_threat' fires early in the simulation
-            f"Our team ran a bake-off: {product_desc} vs {competitors}. "
-            f"I'll be direct — there are specific workflows where {competitors.split(',')[0].strip()} "
-            f"is just faster. If you've done the same comparison, "
-            f"what kept you here — or what finally made you switch?",
+        # AI-First: Generate grounded seeds
+        ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
+        if ai_seeds:
+            seed_posts = ai_seeds
+            logger.info(f"🤖 Behavioral Mode: Using {len(seed_posts)} AI-generated seed posts")
+        else:
+            # Template Fallback
+            seed_posts = [
+                # Seed 1: Friction-first — forces agents to declare position on real pain points
+                f"[Honest review after 6 months with {product_desc}]: "
+                f"The {product_stack} integration is genuinely useful day-to-day, "
+                f"but onboarding new team members is still painful every single time. "
+                f"What's everyone's actual experience? Specifically: "
+                f"what do you wish worked differently, and what would it take for you to recommend this internally?",
 
-            # Seed 3: Exit / renewal signal — exposes WTP anchor and hard thresholds
-            # without directly asking (agents reveal them through their response framing)
-            f"Genuine question for power users: at what point does the cost of staying "
-            f"with {product_desc} outweigh the switching cost? "
-            f"Our contract renewal is coming up and I'm struggling to justify "
-            f"the line item to leadership without concrete productivity numbers. "
-            f"Has anyone actually measured the ROI?",
-        ]
+                # Seed 2: Competitive threat
+                f"Our team ran a bake-off: {product_desc} vs {competitors}. "
+                f"I'll be direct — there are specific workflows where {competitors.split(',')[0].strip()} "
+                f"is just faster. If you've done the same comparison, "
+                f"what kept you here — or what finally made you switch?",
+
+                # Seed 3: Exit / renewal signal
+                f"Genuine question for power users: at what point does the cost of staying "
+                f"with {product_desc} outweigh the switching cost? "
+                f"Our contract renewal is coming up and I'm struggling to justify "
+                f"the line item to leadership without concrete productivity numbers. "
+                f"Has anyone actually measured the ROI?",
+            ]
+            logger.info(f"🔬 Behavioral Mode: Using {len(seed_posts)} template seed posts (AI unavailable)")
+
         for post in seed_posts:
             await platform_obj.create_post(agent_id=int(proposer_id), content=post)
-        logger.info(f"🔬 Behavioral Mode: Agents grounded as users of {product_desc}")
     else:
-        # FEATURE TEST MODE: Source-to-Synth seed generation
-        logger.info(f"🔬 Generating source-to-synth seed posts for: {feature.title}")
-        controversy_seeds = _extract_controversy_seeds(feature, context, market_context)
+        # FEATURE TEST MODE
+        logger.info(f"🔬 Generating seed posts for feature: {feature.title}")
+
+        # AI-First: Generate contextual seeds from feature + community feedback
+        ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
+        if ai_seeds:
+            controversy_seeds = ai_seeds
+            logger.info(f"🤖 Feature Mode: Using {len(controversy_seeds)} AI-generated seed posts")
+        else:
+            # Template Fallback: Source-to-Synth extraction
+            controversy_seeds = _extract_controversy_seeds(feature, context, market_context)
+            logger.info(f"🔬 Feature Mode: Using {len(controversy_seeds)} template seed posts (AI unavailable)")
+
         for i, seed in enumerate(controversy_seeds):
             # Distribute seeds across first few agents for network diversity
             poster_id = int(agent_profiles[min(i, len(agent_profiles) - 1)].agent_id)
             await platform_obj.create_post(agent_id=poster_id, content=seed)
             logger.info(f"  📝 Seed post {i+1}/{len(controversy_seeds)} by agent {poster_id}")
+
+    # G12: Emit all seed posts so the UI can show the debate context from T=0
+    local_logger.log_simulation_event("seed_posts", {
+        "simulation_id": config.simulation_name,
+        "seeds": [{
+            "index": i,
+            "content": s[:500],
+            "source": "ai_generated" if ai_seeds else "template_fallback"
+        } for i, s in enumerate(ai_seeds if ai_seeds else controversy_seeds)],
+    })
+
     await platform_obj.update_rec_table()
+
 
     # ── 9. Result Container ──────────────────────────────────────────────────
     feature_id = getattr(feature, "proposal_id", "behavioral") if feature else "behavioral"
@@ -1114,6 +1388,8 @@ async def RunOASISSimulation(
         "llm_active_cohort": effective_sample,
         "shadow_agents": len(sampler.shadow_agents),
         "interview_phase_enabled": getattr(config, 'enable_interview_phase', False),
+        "feature_title": getattr(feature, 'title', 'Behavioral Simulation') if feature else 'Behavioral Simulation',
+        "feature_description": getattr(feature, 'description', '') if feature else '',
     })
     
     # =====================================================================
@@ -1278,7 +1554,8 @@ async def RunOASISSimulation(
                                 role_name="ENVIRONMENT",
                                 content=(
                                     # BUCKET 1 (top): Current observations — data, not directives
-                                    f"<platform_state>\n{platform_obs}\n</platform_state>\n\n"
+                                    # USER REQUEST: Removed injection of actions/platform_state
+                                    # f"<platform_state>\n{platform_obs}\n</platform_state>\n\n"
                                     # BUCKET 2 (middle): Narrative memory from prior turns
                                     f"<memory>\n{hindsight_context}\n</memory>\n\n"
                                     # BUCKET 3 (middle): Agent's own emotional state summary
@@ -1286,7 +1563,7 @@ async def RunOASISSimulation(
                                     # BUCKET 4 (bottom — highest recency attention): Behavioral rules
                                     f"<rules>\n{persona_grounding}\n</rules>\n\n"
                                     # Closing action cue — very last token, maximum LLM focus
-                                    "Review the platform state above and select ONE action to take now."
+                                    "Review your state above and select ONE action to take now."
                                 )
                             )
 
@@ -1393,17 +1670,59 @@ async def RunOASISSimulation(
                             if mention:
                                 action_target_id = mention.group(1)
 
-                        # Accumulate comment information for post-gather Batched Parallel GM Resolution
-                        timestep_comments.append({
-                            "agent_id": agent_id,
-                            "agent_name": agent_name,
-                            "content": content,
-                            "action_type": action_type,
-                            "profile": profile,
-                            "action_target_id": action_target_id,
-                            "action_resp": action_resp,
-                            "idx": idx,
-                        })
+                        # ── Execute GM Resolution & Action Logging instantly (Real-time Simulation visualization) ──
+                        sig = await _gm_resolve(
+                            content, timestep=t, agent_id=agent_id
+                        )
+
+                        if agent_id in decision_journals and sig.get("type") != "neutral":
+                            # Weight signal intensity by agent influence strength
+                            _inf = getattr(profile, "influence_strength", 0.5)
+                            weighted_signal = {
+                                **sig,
+                                "intensity": round(sig["intensity"] * _inf, 3),
+                                "raw_intensity": sig["intensity"],
+                            }
+                            if "satisfaction_delta" in sig:
+                                weighted_signal["satisfaction_delta"] = round(sig["satisfaction_delta"] * _inf, 3)
+                                weighted_signal["frustration_delta"] = round(sig["frustration_delta"] * _inf, 3)
+                                weighted_signal["trust_delta"] = round(sig["trust_delta"] * _inf, 3)
+
+                            decision_journals[agent_id].update_from_signal(weighted_signal)
+                            logger.info(f"    🎲 GM State Shift: {agent_name} → {sig['type']} "
+                                        f"(raw={sig['intensity']:+.2f}, "
+                                        f"weighted={weighted_signal['intensity']:+.3f}, "
+                                        f"inf={_inf:.2f})")
+
+                        local_logger.log_action(
+                            agent_id=agent_id,
+                            agent_name=agent_name,
+                            action_type=action_type,
+                            content=content,
+                            timestep=t,
+                            metadata={
+                                "target_id": str(action_target_id) if action_target_id else None,
+                                "confidence": abs(sig.get("intensity", 0.5)),
+                                "signal_type": sig.get("type", "neutral"),
+                                "all_signals": sig.get("all_signals", []),
+                                "signal_factors": sig.get("factors", []),
+                                "signal_quote": sig.get("quote", ""),
+                                "raw_intensity": sig.get("intensity", 0.0),
+                            }
+                        )
+
+                        if HINDSIGHT_AVAILABLE and memory_manager:
+                            await memory_manager.structured_retain(
+                                str(agent_id), agent_name, action_type, content, t
+                            )
+                            logger.info(f"    💾 Hindsight retained action for {agent_name}")
+
+                        if agent_id not in series.agent_interactions:
+                            series.agent_interactions[agent_id] = []
+                        series.agent_interactions[agent_id].append(f"ROUND {t+1} | {action_type}: {content}")
+
+                        logger.info(f"  ✓ [{idx+1}/{len(social_agents)}] {agent_name} → {action_type}")
+                        logger.info(f"    💬 \"{content[:150]}...\"")
                         break
 
                     except Exception as e:
@@ -1425,75 +1744,11 @@ async def RunOASISSimulation(
                         else:
                             logger.error(f"Agent {agent_name} failed after {max_retries} attempts: {e}")
 
-            # Execute all agents concurrently using the defined semaphore
-            tasks = [process_agent(idx, agent) for idx, agent in enumerate(social_agents)]
-            await asyncio.gather(*tasks)
+            # Execute agents sequentially (leaky bucket style) to prevent thundering herd API rate-limit errors
+            for idx, agent in enumerate(social_agents):
+                await process_agent(idx, agent)
 
-            # ── Batched Parallel GM Resolution & Safe Sequential Updates ──
-            if timestep_comments:
-                gm_tasks = []
-                for item in timestep_comments:
-                    gm_tasks.append(_gm_resolve(item["content"], timestep=t, agent_id=item["agent_id"]))
-                
-                gm_signals = await asyncio.gather(*gm_tasks)
-                
-                for item, gm_signal in zip(timestep_comments, gm_signals):
-                    agent_id = item["agent_id"]
-                    agent_name = item["agent_name"]
-                    content = item["content"]
-                    action_type = item["action_type"]
-                    profile = item["profile"]
-                    action_target_id = item["action_target_id"]
-                    idx = item["idx"]
-                    
-                    if agent_id in decision_journals and gm_signal["type"] != "neutral":
-                        # Weight signal intensity by agent influence strength
-                        _inf = getattr(profile, "influence_strength", 0.5)
-                        weighted_signal = {
-                            **gm_signal,
-                            "intensity": round(gm_signal["intensity"] * _inf, 3),
-                            "raw_intensity": gm_signal["intensity"],
-                        }
-                        if "satisfaction_delta" in gm_signal:
-                            weighted_signal["satisfaction_delta"] = round(gm_signal["satisfaction_delta"] * _inf, 3)
-                            weighted_signal["frustration_delta"] = round(gm_signal["frustration_delta"] * _inf, 3)
-                            weighted_signal["trust_delta"] = round(gm_signal["trust_delta"] * _inf, 3)
-
-                        decision_journals[agent_id].update_from_signal(weighted_signal)
-                        logger.info(f"    🎲 GM State Shift: {agent_name} → {gm_signal['type']} "
-                                    f"(raw={gm_signal['intensity']:+.2f}, "
-                                    f"weighted={weighted_signal['intensity']:+.3f}, "
-                                    f"inf={_inf:.2f})")
-
-                    local_logger.log_action(
-                        agent_id=agent_id,
-                        agent_name=agent_name,
-                        action_type=action_type,
-                        content=content,
-                        timestep=t,
-                        metadata={
-                            "target_id": str(action_target_id) if action_target_id else None,
-                            "confidence": abs(gm_signal.get("intensity", 0.5)),
-                            "signal_type": gm_signal.get("type", "neutral"),
-                            "all_signals": gm_signal.get("all_signals", []),
-                            "signal_factors": gm_signal.get("factors", []),
-                            "signal_quote": gm_signal.get("quote", ""),
-                            "raw_intensity": gm_signal.get("intensity", 0.0),
-                        }
-                    )
-                    
-                    if HINDSIGHT_AVAILABLE and memory_manager:
-                        await memory_manager.structured_retain(
-                            str(agent_id), agent_name, action_type, content, t
-                        )
-                        logger.info(f"    💾 Hindsight retained action for {agent_name}")
-
-                    if agent_id not in series.agent_interactions:
-                        series.agent_interactions[agent_id] = []
-                    series.agent_interactions[agent_id].append(f"ROUND {t+1} | {action_type}: {content}")
-
-                    logger.info(f"  ✓ [{idx+1}/{len(social_agents)}] {agent_name} → {action_type}")
-                    logger.info(f"    💬 \"{content[:150]}...\"")
+            # ── Real-time GM Resolution & Action Logging has been completed inside process_agent ──
 
             # ── GM → Platform Feedback (post-step, deadlock-free) ──────────────
             # Direct platform_obj method calls — identical pattern to seed posts
@@ -1632,10 +1887,15 @@ async def RunOASISSimulation(
                 # Aggregate Focus Group Insights
                 # Fix #3: extraction.py outputs willingness_to_pay_usd_monthly,
                 # not willingness_to_pay_usd — key mismatch caused avg_wtp = $0 always
-                valid_wtp = [m["willingness_to_pay_usd_monthly"] for m in all_metrics if m.get("willingness_to_pay_usd_monthly") is not None]
+                def _safe_float(v, default=0.0):
+                    if v is None: return default
+                    try: return float(v)
+                    except (ValueError, TypeError): return default
+                    
+                valid_wtp = [_safe_float(m["willingness_to_pay_usd_monthly"]) for m in all_metrics if m.get("willingness_to_pay_usd_monthly") is not None]
                 avg_wtp = sum(valid_wtp) / len(valid_wtp) if valid_wtp else 0.0
-                avg_intent = sum(m.get("adoption_intent", 0.0) for m in all_metrics) / len(all_metrics)
-                avg_churn_delta = sum(m.get("churn_risk_delta", 0.0) for m in all_metrics) / len(all_metrics)
+                avg_intent = sum(_safe_float(m.get("adoption_intent", 0.0)) for m in all_metrics) / len(all_metrics)
+                avg_churn_delta = sum(_safe_float(m.get("churn_risk_delta", 0.0)) for m in all_metrics) / len(all_metrics)
                 objections = [m["primary_objection"] for m in all_metrics if m.get("primary_objection")]
                 
                 series.focus_group_insights = {

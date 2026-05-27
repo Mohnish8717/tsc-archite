@@ -17,6 +17,7 @@ class LLMProvider(str, Enum):
     OPENROUTER = "openrouter"
     GOOGLE = "google"
     OLLAMA = "ollama"
+    NVIDIA = "nvidia"
 
 
 class PipelineConfig(BaseSettings):
@@ -36,6 +37,7 @@ class PipelineConfig(BaseSettings):
     groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
     openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
     google_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
+    nvidia_api_key: Optional[str] = Field(default=None, alias="NVIDIA_API_KEY")
     zep_api_key: Optional[str] = Field(default=None, alias="ZEP_API_KEY")
 
     # ── Memory & NLP ────────────────────────────────────────────────
@@ -126,6 +128,7 @@ class PipelineConfig(BaseSettings):
             LLMProvider.OPENROUTER: self.openrouter_api_key,
             LLMProvider.GOOGLE: self.google_api_key,
             LLMProvider.OLLAMA: "ollama",
+            LLMProvider.NVIDIA: self.nvidia_api_key,
         }
         key = key_map.get(p)
         if not key:
@@ -137,6 +140,7 @@ class PipelineConfig(BaseSettings):
                 LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
                 LLMProvider.GOOGLE: "GEMINI_API_KEY",
                 LLMProvider.OLLAMA: "OLLAMA_API_KEY",
+                LLMProvider.NVIDIA: "NVIDIA_API_KEY",
             }
             key = os.getenv(env_map.get(p, ""))
 

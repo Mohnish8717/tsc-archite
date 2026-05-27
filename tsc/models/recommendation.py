@@ -51,6 +51,10 @@ class MonitoringFramework(BaseModel):
     gates_and_checkpoints: dict[str, str] = Field(default_factory=dict)
     escalation_triggers: dict[str, str] = Field(default_factory=dict)
     success_definition: dict[str, str] = Field(default_factory=dict)
+    prometheus_alerts_yaml: Optional[str] = None
+    prometheus_scrape_yaml: Optional[str] = None
+    grafana_dashboard_json: Optional[str] = None
+
 
 
 class NextStep(BaseModel):

@@ -268,6 +268,7 @@ function stopActiveTail() {
 function startTailing(run) {
   stopActiveTail();
   if (!run) return;
+  _tailedRunNames.add(run.name);
 
   // ── Bug fix #1: actions.jsonl may not exist yet when the run dir is first detected.
   // Mirror the same directory-watch deferral pattern used by startTailingPipeline.
@@ -301,9 +302,15 @@ function startTailing(run) {
         encoding: 'utf-8',
       });
 
+      let buffer = '';
       stream.on('data', chunk => {
-        chunk.split('\n').filter(l => l.trim()).forEach(line => {
-          try { broadcast(JSON.parse(line)); } catch {}
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep the incomplete line (or empty string if it ended with \n)
+        lines.forEach(line => {
+          if (line.trim()) {
+            try { broadcast(JSON.parse(line)); } catch(e) { console.error('[WS] Parse error in actions:', e.message) }
+          }
         });
       });
 
@@ -311,7 +318,12 @@ function startTailing(run) {
       // The original code advanced it synchronously, so a second fs.watch event
       // firing within the same tick saw size <= lastSize and silently skipped lines.
       // This was dropping the majority of agent action events during busy timesteps.
-      stream.on('end', () => { lastSize = readEnd; });
+      stream.on('end', () => { 
+        if (buffer.trim()) {
+          try { broadcast(JSON.parse(buffer)); } catch(e) {}
+        }
+        lastSize = readEnd; 
+      });
     } catch {}
   });
 
@@ -366,11 +378,12 @@ function startTailing(run) {
 // for run directories that appeared since the last check and start tailing them.
 // Track which runs have been TAILED (not just seen) — a run dir can exist before its JSONL files
 let _lastKnownRunNames = new Set(getAllRunDirs().map(r => r.name));
-let _tailedRunNames = new Set(activeRun ? [activeRun.name] : []);
+let _tailedRunNames = new Set();
 
 setInterval(() => {
   const currentRuns = getAllRunDirs(); // only returns dirs with actions.jsonl OR pipeline.jsonl
-  for (const run of currentRuns) {
+  if (currentRuns.length > 0) {
+    const run = currentRuns[0];
     const isNew = !_lastKnownRunNames.has(run.name);
     const isUntailed = !_tailedRunNames.has(run.name); // known dir but JSONL just appeared
 
@@ -434,16 +447,30 @@ function startTailingPipeline(run) {
         encoding: 'utf-8',
       });
 
+      let buffer = '';
       stream.on('data', chunk => {
-        chunk.split('\n').filter(l => l.trim()).forEach(line => {
-          try {
-            const event = JSON.parse(line);
-            broadcast(event);
-            console.log(`[WS] 🔄 Pipeline event: ${event.type}`);
-          } catch {}
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        lines.forEach(line => {
+          if (line.trim()) {
+            try {
+              const event = JSON.parse(line);
+              broadcast(event);
+              console.log(`[WS] 🔄 Pipeline event: ${event.type}`);
+            } catch(e) { console.error('[WS] Parse error in pipeline:', e.message) }
+          }
         });
       });
-      lastSize = stats.size;
+      stream.on('end', () => {
+        if (buffer.trim()) {
+          try {
+            const event = JSON.parse(buffer);
+            broadcast(event);
+          } catch(e) {}
+        }
+        lastSize = stats.size;
+      });
     } catch {}
   });
 
@@ -460,13 +487,15 @@ function watchForNewSimulations() {
     try { fs.mkdirSync(searchPath, { recursive: true }); } catch {}
     if (!fs.existsSync(searchPath)) continue;
 
-    const watcher = fs.watch(searchPath, (eventType, filename) => {
-      if (!filename || knownDirs.has(filename)) return;
+    try {
+      console.log(`[WS] 👁 Monitoring: ${searchPath}`);
+      const watcher = fs.watch(searchPath, (eventType, filename) => {
+        if (!filename || knownDirs.has(filename)) return;
 
-      setTimeout(() => {
-        const allRuns = getAllRunDirs();
-        const newRun = allRuns.find(r => r.name === filename);
-        if (!newRun || knownDirs.has(newRun.name)) return;
+        setTimeout(() => {
+          const allRuns = getAllRunDirs();
+          const newRun = allRuns.find(r => r.name === filename);
+          if (!newRun || knownDirs.has(newRun.name)) return;
         knownDirs.add(newRun.name);
 
         console.log(`\n[WS] 🆕 NEW SIMULATION: ${newRun.name} at ${newRun.fullPath}`);
@@ -480,8 +509,9 @@ function watchForNewSimulations() {
       }, 500); // Short grace period — pipeline.jsonl is created nearly immediately
     });
 
-    watchers.push(watcher);
-    console.log(`[WS] 👁 Monitoring: ${searchPath}`);
+    } catch (err) {
+      console.warn(`[WS] ⚠️ Could not watch search path ${searchPath}: ${err.message}`);
+    }
   }
 
   return watchers;

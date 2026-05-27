@@ -4,7 +4,11 @@ import { cleanPersonaName } from '../utils/nameHelper';
 
 // Port 8080 = the active OASIS file-watch bridge (websocket.js)
 // Port 8000 = FastAPI orchestrator (not consumed by this hook — see audit)
-export function useWebSocket(url: string = 'ws://localhost:8080') {
+const defaultUrl = typeof window !== 'undefined'
+  ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080`
+  : 'ws://localhost:8080';
+
+export function useWebSocket(url: string = defaultUrl) {
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -329,6 +333,17 @@ export function useWebSocket(url: string = 'ws://localhost:8080') {
                 posts: data.posts ?? [],
                 comments: data.comments ?? [],
               });
+              if (data.posts && data.posts.length > 0) {
+                const mappedSeeds = data.posts.map((p: any, i: number) => ({
+                  index: p.post_id || i + 1,
+                  content: p.content || '',
+                }));
+                // Only overwrite if we haven't already received seed_posts explicitly
+                const currentSeeds = usePipelineStore.getState().seedPosts;
+                if (!currentSeeds || currentSeeds.length === 0) {
+                  setSeedPosts(mappedSeeds);
+                }
+              }
               break;
 
             // Layer 6: Boardroom

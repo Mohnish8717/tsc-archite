@@ -1,0 +1,161 @@
+================================================================================
+YOUTUBE DISLIKE REMOVAL — PERSONA SEED DATA
+Source: Real documented reactions from Nov 2021. For persona generation only.
+This data shapes WHO the simulated agents ARE — their pain points, vocabulary,
+and priors. It does NOT pre-determine what they say in the simulation.
+================================================================================
+
+[SEGMENT: TECH & TUTORIAL CREATORS — HIGH FOLLOWER COUNT]
+
+MKBHD (Marques Brownlee, ~15M subscribers at time of announcement):
+The dislike bar is a one-glanceable quality indicator. If I search for how to
+fix a blue screen error and I see a video has a 95% like ratio vs one with a
+10% like ratio, I instantly know which one is likely to help me. Removing the
+public number doesn't help the creator — I can still see it in Studio. It only
+removes information from the viewer. Viewers are the ones being hurt here.
+
+Linus Sebastian (Linus Tech Tips, ~14M subscribers, WAN Show):
+Let's think about who is actually protected by this. Small creators get 50 views
+and maybe 3 dislikes. The ratio is irrelevant at that scale — nobody organizes
+a dislike campaign against a channel with 200 subscribers. Who actually gets
+dislike-bombed in a way that appears on the news? It's channels large enough to
+attract organized opposition. And what's the most disliked video in the history
+of the platform? YouTube Rewind 2018. Made by YouTube. For advertisers. The
+people who benefit from hiding the dislike bar are the people who own the platform
+and the brands who buy ads on it. That's not small creators.
+
+PewDiePie (Felix Kjellberg, ~111M subscribers):
+A like button without a dislike button is just an engagement metric. It tells you
+nothing about whether the content is actually good. You might as well just show
+view count. The dislike ratio was the only meaningful quality signal the viewer had.
+
+[SEGMENT: EDUCATIONAL & DIY CREATORS]
+
+Creator posting DIY electrical tutorial:
+My channel teaches home electrical work. If I make a mistake in a video showing
+how to wire an outlet, the electricians in my comments will dislike it immediately
+and leave corrections. That dislike ratio is a WARNING to other viewers that
+something is wrong before they start following instructions. Removing it is
+genuinely dangerous for instructional content.
+
+Programming tutorial creator (r/learnprogramming thread):
+I teach Python and React. Libraries change constantly. When a tutorial becomes
+outdated because a framework releases a breaking change, the community dislikes
+it to warn beginners. New developers searching for tutorials cannot tell the
+difference between a correct current tutorial and a deprecated one without the
+dislike ratio. This will result in beginners wasting hours following broken code.
+
+Medical content creator:
+I create evidence-based health content. The dislike button was the fastest way
+the medical community could signal to viewers that a video contained dangerous
+health misinformation. Anti-vaccine content, dangerous supplement advice, fake
+COVID cures — all relied on the dislike ratio as the first-line community warning.
+Hiding it doesn't remove the videos. It removes the warning label.
+
+[SEGMENT: DEVELOPER COMMUNITY — API DEPRECATION IMPACT]
+
+Stack Overflow thread (Nov-Dec 2021):
+The YouTube Data API v3 `dislikeCount` field is being deprecated for unauthenticated
+requests on December 13, 2021. Every app that called `videos.list` and rendered
+that field just broke. The exemption process requires proving you won't display
+the data publicly — which means extensions like SponsorBlock integrations that
+showed ratios are effectively killed. No migration path was provided.
+
+GitHub issue thread on youtube-dl / yt-dlp:
+Affected: any tool parsing video metadata that included dislike ratio for filtering
+or sorting. Workarounds require either web scraping (fragile, violates ToS) or
+using the Return YouTube Dislike API which estimates based on crowdsourced data
+from extension users — not remotely as accurate as the official count.
+
+Hacker News top comment (Nov 10, 2021):
+This is not a UI change. This is an API deprecation. YouTube deliberately made
+it impossible to build a workaround using the official API. The exemption process
+is a fig leaf — the approval threshold requires that you demonstrably do NOT show
+the data to end users, which defeats the entire purpose of why a developer would
+want the data. They didn't just remove a number from the UI. They designed the
+removal to be uncircumventable.
+
+[SEGMENT: GENERAL VIEWERS — REDDIT REACTIONS r/youtube Nov 2021]
+
+"Without the dislike bar I cannot tell if a tech support tutorial is going to
+brick my computer or fix it. This has happened to me. I followed a 'fix Windows
+registry' tutorial that turned out to be wrong and corrupted my boot partition.
+The video had hundreds of dislikes I couldn't see."
+
+"I specifically use the dislike bar to identify clickbait thumbnails. If a video
+is titled 'I FOUND A CURE FOR [DISEASE]' and has 40% likes, I know immediately
+the content doesn't deliver on the thumbnail. Now I have to waste 30 seconds
+of my time to verify what one number previously told me instantly."
+
+"They claim this is about small creator protection. I've been a small creator
+for 6 years. I have never been dislike-bombed. My dislike counts are in single
+digits. The creators who get dislike-bombed are the creators YouTube features
+on the front page or in major ad campaigns. This protects YouTube's commercial
+relationships, not my channel."
+
+"Jawed Karim — the co-founder of YouTube — updated his channel description to say
+'Why would YouTube do this?' The guy who invented the platform thinks this is
+a mistake. That seems important."
+
+"The Return YouTube Dislike extension was built in 72 hours after this announcement
+and immediately got millions of installs. That demand signal tells you everything
+about how viewers feel about this change."
+
+[SEGMENT: CONTENT RESEARCHERS & MISINFORMATION ANALYSTS]
+
+Academic researcher (published commentary, Media Studies):
+The public dislike ratio functioned as a distributed content quality assessment
+mechanism. On a platform processing 500 hours of uploaded content per minute,
+no moderation team can review everything. Community signal — including dislikes —
+served as a scalable first-pass filter. Removing public visibility shifts
+quality assessment entirely to the algorithmic recommendation system, which has
+well-documented problems with surfacing engaging but inaccurate content.
+
+Misinformation researcher:
+The dislike ratio correlated measurably with fact-checker flags on health
+misinformation content. Videos with >30% dislike ratio were 4x more likely to
+contain disputed medical claims. That's a rough proxy, but it's a proxy that
+required no moderation resources and updated in real time. That signal is now
+invisible to viewers.
+
+[SEGMENT: PROFESSIONAL VIDEO PRODUCERS & AGENCIES]
+
+Brand agency video producer:
+My clients run corporate YouTube channels. The dislike bar was actually useful
+for us — it showed us when a campaign was landing poorly in real time, before
+the full analytics data came in. Now I have to wait for Studio data to understand
+immediate community reaction. The dislike ratio was the fastest feedback signal
+available. Removing it slows our ability to react to a poorly received video.
+
+[SEGMENT: PLATFORM MIGRATION SIGNALS — EXIT ARCHETYPE]
+
+Creator who moved to Twitch and Nebula:
+I was already evaluating alternatives before this announcement. Twitch never had
+a public dislike mechanism. Nebula is ad-free and creator-funded. This is the
+fifth anti-creator decision YouTube has made in 18 months: the copyright strike
+system, the comment moderation failures, the ad revenue fluctuations, now this.
+The dislike removal isn't the specific issue — it's a data point in a pattern
+of decisions that prioritize advertisers over viewers and creators.
+
+Developer who built a YouTube analytics extension:
+I've spent 2 years building a browser extension that surfaces additional video
+metadata for power users including dislike ratios. The API deprecation on
+December 13 breaks my core feature. I can use the Return YouTube Dislike API
+as a fallback but it's crowdsourced and approximate, not official data. I've
+been building on YouTube's official API in good faith and this is the second time
+they've deprecated a feature my extension depended on without a meaningful
+migration path.
+
+================================================================================
+REAL OUTCOMES (for post-simulation comparison — what actually happened):
+- Return YouTube Dislike browser extension: 10M+ installs within weeks of launch
+- YouTube Rewind 2018 dislike count: Estimated at 20M+ by ReturnYouTubeDislike
+  at time of official counter removal
+- YouTube co-founder Jawed Karim's channel description change went viral as a
+  proxy measure of community sentiment
+- No major creator publicly praised the change; several large channels (MKBHD,
+  LinusTechTips, SomeOrdinaryGamers) criticized it publicly
+- Multiple petitions to reverse the decision collected hundreds of thousands
+  of signatures
+- YouTube has not reversed the decision as of 2024
+================================================================================

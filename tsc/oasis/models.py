@@ -95,6 +95,7 @@ class UserInfoAdapter:
             "age": getattr(persona, 'age', 30),
             "mbti": pp.mbti,
             "mbti_description": pp.mbti_description,
+            "ocean_scores": pp.ocean_scores,
             "country": getattr(persona, 'country', 'US'),
             # Structured psychological fields
             "emotional_triggers": emotional_triggers_dict,
@@ -503,8 +504,14 @@ class DecisionJournal:
     def to_dict(self) -> dict:
         """Serialize for JSON output."""
         return {
-            "agent_id": self.agent_id, "agent_name": self.agent_name,
+            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
             "segment_source": self.segment_source,
+            "satisfaction": round(self.satisfaction, 3),
+            "frustration": round(self.frustration, 3),
+            "trust": round(self.trust, 3),
+            "urgency": round(self.urgency, 3),
+            "advocacy": round(self.advocacy, 3),
             "state": {"satisfaction": round(self.satisfaction, 3),
                       "frustration": round(self.frustration, 3),
                       "trust": round(self.trust, 3),

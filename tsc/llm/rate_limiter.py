@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +230,10 @@ def patch_openai_globally() -> None:
                 
                 logger.debug(f"⏳ Globally acquiring capacity for async Gemini call ({model}, estimated {estimated} tokens)...")
                 await bucket.acquire(estimated)
+                
+                # Space out async Gemini calls through the leaky bucket singleton
+                leaky = get_leaky_bucket()
+                return await leaky.call(orig_async_create(self, *args, **kwargs))
             elif "groq" in base_url or "llama" in model.lower():
                 bucket = get_groq_bucket()
                 messages = kwargs.get("messages", [])
@@ -251,3 +255,133 @@ def patch_openai_globally() -> None:
 # Run the patch on import immediately
 patch_openai_globally()
 
+
+# ── Leaky Bucket Queue ───────────────────────────────────────────────────────
+# A disciplined FIFO queue that drains one LLM coroutine at a time,
+# spaced exactly (60 / RPM) seconds apart.  Unlike asyncio.gather, this
+# guarantees no burst even when many callers are waiting simultaneously.
+
+class LeakyBucketQueue:
+    """FIFO leaky-bucket queue for LLM coroutines.
+
+    Usage:
+        bucket = LeakyBucketQueue(rpm=10)
+        await bucket.start()
+        result = await bucket.call(my_llm_coro())
+        await bucket.stop()
+
+    The drain loop runs as a background task and processes one enqueued
+    coroutine per interval, regardless of how many callers are waiting.
+    """
+
+    def __init__(self, rpm: int = 10) -> None:
+        self.rpm = max(1, rpm)
+        self.interval = 60.0 / self.rpm          # seconds between calls
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._drain_task: Optional[asyncio.Task] = None
+        self._running = False
+        logger.info(
+            "LeakyBucketQueue created: %d RPM → %.2fs between calls", rpm, self.interval
+        )
+
+    async def start(self) -> None:
+        """Start the background drain loop."""
+        if self._running:
+            return
+        self._running = True
+        self._drain_task = asyncio.ensure_future(self._drain_loop())
+        logger.info("LeakyBucketQueue drain loop started")
+
+    async def stop(self) -> None:
+        """Gracefully stop the drain loop."""
+        self._running = False
+        if self._drain_task and not self._drain_task.done():
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("LeakyBucketQueue drain loop stopped")
+
+    async def _drain_loop(self) -> None:
+        """Single consumer — pops one coroutine per interval and dispatches it.
+
+        Each coroutine is given a hard 300-second timeout. We dispatch the
+        coroutine concurrently as a background task, and then sleep for exactly
+        the interval to ensure we never burst API limits while still allowing
+        concurrent LLM executions.
+        """
+        while self._running:
+            try:
+                coro, fut = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            if fut.cancelled():
+                self._queue.task_done()
+                continue
+
+            async def _execute(c, f):
+                try:
+                    result = await asyncio.wait_for(c, timeout=300.0)
+                    if not f.done():
+                        f.set_result(result)
+                except asyncio.TimeoutError as exc:
+                    logger.warning("LeakyBucketQueue: coroutine timed out after 300s")
+                    if not f.done():
+                        f.set_exception(exc)
+                except Exception as exc:  # noqa: BLE001
+                    if not f.done():
+                        f.set_exception(exc)
+                finally:
+                    self._queue.task_done()
+
+            # Dispatch the API call concurrently so the queue can keep draining
+            asyncio.create_task(_execute(coro, fut))
+
+            # Enforce exact minimum spacing between request dispatches
+            await asyncio.sleep(self.interval)
+
+    async def call(self, coro) -> Any:
+        """Enqueue a coroutine and await its result through the leaky bucket.
+
+        Args:
+            coro: An awaitable (coroutine) to run through the rate limiter.
+
+        Returns:
+            Whatever the coroutine returns.
+        """
+        if not self._running:
+            await self.start()
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        await self._queue.put((coro, fut))
+        return await fut
+
+
+# ── Module-level LeakyBucketQueue singleton ─────────────────────────────────
+
+_leaky_bucket: Optional["LeakyBucketQueue"] = None
+
+
+def get_leaky_bucket(rpm: int | None = None) -> "LeakyBucketQueue":
+    """Get or create the singleton LeakyBucketQueue.
+
+    Reads RPM from environment:
+      GEMINI_FREE_RPM (default: 10)
+    """
+    global _leaky_bucket
+    if _leaky_bucket is None:
+        effective_rpm = rpm or int(os.getenv("GEMINI_FREE_RPM", "10"))
+        _leaky_bucket = LeakyBucketQueue(rpm=effective_rpm)
+        logger.info("LeakyBucketQueue singleton created: %d RPM", effective_rpm)
+    return _leaky_bucket
+
+
+def reset_leaky_bucket() -> None:
+    """Reset singleton (for testing)."""
+    global _leaky_bucket
+    _leaky_bucket = None

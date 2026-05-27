@@ -220,7 +220,7 @@ _SYCOPHANCY_PATTERNS = re.compile(
 )
 
 
-async def test_harness_gm_resolve(content: str, timestep: int, llm_client=None, decision_journals=None, local_logger=None, agent_id: str = "") -> dict:
+async def harness_gm_resolve(content: str, timestep: int, llm_client=None, decision_journals=None, local_logger=None, agent_id: str = "") -> dict:
     """Harness replicating the exact closure implementation of _gm_resolve."""
     if not content:
         return {"type": "neutral", "intensity": 0.0, "timestep": timestep, "factors": []}
@@ -351,7 +351,7 @@ async def test_gm_resolve_llm_success():
     
     mock_llm = MockLLMClient(response_dict=response_payload)
     
-    res = await test_harness_gm_resolve(
+    res = await harness_gm_resolve(
         content="I am absolutely thrilled to renew our annual contract! Let's sign it.",
         timestep=1,
         llm_client=mock_llm
@@ -372,7 +372,7 @@ async def test_gm_resolve_llm_failure_resilient_fallback():
     mock_llm = MockLLMClient(should_fail=True)
     
     # "cancel" triggers exit_intent regex signal (-0.8 intensity)
-    res = await test_harness_gm_resolve(
+    res = await harness_gm_resolve(
         content="I want to cancel my account immediately. It's slow.",
         timestep=2,
         llm_client=mock_llm
@@ -388,7 +388,7 @@ async def test_gm_resolve_llm_failure_resilient_fallback():
 async def test_gm_resolve_regex_only():
     """Verify regex-only routing when llm_client is None."""
     # "renew" triggers expansion_signal regex signal (+0.8 intensity)
-    res = await test_harness_gm_resolve(
+    res = await harness_gm_resolve(
         content="We want to commit to a multi year contract and renew next week.",
         timestep=3,
         llm_client=None
@@ -414,7 +414,7 @@ async def test_gm_resolve_regex_sycophancy_collapse():
     mock_logger = MagicMock()
     
     # Gary suddenly capitulates with "you are right"
-    res = await test_harness_gm_resolve(
+    res = await harness_gm_resolve(
         content="You are right, that makes total sense. I was wrong and I agree.",
         timestep=4,
         llm_client=None,

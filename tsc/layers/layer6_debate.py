@@ -27,9 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, Optional, Tuple
+
+from tsc.llm.rate_limiter import LeakyBucketQueue
 
 from tsc.llm.base import LLMClient
 from tsc.llm.prompts import (
@@ -65,19 +68,25 @@ class DebateEngine:
         self,
         llm_client: LLMClient,
         enable_caching: bool = True,
-        parallel_rounds: bool = True,
+        parallel_rounds: bool = False,   # Default sequential — leaky bucket safe
         cache_ttl_minutes: int = 60,
+        rpm_limit: Optional[int] = None,
     ):
         self._llm = llm_client
         self._enable_caching = enable_caching
-        self._parallel = parallel_rounds
+        self._parallel = parallel_rounds  # kept for future use; currently always False
         self._cache_ttl = cache_ttl_minutes * 60
         self._debate_cache: dict[str, Tuple[ConsensusResult, float]] = {}
 
+        # Leaky bucket: drains one LLM call every (60/rpm) seconds
+        effective_rpm = rpm_limit or int(os.getenv("GEMINI_FREE_RPM", "10"))
+        self._leaky_bucket = LeakyBucketQueue(rpm=effective_rpm)
+
         logger.info(
-            "DebateEngine initialized (caching=%s, parallel=%s)",
+            "DebateEngine initialized (caching=%s, parallel=%s, rpm=%d)",
             enable_caching,
             parallel_rounds,
+            effective_rpm,
         )
 
     # ── Input Validation ─────────────────────────────────────────────
@@ -146,14 +155,20 @@ class DebateEngine:
         system_prompt: str,
         round_name: str,
     ) -> str:
-        """Get LLM statement with fallback"""
-        try:
-            statement = await self._llm.generate(
+        """Get LLM statement through leaky bucket — one call at a time, no bursts."""
+        async def _generate() -> str:
+            return await self._llm.generate(
                 system_prompt=system_prompt,
                 user_prompt=context_prompt,
                 temperature=0.6,
                 max_tokens=600,
             )
+
+        try:
+            logger.debug(
+                "LeakyBucket: enqueuing LLM call for %s (%s)", persona.name, round_name
+            )
+            statement = await self._leaky_bucket.call(_generate())
 
             # Validate response
             if not statement or len(statement.strip()) < 20:
@@ -962,56 +977,17 @@ class DebateEngine:
         top_entities: list[dict],
         market_fit_insights: Optional[Dict[str, Any]] = None,
     ) -> DebateRound:
-        """Execute Round 1 in parallel for all stakeholders"""
+        """Round 1 sequential via leaky bucket (parallel gather removed — caused 429 storms).
 
-        async def get_position(persona):
-            system = self._build_system_prompt(persona)
-            prompt = DEBATE_ROUND1_USER.render(
-                name=persona.name,
-                role=persona.role,
-                profile_summary=persona.psychological_profile.full_profile_text[:500],
-                feature=feature,
-                gate_results=[
-                    {
-                        "gate_name": g.gate_name,
-                        "verdict": g.verdict.value,
-                        "score": g.score,
-                    }
-                    for g in gates_summary.results
-                ],
-                market_fit_insights=market_fit_insights,
-                top_entities=top_entities,
-            )
-
-            statement = await self._get_stakeholder_statement(
-                persona, prompt, system, "Initial Positions"
-            )
-
-            verdict, confidence = self._extract_verdict(statement)
-
-            return DebatePosition(
-                stakeholder_name=persona.name,
-                role=persona.role,
-                statement=statement,
-                verdict=verdict,
-                confidence=confidence,
-                key_concerns=self._extract_concerns(statement),
-                conditions=self._extract_conditions(statement),
-            )
-
-        tasks = [get_position(persona) for persona in personas]
-        positions = await asyncio.gather(*tasks, return_exceptions=True)
-
-        valid_positions = [p for p in positions if not isinstance(p, Exception)]
-
-        if len(valid_positions) < len(positions):
-            failed = len(positions) - len(valid_positions)
-            logger.warning("Round 1: %d/%d positions failed", failed, len(positions))
-
-        return DebateRound(
-            round_number=1,
-            round_name="Initial Positions",
-            positions=valid_positions,
+        The old asyncio.gather fired all stakeholder LLM calls simultaneously.
+        Now we delegate to the sequential implementation which routes every call
+        through the LeakyBucketQueue.
+        """
+        logger.info(
+            "Round 1 parallel path → redirecting to sequential leaky bucket execution"
+        )
+        return await self._round1_initial_positions(
+            feature, personas, gates_summary, top_entities, market_fit_insights
         )
 
     async def _round2_negotiation(
@@ -1227,19 +1203,14 @@ class DebateEngine:
                 del self._debate_cache[cache_key]
 
         top_entities = self._get_top_entities(graph)
-        
-                })
 
-        if self._parallel:
-            logger.info("Running debate rounds in parallel mode")
-            round1 = await self._round1_initial_positions_parallel(
-                feature, personas, gates_summary, top_entities, market_fit_insights
-            )
-        else:
-            logger.info("Running debate rounds in sequential mode")
-            round1 = await self._round1_initial_positions(
-                feature, personas, gates_summary, top_entities, market_fit_insights
-            )
+
+        # Always sequential via leaky bucket — parallel gather caused 429 storms.
+        # The self._parallel flag is retained for API compatibility but ignored.
+        logger.info("Running debate rounds in sequential leaky bucket mode")
+        round1 = await self._round1_initial_positions(
+            feature, personas, gates_summary, top_entities, market_fit_insights
+        )
 
         logger.info("Round 1 complete: %d positions", len(round1.positions))
 

@@ -28,7 +28,7 @@ app = FastAPI(title="TSC v2.0", description="Feature Evaluation Pipeline")
 # G6: mount persona REST API
 app.include_router(persona_router)
 
-STATIC_DIR = Path(__file__).parent / "static"
+DIST_DIR = Path("/Users/mohnish/Downloads/tsc architecture/predictive_ui/dist")
 UPLOAD_DIR = Path("/tmp/tsc_uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -65,10 +65,41 @@ async def validation_problem_handler(request: Request, exc: RequestValidationErr
 
 @app.get("/")
 async def serve_index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(DIST_DIR / "index.html")
 
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+@app.get("/favicon.svg")
+async def serve_favicon():
+    return FileResponse(DIST_DIR / "favicon.svg")
+
+
+@app.get("/icons.svg")
+async def serve_icons():
+    return FileResponse(DIST_DIR / "icons.svg")
+
+
+@app.get("/boardroom_shot.png")
+async def serve_boardroom_shot():
+    return FileResponse(DIST_DIR / "boardroom_shot.png")
+
+
+@app.get("/oasis_shot.png")
+async def serve_oasis_shot():
+    return FileResponse(DIST_DIR / "oasis_shot.png")
+
+
+@app.get("/combined_dashboard.png")
+async def serve_combined_dashboard():
+    return FileResponse(DIST_DIR / "combined_dashboard.png")
+
+
+@app.get("/predictive_dashboard.png")
+async def serve_predictive_dashboard():
+    return FileResponse(DIST_DIR / "predictive_dashboard.png")
+
+
+app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+app.mount("/models", StaticFiles(directory=str(DIST_DIR / "models")), name="models")
 
 
 # ── REST Endpoints ───────────────────────────────────────────────────

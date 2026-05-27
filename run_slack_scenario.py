@@ -29,11 +29,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import dotenv
 dotenv.load_dotenv(PROJECT_ROOT / ".env")
-os.environ["TSC_LLM_PROVIDER"] = "google"
-os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it"
+# os.environ["TSC_LLM_PROVIDER"] = "google"
+# os.environ["TSC_LLM_MODEL"] = "gemini-2.5-flash"
+# os.environ["TSC_GM_LLM_PROVIDER"] = "ollama"
+# os.environ["TSC_GM_LLM_MODEL"] = "llama3.2"
 os.environ["HINDSIGHT_URL"] = "" # Disable Hindsight to avoid 402 API errors
-os.environ["GEMINI_FREE_RPM"] = "10" # Stay safely under Gemma's 15 RPM free tier limit
-os.environ["TSC_GEMINI_RPM_LIMIT"] = "10" # Keep global rate-limiter in perfect sync
+os.environ["GEMINI_FREE_RPM"] = "35"
+os.environ["TSC_GEMINI_RPM_LIMIT"] = "35"
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -41,7 +43,7 @@ logger = logging.getLogger("slack_scenario_runner")
 
 async def run_scenario():
     logger.info("Pre-warming PyTorch models BEFORE any gRPC imports to prevent macOS deadlocks...")
-    # This MUST happen before create_llm_client() imports google.generativeai (which uses grpc)
+    # This MUST happen before create_llm_client() imports google.genai (which uses grpc/httpx)
     from tsc.memory.world_rag import _get_embedder, _get_reranker
     _get_embedder()
     _get_reranker()

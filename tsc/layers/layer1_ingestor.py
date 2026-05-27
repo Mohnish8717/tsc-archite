@@ -632,7 +632,7 @@ class ContextualIngestor:
     ) -> list[EnrichedChunk]:
         """Enrich using LLM — primary and only enrichment path (v3.0)."""
         import asyncio
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(2)
         
         async def enrich_chunk(chunk: EnrichedChunk):
             async with sem:
@@ -683,6 +683,13 @@ class ContextualIngestor:
         self, chunk: EnrichedChunk, result: dict[str, Any]
     ) -> None:
         """Apply LLM enrichment results to a chunk."""
+        if not isinstance(result, dict):
+            logger.warning(f"Expected dict for enrichment result, got {type(result)}: {result}")
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
+                result = result[0]
+            else:
+                return
+
         # Entities
         raw_entities = result.get("entities", [])
         chunk.entities = [

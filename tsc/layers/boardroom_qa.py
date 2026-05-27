@@ -6,6 +6,10 @@ Ask a question and ALL evolved agents respond from their post-debate perspective
 Each answer is grounded in the agent's accumulated memory: positions, commitments,
 concessions, proposals, and unresolved concerns from the debate.
 
+Now re-engineered to support:
+1. Neo4j Belief Graph Q&A: Populates and queries a semantic belief graph in Neo4j to ground answers.
+2. Async LLM Concurrency: Uses native asyncio.gather to query all board members in parallel.
+
 Usage:
     python boardroom_qa.py --db live_debate_run.db --run-id <UUID>
     python boardroom_qa.py --memory-file evolved_memories.json
@@ -15,52 +19,177 @@ Environment:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 import sqlite3
+import logging
 from pathlib import Path
 from typing import Optional, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from tsc.memory.hindsight_memory import HindsightBoardroom, LiveAgentMemory
+from tsc.memory.world_rag import _get_neo4j
 
+logger = logging.getLogger(__name__)
+
+
+# ─── Neo4j Belief Graph Helpers ───────────────────────────────────────────
+
+async def populate_neo4j_belief_graph(boardroom: HindsightBoardroom):
+    """Store boardroom debate memories as semantic nodes and relationships in Neo4j."""
+    driver = _get_neo4j()
+    if not driver:
+        print("⚠️  Neo4j is not available. Skipping graph storage.")
+        return
+
+    print("🧠 Populating Neo4j Belief Graph with boardroom debate memories...")
+    try:
+        async with driver.session() as session:
+            for name, mem in boardroom.memories.items():
+                # Create BoardMember and Feature nodes and relationship
+                cypher_member = """
+                MERGE (m:BoardMember {name: $name})
+                SET m.role = $role, m.role_short = $role_short
+                MERGE (f:Feature {title: $feature_title})
+                MERGE (m)-[:DEBATED]->(f)
+                """
+                await session.run(cypher_member, {
+                    "name": mem.agent_name,
+                    "role": mem.role,
+                    "role_short": mem.role_short,
+                    "feature_title": mem.feature_title
+                })
+
+                # Commitments
+                commitments = getattr(mem, '_embedded_commitments', [])
+                for c in commitments:
+                    cypher_commitment = """
+                    MATCH (m:BoardMember {name: $name})
+                    MERGE (c:Commitment {text: $text, agent: $name})
+                    MERGE (m)-[:MADE_COMMITMENT]->(c)
+                    """
+                    await session.run(cypher_commitment, {"name": mem.agent_name, "text": c})
+
+                # Concessions
+                concessions = getattr(mem, '_embedded_concessions', [])
+                for c in concessions:
+                    cypher_concession = """
+                    MATCH (m:BoardMember {name: $name})
+                    MERGE (cn:Concession {text: $text, agent: $name})
+                    MERGE (m)-[:MADE_CONCESSION]->(cn)
+                    """
+                    await session.run(cypher_concession, {"name": mem.agent_name, "text": c})
+
+                # Proposals
+                proposals = getattr(mem, '_embedded_proposals', [])
+                for p in proposals:
+                    cypher_proposal = """
+                    MATCH (m:BoardMember {name: $name})
+                    MERGE (pr:Proposal {text: $text, agent: $name})
+                    MERGE (m)-[:PROPOSED]->(pr)
+                    """
+                    await session.run(cypher_proposal, {"name": mem.agent_name, "text": p})
+
+                # Concerns
+                concerns = getattr(mem, '_embedded_concerns', [])
+                for c in concerns:
+                    cypher_concern = """
+                    MATCH (m:BoardMember {name: $name})
+                    MERGE (cr:Concern {text: $text, agent: $name})
+                    MERGE (m)-[:EXPRESSED_CONCERN]->(cr)
+                    """
+                    await session.run(cypher_concern, {"name": mem.agent_name, "text": c})
+
+        print("✅ Neo4j Belief Graph populated successfully.")
+    except Exception as e:
+        print(f"⚠️  Failed to populate Neo4j Belief Graph: {e}")
+
+
+async def query_neo4j_beliefs(agent_name: str) -> str:
+    """Retrieve specific contextual evidence from Neo4j to ground the agent's response."""
+    driver = _get_neo4j()
+    if not driver:
+        return ""
+
+    cypher = """
+    MATCH (m:BoardMember {name: $name})
+    OPTIONAL MATCH (m)-[:MADE_COMMITMENT]->(c:Commitment)
+    OPTIONAL MATCH (m)-[:MADE_CONCESSION]->(cn:Concession)
+    OPTIONAL MATCH (m)-[:PROPOSED]->(p:Proposal)
+    OPTIONAL MATCH (m)-[:EXPRESSED_CONCERN]->(cr:Concern)
+    RETURN 
+        collect(distinct c.text) as commitments,
+        collect(distinct cn.text) as concessions,
+        collect(distinct p.text) as proposals,
+        collect(distinct cr.text) as concerns
+    """
+    try:
+        async with driver.session() as session:
+            result = await session.run(cypher, {"name": agent_name})
+            record = await result.single()
+            if not record:
+                return ""
+
+            commitments = record.get("commitments", [])
+            concessions = record.get("concessions", [])
+            proposals = record.get("proposals", [])
+            concerns = record.get("concerns", [])
+
+            lines = ["\n[NEO4J BELIEF GRAPH GROUNDED EVIDENCE]"]
+            if commitments:
+                lines.append(f"  • Hard Commitments: {'; '.join(commitments[:5])}")
+            if concessions:
+                lines.append(f"  • Accepted Concessions: {'; '.join(concessions[:3])}")
+            if proposals:
+                lines.append(f"  • Championed Proposals: {'; '.join(proposals[:3])}")
+            if concerns:
+                lines.append(f"  • Expressed Concerns: {'; '.join(concerns[:4])}")
+
+            if len(lines) > 1:
+                return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Failed to query Neo4j for agent beliefs: %s", e)
+    return ""
+
+
+# ─── Loader and Config Helpers ───────────────────────────────────────────
 
 def load_memories(args) -> Dict[str, dict]:
     """Load evolved agent memories from DB or file."""
     if args.memory_file:
         with open(args.memory_file, 'r') as f:
             return json.load(f)
-    
+
     db_path = args.db or str(Path(__file__).resolve().parent.parent.parent / "live_debate_run.db")
     if not Path(db_path).exists():
         print(f"❌ Database not found: {db_path}")
         sys.exit(1)
-    
+
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     if args.run_id:
         cursor.execute("SELECT simulation_metadata FROM simulation_runs WHERE id = ?", (args.run_id,))
     else:
         cursor.execute("SELECT simulation_metadata FROM simulation_runs ORDER BY simulation_timestamp DESC LIMIT 1")
-    
+
     row = cursor.fetchone()
     conn.close()
-    
+
     if not row:
         print("❌ No simulation runs found.")
         sys.exit(1)
-    
+
     metadata = json.loads(row[0]) if isinstance(row[0], str) else row[0]
     memories = metadata.get("evolved_agent_memories", {})
-    
+
     if not memories:
         print("⚠️  No evolved agent memories found. Run may predate V29.")
         sys.exit(1)
-    
+
     return memories
 
 
@@ -69,8 +198,12 @@ def build_llm_config() -> Optional[dict]:
     model = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
-    
-    if gemini_key:
+    nvidia_key = os.getenv("NVIDIA_API_KEY")
+
+    if nvidia_key:
+        return {"config_list": [{"model": model, "api_key": nvidia_key,
+                "base_url": "https://integrate.api.nvidia.com/v1"}]}
+    elif gemini_key:
         return {"config_list": [{"model": model, "api_key": gemini_key,
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1"}]}
     elif groq_key:
@@ -79,30 +212,34 @@ def build_llm_config() -> Optional[dict]:
     return None
 
 
-def ask_the_board(boardroom: HindsightBoardroom, question: str, llm_config: Optional[dict]) -> Dict[str, str]:
-    """Ask all agents a question in parallel and return their responses."""
-    results = {}
-    
+# ─── Async Q&A and Print Helpers ──────────────────────────────────────────
+
+async def ask_the_board_async(boardroom: HindsightBoardroom, question: str, llm_config: Optional[dict]) -> Dict[str, str]:
+    """Ask all agents a question in parallel using native asyncio.gather."""
     if not llm_config:
-        # Fallback: return memory summaries
+        # Fallback: return memory reflections
+        results = {}
         for name in boardroom.get_agent_names():
             results[name] = boardroom.reflect_post_debate(name)
         return results
-    
-    def _query_one(agent_name: str) -> tuple:
+
+    async def _query_one_async(agent_name: str) -> tuple:
         try:
-            answer = boardroom.query_agent(agent_name, question, llm_config)
+            # Retrieve Neo4j grounded beliefs
+            neo4j_context = await query_neo4j_beliefs(agent_name)
+            full_q = question
+            if neo4j_context:
+                full_q = f"{neo4j_context}\n\n[Human Question]: {question}"
+
+            # Query agent asynchronously by offloading the blocking sync call to threadpool
+            answer = await asyncio.to_thread(boardroom.query_agent, agent_name, full_q, llm_config)
             return agent_name, answer
         except Exception as e:
             return agent_name, f"[Query failed: {e}]"
-    
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_query_one, name) for name in boardroom.get_agent_names()]
-        for fut in as_completed(futures):
-            name, answer = fut.result()
-            results[name] = answer
-    
-    return results
+
+    tasks = [_query_one_async(name) for name in boardroom.get_agent_names()]
+    results_list = await asyncio.gather(*tasks)
+    return dict(results_list)
 
 
 def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom, qa_history: Dict[str, list] = None, question: str = ""):
@@ -113,28 +250,26 @@ def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom,
         "CPO": "🎯", "Legal": "⚖️", "CMO": "📢", "CDO": "📊",
         "Sales": "📈", "HR": "👥", "Other": "🏢",
     }
-    
+
     for name, answer in results.items():
         memory = boardroom.memories.get(name)
         role_short = memory.role_short if memory else "Other"
         emoji = ROLE_EMOJI.get(role_short, "🏢")
-        
+
         # Strip the Chain of Thought tags for a cleaner executive output
         clean_answer = re.sub(r'<thought>.*?</thought>', '', answer, flags=re.DOTALL).strip()
-        
+
         print(f"\n{emoji} {name} ({memory.role if memory else 'Unknown'}):")
         print(f"   {clean_answer}")
         print()
-        
+
         # Safely update ephemeral history if enabled
         if qa_history is not None and name in qa_history and clean_answer and not clean_answer.startswith("[Query failed"):
             # 1. Ephemeral Context Updates (Fast local session context)
             qa_history[name].append(f"User Question: {question}")
             qa_history[name].append(f"Your Previous Answer: {clean_answer}")
-            
+
             # 2. Actual Hindsight Memory Evolution (Permanent state change)
-            # This mutates their actual bank but does not touch the original SQLite DB of the simulation.
-            # Tagged clearly as 'post_debate_qa' to avoid corrupting debate context.
             if boardroom._hindsight and memory.hindsight_bank_id:
                 try:
                     qa_content = f"[POST-DEBATE USER Q&A] User explicitly asked: {question}\n{name} formally replied: {clean_answer}"
@@ -147,17 +282,19 @@ def print_board_response(results: Dict[str, str], boardroom: HindsightBoardroom,
                     pass  # Fail gracefully without breaking terminal UX
 
 
-def main():
+# ─── Async Main Loop ─────────────────────────────────────────────────────
+
+async def main_async():
     parser = argparse.ArgumentParser(description="V29: Ask the Board — Multi-Agent Query Mode")
     parser.add_argument("--db", type=str, help="Path to simulation database")
     parser.add_argument("--run-id", type=str, help="Simulation run ID")
     parser.add_argument("--memory-file", type=str, help="Path to evolved_memories.json")
     parser.add_argument("--question", "-q", type=str, help="Single question to ask (non-interactive)")
     args = parser.parse_args()
-    
+
     # Load memories
     raw_memories = load_memories(args)
-    
+
     # Reconstruct boardroom
     boardroom = HindsightBoardroom()
     for name, mem_dict in raw_memories.items():
@@ -169,35 +306,38 @@ def main():
             boardroom.memories[name] = mem
         except Exception as e:
             print(f"⚠️  Skipping {name}: {e}")
-    
+
+    # Populate Neo4j Belief Graph asynchronously
+    await populate_neo4j_belief_graph(boardroom)
+
     print(f"\n{'='*70}")
     print(f"🏛️  BOARDROOM QA — {len(boardroom.memories)} Evolved Agents Ready")
     print(f"{'='*70}")
-    
+
     for name, mem in boardroom.memories.items():
         veto = "🔴" if mem.has_vetoed else "✅"
         embedded_commitments = getattr(mem, '_embedded_commitments', [])
         print(f"  {veto} {name:30s} | {mem.turn_count} turns, {len(embedded_commitments)} fallback commitments")
     print(f"{'='*70}")
-    
+
     llm_config = build_llm_config()
     if not llm_config:
         print("⚠️  No LLM API key found. Responses will be memory dumps only.")
-    
+
     # Single question mode
     if args.question:
         print(f"\n📣 Question: {args.question}\n")
-        results = ask_the_board(boardroom, args.question, llm_config)
+        results = await ask_the_board_async(boardroom, args.question, llm_config)
         print_board_response(results, boardroom)
         return
-    
+
     # Interactive mode
     print("\n💬 Interactive Boardroom Session started.")
     print("Type 'quit' at any prompt to exit.\n")
-    
+
     valid_targets = boardroom.get_agent_names()
     menu_options = ["All Agents"] + valid_targets
-    
+
     # Store ephemeral QA history for this session without corrupting original memory
     qa_history = {name: [] for name in valid_targets}
 
@@ -205,7 +345,7 @@ def main():
         print("\nAvailable targets:")
         for idx, option in enumerate(menu_options):
             print(f"  [{idx}] {option}")
-        
+
         try:
             choice = input("\nSelect a number (or type 'quit') > ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -217,7 +357,7 @@ def main():
             break
         if not choice:
             continue
-            
+
         if not choice.isdigit() or not (0 <= int(choice) < len(menu_options)):
             print(f"⚠️  Invalid selection. Please enter a number between 0 and {len(menu_options)-1}.")
             continue
@@ -241,29 +381,47 @@ def main():
             print("\n🏛️  Board session adjourned.")
             break
 
+        results = {}
         if is_all:
             print(f"\n📣 Broadcasting to {len(valid_targets)} agents...\n")
-            # Build history-aware questions for all
-            results = {}
-            for t in valid_targets:
+            # Parallel query with asyncio.gather
+            async def _query_one(t: str):
                 hist = "\n".join(qa_history[t])
                 full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
                 try:
-                    results[t] = boardroom.query_agent(t, full_q, llm_config)
-                    # We'll update history inside the print function or here
+                    neo4j_context = await query_neo4j_beliefs(t)
+                    if neo4j_context:
+                        full_q = f"{neo4j_context}\n\n{full_q}"
+                    ans = await asyncio.to_thread(boardroom.query_agent, t, full_q, llm_config)
+                    return t, ans
                 except Exception as e:
-                    results[t] = f"[Query failed: {e}]"
+                    return t, f"[Query failed: {e}]"
+
+            tasks = [_query_one(t) for t in valid_targets]
+            res_list = await asyncio.gather(*tasks)
+            results = dict(res_list)
         else:
             print(f"\n📣 Asking {target}...\n")
             hist = "\n".join(qa_history[target])
             full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
             try:
-                results = {target: boardroom.query_agent(target, full_q, llm_config)}
+                neo4j_context = await query_neo4j_beliefs(target)
+                if neo4j_context:
+                    full_q = f"{neo4j_context}\n\n{full_q}"
+                ans = await asyncio.to_thread(boardroom.query_agent, target, full_q, llm_config)
+                results = {target: ans}
             except Exception as e:
                 results = {target: f"[Query failed: {e}]"}
-        
+
         # Print responses and update history
         print_board_response(results, boardroom, qa_history, question)
+
+
+def main():
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":

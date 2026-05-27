@@ -24,39 +24,63 @@ from typing import Any, Optional
 from tsc.llm.base import LLMClient
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.oasis.models import MarketSentimentSeries
+from tsc.memory.world_rag import _get_qdrant, _embed
 
 logger = logging.getLogger(__name__)
 
 
-# ── Prompts ──────────────────────────────────────────────────────────────
+# ── Prompts and Schemas ──────────────────────────────────────────────────
 
-FEATURE_DISCOVERY_SYSTEM = """You are a world-class Product Manager with deep expertise in
-customer research synthesis. Your job is to analyze raw customer data and behavioral
-simulation results to identify the most impactful features to build next.
+FEATURE_MAP_SYSTEM = """You are a Customer Research Synthesis Map Agent.
+Analyze a subset of raw customer data and behavioral simulation outputs to identify top pain points and feature suggestions.
 
-You think like a PM at a top-tier product company: you look for patterns across
-multiple data sources, quantify pain points by frequency and severity, identify
-unmet needs that competitors haven't addressed, and propose features that are
-both high-impact and technically feasible.
-
-RULES:
-- Every proposed feature MUST cite specific customer quotes or behavioral data as evidence.
-- Rank features by: (1) frequency of pain point mentions, (2) severity of impact,
-  (3) alignment with company priorities, (4) competitive gap.
-- Be specific about WHAT to build, WHO it's for, and WHY it matters.
-- If an existing feature proposal is provided, validate it against the evidence
-  and either strengthen it with data or flag gaps.
-
-OUTPUT FORMAT: Return valid JSON with this structure:
+OUTPUT FORMAT: Return valid JSON with this exact structure:
 {
-  "analysis_summary": "Brief synthesis of what the data reveals",
   "top_pain_points": [
-    {"pain_point": "...", "frequency": "high/medium/low", "severity": "critical/major/minor",
-     "customer_quotes": ["quote1", "quote2"], "affected_segments": ["segment1"]}
+    {
+      "pain_point": "Friction description",
+      "frequency": "high/medium/low",
+      "severity": "critical/major/minor",
+      "customer_quotes": ["specific quote or data point"],
+      "affected_segments": ["segments"]
+    }
   ],
   "proposed_features": [
     {
-      "title": "Feature Name",
+      "title": "Proposed Feature Title",
+      "description": "What it does",
+      "target_users": "Target audience",
+      "justification": "Why it is needed, citing specific evidence",
+      "customer_evidence": ["quote or data point"],
+      "affected_domains": ["domain1"],
+      "priority": "P0/P1/P2",
+      "effort_estimate": "small/medium/large",
+      "competitive_advantage": "Differentiator"
+    }
+  ]
+}
+"""
+
+FEATURE_REDUCE_SYSTEM = """You are a Senior Product Manager.
+You have been given a set of intermediate pain points and feature proposals synthesized from different segments of customer and simulation data.
+Your task is to merge, filter, and prioritize these inputs into a final, coherent product recommendation list.
+Consolidate similar pain points, deduplicate duplicate features, and select the top 3-5 most impactful, evidence-backed features.
+
+OUTPUT FORMAT: Return valid JSON with this exact structure:
+{
+  "analysis_summary": "Brief overall synthesis of what the data reveals",
+  "top_pain_points": [
+    {
+      "pain_point": "Consolidated friction description",
+      "frequency": "high/medium/low",
+      "severity": "critical/major/minor",
+      "customer_quotes": ["quote1", "quote2"],
+      "affected_segments": ["segment1"]
+    }
+  ],
+  "proposed_features": [
+    {
+      "title": "Deduplicated Feature Name",
       "description": "What this feature does and how it solves the pain point",
       "target_users": "Who benefits from this feature",
       "justification": "Why this is worth building, citing specific evidence",
@@ -69,6 +93,58 @@ OUTPUT FORMAT: Return valid JSON with this structure:
   ]
 }
 """
+
+DISCOVERY_JSON_SCHEMA = {
+  "type": "object",
+  "properties": {
+    "analysis_summary": {"type": "string"},
+    "top_pain_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pain_point": {"type": "string"},
+          "frequency": {"type": "string", "enum": ["high", "medium", "low"]},
+          "severity": {"type": "string", "enum": ["critical", "major", "minor"]},
+          "customer_quotes": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "affected_segments": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["pain_point", "frequency", "severity", "customer_quotes", "affected_segments"]
+      }
+    },
+    "proposed_features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "description": {"type": "string"},
+          "target_users": {"type": "string"},
+          "justification": {"type": "string"},
+          "customer_evidence": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "affected_domains": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "priority": {"type": "string", "enum": ["P0", "P1", "P2"]},
+          "effort_estimate": {"type": "string", "enum": ["small", "medium", "large"]},
+          "competitive_advantage": {"type": "string"}
+        },
+        "required": ["title", "description", "target_users", "justification", "customer_evidence", "affected_domains", "priority", "effort_estimate", "competitive_advantage"]
+      }
+    }
+  },
+  "required": ["analysis_summary", "top_pain_points", "proposed_features"]
+}
 
 
 class FeatureDiscoveryEngine:
@@ -85,63 +161,176 @@ class FeatureDiscoveryEngine:
         existing_proposal: Optional[FeatureProposal] = None,
         raw_chunks: Optional[list] = None,
     ) -> list[FeatureProposal]:
-        """Analyze customer data and simulation results to propose features.
-
-        Args:
-            company: Company context (product description, priorities, competitors)
-            behavioral_results: OASIS simulation output (agent interactions)
-            existing_proposal: Optional pre-existing feature proposal to validate
-            raw_chunks: Optional enriched chunks from Layer 1
-
-        Returns:
-            Ranked list of FeatureProposal candidates with customer evidence
-        """
         t0 = time.time()
-        logger.info("Layer 2: Starting Feature Discovery")
+        logger.info("Layer 2: Starting SOTA Feature Discovery with Map-Reduce & Deduplication")
 
-        # 1. Gather evidence from all sources
+        # 1. Gather raw customer data and priority sort
+        top_chunks = []
+        if raw_chunks:
+            def _chunk_priority(c) -> int:
+                urgency = str(getattr(c, "urgency_level", "")).upper()
+                sentiment = str(getattr(c, "sentiment_label", "")).upper()
+                score = 0
+                if urgency == "CRITICAL":
+                    score += 3
+                elif urgency == "HIGH":
+                    score += 2
+                elif urgency == "MEDIUM":
+                    score += 1
+                if sentiment in ("NEGATIVE", "ANGER", "FRUSTRATION", "FEAR"):
+                    score += 2
+                return score
+
+            sorted_chunks = sorted(raw_chunks, key=_chunk_priority, reverse=True)
+            top_chunks = sorted_chunks[:100]  # Take top 100 for Map-Reduce
+
+        # 2. Map Phase: Segment chunks into batches of 10 and map customer pain points
+        intermediate_pain_points = []
+        intermediate_features = []
+
+        if top_chunks:
+            chunk_size = 10
+            batches = [top_chunks[i:i + chunk_size] for i in range(0, len(top_chunks), chunk_size)]
+            logger.info("  Map Phase: Processing %d batches of customer chunks...", len(batches))
+            
+            for idx, batch in enumerate(batches):
+                chunk_texts = []
+                for chunk in batch:
+                    text = getattr(chunk, 'text', getattr(chunk, 'content', str(chunk)))
+                    if text:
+                        chunk_texts.append(text[:500])
+                
+                batch_evidence = f"=== BATCH {idx+1} CUSTOMER DATA ===\n" + "\n---\n".join(chunk_texts)
+                try:
+                    res = await self._llm.analyze(
+                        system_prompt=FEATURE_MAP_SYSTEM,
+                        user_prompt=batch_evidence,
+                        temperature=0.3,
+                        max_tokens=4000
+                    )
+                    intermediate_pain_points.extend(res.get("top_pain_points", []))
+                    intermediate_features.extend(res.get("proposed_features", []))
+                except Exception as e:
+                    logger.warning("Batch map step failed: %s", e)
+        
+        # 3. Gather simulation and hindsight evidence
         customer_data = await self._gather_customer_evidence(raw_chunks)
         simulation_data = await self._gather_simulation_evidence(behavioral_results)
-        
-        # 2. Build the discovery prompt
-        prompt = self._build_discovery_prompt(
-            company=company,
-            customer_data=customer_data,
-            simulation_data=simulation_data,
-            existing_proposal=existing_proposal,
+
+        # 4. Reduce Phase: Merge intermediate findings with global context and Hindsight data
+        reduce_input = (
+            f"## Company Context\n"
+            f"Company: {company.company_name}\n"
+            f"Tech Stack: {', '.join(company.tech_stack) if company.tech_stack else 'Not specified'}\n"
+            f"Priorities: {', '.join(company.current_priorities) if company.current_priorities else 'Not specified'}\n\n"
+            f"## Hindsight & Simulation Insights\n"
+            f"{simulation_data}\n\n"
+            f"## Intermediate Mapped Pain Points\n"
+            f"{json.dumps(intermediate_pain_points[:20], indent=2)}\n\n"
+            f"## Intermediate Mapped Feature Ideas\n"
+            f"{json.dumps(intermediate_features[:15], indent=2)}\n"
         )
 
-        # 3. LLM synthesis
-        logger.info("  Synthesizing feature proposals from %d chars of evidence...",
-                     len(customer_data) + len(simulation_data))
+        logger.info("  Reduce Phase: Synthesizing final feature proposals...")
         try:
             result = await self._llm.analyze(
-                system_prompt=FEATURE_DISCOVERY_SYSTEM,
-                user_prompt=prompt,
-                temperature=0.4,
-                max_tokens=6000,
+                system_prompt=FEATURE_REDUCE_SYSTEM,
+                user_prompt=reduce_input,
+                json_schema=DISCOVERY_JSON_SCHEMA,
+                temperature=0.3,
+                max_tokens=6000
             )
         except Exception as e:
-            logger.error("Feature Discovery LLM call failed: %s", e)
-            # If LLM fails and we have an existing proposal, return it as-is
+            logger.error("Feature Discovery Reduce step failed: %s", e)
             if existing_proposal:
                 return [existing_proposal]
             return [FeatureProposal(
                 title="Feature Discovery Failed",
-                description=f"LLM synthesis failed: {e}. Please provide a feature_proposal.json.",
+                description=f"Reduce step failed: {e}. Please provide a feature_proposal.json.",
             )]
 
-        # 4. Parse proposals
+        # 5. Parse proposals
         proposals = self._parse_proposals(result, company)
 
-        # 5. If user provided a proposal, enrich it and put it first
+        # 6. Semantic Deduplication check in Qdrant (Plane-2 discovery_data)
+        deduplicated_proposals = []
+        try:
+            client = _get_qdrant()
+            from qdrant_client.models import PointStruct
+            from datetime import datetime, timezone
+            
+            for p in proposals:
+                p_text = f"{p.title}: {p.description}"
+                p_vec = _embed([p_text])[0]
+                
+                try:
+                    search_results = await client.query_points(
+                        collection_name="discovery_data",
+                        query=p_vec,
+                        limit=3,
+                        with_payload=True
+                    )
+                    
+                    match_found = False
+                    for hit in search_results.points:
+                        if hit.score > 0.85:
+                            logger.info("Deduplication: Feature '%s' matches existing '%s' (similarity: %.3f). Merging...", p.title, hit.payload.get('title'), hit.score)
+                            merged_proposal = await self._merge_proposals_llm(p, hit.payload)
+                            
+                            ts = datetime.now(timezone.utc).isoformat()
+                            await client.upsert(
+                                collection_name="discovery_data",
+                                points=[PointStruct(
+                                    id=hit.id,
+                                    vector=p_vec,
+                                    payload={
+                                        "title": merged_proposal.title,
+                                        "text": merged_proposal.description,
+                                        "target_users": merged_proposal.target_users,
+                                        "priority": merged_proposal.priority or "P1",
+                                        "timestamp": ts,
+                                        "run_id": self._session.run_id if self._session and hasattr(self._session, "run_id") else "global"
+                                    }
+                                )]
+                            )
+                            p = merged_proposal
+                            match_found = True
+                            break
+                            
+                    if not match_found:
+                        ts = datetime.now(timezone.utc).isoformat()
+                        from uuid import uuid4
+                        new_id = str(uuid4())
+                        await client.upsert(
+                            collection_name="discovery_data",
+                            points=[PointStruct(
+                                id=new_id,
+                                vector=p_vec,
+                                payload={
+                                    "title": p.title,
+                                    "text": p.description,
+                                    "target_users": p.target_users,
+                                    "priority": p.priority or "P1",
+                                    "timestamp": ts,
+                                    "run_id": self._session.run_id if self._session and hasattr(self._session, "run_id") else "global"
+                                }
+                            )]
+                        )
+                except Exception as ex:
+                    logger.debug("Qdrant query/upsert for deduplication failed: %s", ex)
+                
+                deduplicated_proposals.append(p)
+            proposals = deduplicated_proposals
+        except Exception as e:
+            logger.debug("Could not connect to Qdrant or initialize client for deduplication: %s", e)
+
+        # 7. If user provided a proposal, enrich it and put it first
         if existing_proposal:
             enriched = self._enrich_existing_proposal(existing_proposal, result)
-            # Remove any duplicate from discovered proposals
             proposals = [p for p in proposals if p.title.lower() != enriched.title.lower()]
             proposals.insert(0, enriched)
 
-        # 6. Retain discoveries into Hindsight
+        # 8. Retain discoveries into Hindsight
         if self._session:
             for p in proposals:
                 await self._session.retain("discovery", 
@@ -158,11 +347,55 @@ class FeatureDiscoveryEngine:
         )
         return proposals
 
+    async def _merge_proposals_llm(self, new_p: FeatureProposal, existing_payload: dict) -> FeatureProposal:
+        """Merge two semantically identical proposals using the LLM client."""
+        merge_prompt = (
+            f"Merge the following two features:\n\n"
+            f"Feature 1 (New):\n"
+            f"- Title: {new_p.title}\n"
+            f"- Description: {new_p.description}\n"
+            f"- Target Users: {new_p.target_users}\n"
+            f"- Affected Domains: {new_p.affected_domains}\n\n"
+            f"Feature 2 (Existing):\n"
+            f"- Title: {existing_payload.get('title')}\n"
+            f"- Description: {existing_payload.get('text')}\n"
+            f"- Target Users: {existing_payload.get('target_users')}\n"
+            f"- Affected Domains: {existing_payload.get('affected_domains', [])}\n"
+        )
+        
+        system_prompt = """You are a Product Manager. Merge these two duplicate feature proposals into a single, cohesive, enriched feature proposal. Preserve any concrete customer quotes, priorities, or metrics from both.
+        Return a valid JSON with this exact structure:
+        {
+          "title": "Final merged title",
+          "description": "Comprehensive merged description combining both descriptions and evidence.",
+          "target_users": "Merged target users definition",
+          "affected_domains": ["domain1", "domain2"]
+        }"""
+        
+        try:
+            res = await self._llm.analyze(
+                system_prompt=system_prompt,
+                user_prompt=merge_prompt,
+                temperature=0.2,
+                max_tokens=2000
+            )
+            return FeatureProposal(
+                title=res.get("title", new_p.title),
+                description=res.get("description", new_p.description),
+                target_users=res.get("target_users", new_p.target_users),
+                affected_domains=res.get("affected_domains", new_p.affected_domains),
+                tech_stack=new_p.tech_stack,
+                priority=new_p.priority,
+                customer_segments=new_p.customer_segments
+            )
+        except Exception as e:
+            logger.warning("Feature merge LLM call failed: %s. Returning original.", e)
+            return new_p
+
     async def _gather_customer_evidence(self, raw_chunks: Optional[list] = None) -> str:
         """Gather customer evidence from Hindsight world bank and/or raw chunks."""
         evidence_parts = []
 
-        # From Hindsight (if connected)
         if self._session:
             try:
                 pain_points = await self._session.recall("world",
@@ -180,14 +413,7 @@ class FeatureDiscoveryEngine:
             except Exception as e:
                 logger.debug("Hindsight usage recall failed: %s", e)
 
-        # From raw chunks (direct access)
         if raw_chunks:
-            # FIX (Major): Sort chunks by urgency + sentiment before capping.
-            # Rationale: The LLM bases the product vision on these samples.
-            # Picking the FIRST 30 (file order) anchors proposals to irrelevant
-            # boilerplate. Instead, surface the highest-signal chunks — those
-            # marked CRITICAL/HIGH urgency or with negative sentiment (the pain points
-            # that drive real feature decisions).
             def _chunk_priority(c) -> int:
                 urgency = str(getattr(c, "urgency_level", "")).upper()
                 sentiment = str(getattr(c, "sentiment_label", "")).upper()
@@ -198,20 +424,13 @@ class FeatureDiscoveryEngine:
                     score += 2
                 elif urgency == "MEDIUM":
                     score += 1
-                # Negative sentiment = pain point = high product signal
                 if sentiment in ("NEGATIVE", "ANGER", "FRUSTRATION", "FEAR"):
                     score += 2
-                elif sentiment == "NEUTRAL":
-                    score += 0
                 return score
 
-            # Sort descending — highest priority pain points first
             sorted_chunks = sorted(raw_chunks, key=_chunk_priority, reverse=True)
-            top_chunks = sorted_chunks[:30]  # cap after priority sort
+            top_chunks = sorted_chunks[:30]
 
-            # Minimum evidence threshold (user-confirmed requirement):
-            # if we have fewer than 3 chunks, warn but continue —
-            # the LLM fallback in _build_discovery_prompt still runs.
             if len(top_chunks) < 3:
                 logger.warning(
                     "Feature Discovery: only %d customer evidence chunks available "
@@ -238,7 +457,6 @@ class FeatureDiscoveryEngine:
         """Gather behavioral simulation evidence."""
         evidence_parts = []
 
-        # From Hindsight simulation bank
         if self._session:
             try:
                 sim_data = await self._session.recall("simulation",
@@ -248,11 +466,10 @@ class FeatureDiscoveryEngine:
             except Exception as e:
                 logger.debug("Hindsight simulation recall failed: %s", e)
 
-        # From direct MarketSentimentSeries
         if behavioral_results and behavioral_results.agent_interactions:
             agent_quotes = []
             for agent_id, interactions in behavioral_results.agent_interactions.items():
-                for interaction in interactions[:3]:  # Top 3 per agent
+                for interaction in interactions[:3]:
                     agent_quotes.append(f"  Agent {agent_id}: {interaction[:300]}")
             if agent_quotes:
                 evidence_parts.append(
@@ -262,60 +479,12 @@ class FeatureDiscoveryEngine:
 
         return "\n\n".join(evidence_parts) if evidence_parts else "No simulation data available."
 
-    def _build_discovery_prompt(
-        self,
-        company: CompanyContext,
-        customer_data: str,
-        simulation_data: str,
-        existing_proposal: Optional[FeatureProposal] = None,
-    ) -> str:
-        """Build the feature discovery prompt with all evidence."""
-        sections = [
-            f"## Company Context",
-            f"Company: {company.company_name}",
-            f"Tech Stack: {', '.join(company.tech_stack) if company.tech_stack else 'Not specified'}",
-            f"Current Priorities: {', '.join(company.current_priorities) if company.current_priorities else 'Not specified'}",
-            f"Competitors: {', '.join(company.competitors) if company.competitors else 'Not specified'}",
-            f"Team Size: {company.team_size or 'Unknown'}",
-            f"Constraints: {', '.join(company.constraints) if company.constraints else 'None specified'}",
-            "",
-            f"## Customer Evidence",
-            customer_data,
-            "",
-            f"## Behavioral Simulation Results",
-            simulation_data,
-        ]
-
-        if existing_proposal:
-            sections.extend([
-                "",
-                f"## Existing Feature Proposal (validate against evidence)",
-                f"Title: {existing_proposal.title}",
-                f"Description: {existing_proposal.description}",
-                f"Target Users: {existing_proposal.target_users}",
-                "",
-                "TASK: Validate this proposal against the customer evidence above.",
-                "If the evidence supports it, strengthen the justification with specific quotes.",
-                "If the evidence contradicts it, flag the gaps and propose alternatives.",
-                "Also propose 1-2 additional features from the evidence.",
-            ])
-        else:
-            sections.extend([
-                "",
-                "## Task",
-                "Based on ALL the evidence above, identify the top 3 features this product",
-                "should build next. Rank them by evidence strength and business impact.",
-                "Each feature must cite specific customer quotes or simulation data as justification.",
-            ])
-
-        return "\n".join(sections)
-
     def _parse_proposals(self, result: dict, company: CompanyContext) -> list[FeatureProposal]:
         """Parse LLM output into FeatureProposal objects."""
         proposals = []
         raw_features = result.get("proposed_features", [])
 
-        for feat in raw_features[:5]:  # Cap at 5
+        for feat in raw_features[:5]:
             try:
                 proposal = FeatureProposal(
                     title=feat.get("title", "Untitled Feature"),
@@ -339,13 +508,11 @@ class FeatureDiscoveryEngine:
         self, proposal: FeatureProposal, analysis: dict
     ) -> FeatureProposal:
         """Enrich an existing proposal with evidence from the analysis."""
-        # Find matching pain points
         pain_points = analysis.get("top_pain_points", [])
         evidence_quotes = []
         for pp in pain_points:
             evidence_quotes.extend(pp.get("customer_quotes", []))
 
-        # Build enriched description
         enriched_desc = proposal.description
         if evidence_quotes:
             enriched_desc += "\n\n--- Customer Evidence ---\n"
@@ -371,3 +538,4 @@ class FeatureDiscoveryEngine:
             pricing_strategy=proposal.pricing_strategy,
             customer_segments=proposal.customer_segments,
         )
+
