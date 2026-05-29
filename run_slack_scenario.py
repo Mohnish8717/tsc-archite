@@ -34,8 +34,8 @@ dotenv.load_dotenv(PROJECT_ROOT / ".env")
 os.environ["TSC_GM_LLM_PROVIDER"] = "ollama"
 os.environ["TSC_GM_LLM_MODEL"] = "gemma4:e2b"
 os.environ["HINDSIGHT_URL"] = "" # Disable Hindsight to avoid 402 API errors
-os.environ["GEMINI_FREE_RPM"] = "35"
-os.environ["TSC_GEMINI_RPM_LIMIT"] = "35"
+os.environ["GEMINI_FREE_RPM"] = "12"
+os.environ["TSC_GEMINI_RPM_LIMIT"] = "12"
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

@@ -41,8 +41,7 @@ class ShadowAgent:
     agent_name: str
     segment_source: str
     declared_index: int          # Position in full declared population
-    nearest_active_id: str = "" # ID of active agent whose state we inherit
-    similarity_score: float = 0.0
+    nearest_active_ids: List[Tuple[str, float]] = field(default_factory=list) # List of (agent_id, weight)
     weight: float = 1.0          # Statistical weight in population metrics
     
     # Inherited state (copied from nearest active agent post-simulation)
@@ -97,45 +96,62 @@ class PopulationSampler:
             f"{self.llm_sample_size:,} active (LLM) + {len(self.shadow_agents):,} shadow"
         )
     
-    def match_shadows_to_active(self):
-        """Assign each shadow agent to its nearest active neighbor.
+    def match_shadows_to_active(self, k: int = 3):
+        """Assign each shadow agent to its top K nearest active neighbors.
         
-        Uses segment_source string matching as a lightweight proxy for
-        persona embedding similarity (no ML dependency needed).
+        Uses term frequency cosine similarity for fast pure-Python matching.
         """
+        import re
+        from collections import Counter
+        import math
+
+        def tokenize(text: str):
+            return Counter(re.findall(r'\w+', text.lower()))
+
+        def cosine_similarity(c1, c2):
+            intersection = set(c1.keys()) & set(c2.keys())
+            numerator = sum([c1[x] * c2[x] for x in intersection])
+            sum1 = sum([c1[x]**2 for x in c1.keys()])
+            sum2 = sum([c2[x]**2 for x in c2.keys()])
+            denominator = math.sqrt(sum1) * math.sqrt(sum2)
+            if not denominator: return 0.0
+            return float(numerator) / denominator
+
         active_sources = {}
         for p in self.active_profiles:
             info = p.user_info_dict if hasattr(p, 'user_info_dict') else {}
             persona = info.get("profile", {})
             other = persona.get("other_info", {})
             aid = str(getattr(p, 'agent_id', ''))
-            active_sources[aid] = other.get("role", info.get("description", "")).lower()
+            role_desc = other.get("role", info.get("description", ""))
+            active_sources[aid] = tokenize(role_desc)
         
         for shadow in self.shadow_agents:
-            shadow_src = shadow.segment_source.lower()
-            best_id, best_score = "", 0.0
+            shadow_tokens = tokenize(shadow.segment_source)
+            scores = []
             
-            for aid, src in active_sources.items():
-                # Simple overlap score: shared words / total words
-                shadow_words = set(shadow_src.split())
-                active_words = set(src.split())
-                if shadow_words or active_words:
-                    overlap = len(shadow_words & active_words)
-                    union = len(shadow_words | active_words) or 1
-                    score = overlap / union
-                    if score > best_score:
-                        best_score, best_id = score, aid
+            for aid, active_tokens in active_sources.items():
+                score = cosine_similarity(shadow_tokens, active_tokens)
+                scores.append((score, aid))
+            
+            # Sort by score descending and take top K
+            scores.sort(key=lambda x: x[0], reverse=True)
+            top_k = scores[:k]
             
             # Fallback: assign to first active agent
-            if not best_id and self.active_profiles:
-                best_id = str(getattr(self.active_profiles[0], 'agent_id', ''))
-                best_score = 0.0
+            if not top_k and self.active_profiles:
+                first_aid = str(getattr(self.active_profiles[0], 'agent_id', ''))
+                top_k = [(1.0, first_aid)]
             
-            shadow.nearest_active_id = best_id
-            shadow.similarity_score = best_score
+            # Normalize weights
+            total_score = sum(s[0] for s in top_k)
+            if total_score > 0:
+                shadow.nearest_active_ids = [(aid, s / total_score) for s, aid in top_k]
+            else:
+                shadow.nearest_active_ids = [(aid, 1.0 / len(top_k)) for s, aid in top_k]
     
     def propagate_states(self, decision_journals: Dict[str, Any]):
-        """Copy behavioral states from active journals to shadow agents.
+        """Blend behavioral states from active journals to shadow agents using K-NN weights.
         
         Call this AFTER the simulation loop completes.
         """
@@ -143,18 +159,37 @@ class PopulationSampler:
         
         propagated = 0
         for shadow in self.shadow_agents:
-            journal = decision_journals.get(shadow.nearest_active_id)
-            if journal:
-                shadow.satisfaction = journal.satisfaction
-                shadow.frustration = journal.frustration
-                shadow.trust = journal.trust
-                shadow.urgency = journal.urgency
-                shadow.advocacy = journal.advocacy
-                shadow.decisions = list(journal.decisions)
-                shadow.signals = list(journal.signals[-3:])  # Last 3 signals
-                propagated += 1
+            blended_sat, blended_fru, blended_tru = 0.0, 0.0, 0.0
+            blended_urg, blended_adv = 0.0, 0.0
+            all_decisions = []
+            all_signals = []
+            
+            for aid, weight in shadow.nearest_active_ids:
+                journal = decision_journals.get(aid)
+                if journal:
+                    blended_sat += journal.satisfaction * weight
+                    blended_fru += journal.frustration * weight
+                    blended_tru += journal.trust * weight
+                    blended_urg += journal.urgency * weight
+                    blended_adv += journal.advocacy * weight
+                    
+                    if hasattr(journal, 'decisions'):
+                        all_decisions.extend(journal.decisions)
+                    if hasattr(journal, 'signals'):
+                        all_signals.extend(journal.signals[-3:])
+            
+            shadow.satisfaction = blended_sat
+            shadow.frustration = blended_fru
+            shadow.trust = blended_tru
+            shadow.urgency = blended_urg
+            shadow.advocacy = blended_adv
+            
+            # Deduplicate decisions and signals
+            shadow.decisions = [dict(t) for t in {tuple(d.items()) for d in all_decisions}]
+            shadow.signals = [dict(t) for t in {tuple(s.items()) for s in all_signals}][:3]
+            propagated += 1
         
-        logger.info(f"🔁 State propagated to {propagated:,} shadow agents")
+        logger.info(f"🔁 Blended state propagated to {propagated:,} shadow agents via K-NN")
     
     def build_extrapolated_report(
         self,
@@ -178,38 +213,58 @@ class PopulationSampler:
         n = self.declared_n
         
         # 1. NPS & Risk counts
-        high_risk_count = 0
-        low_risk_count = 0
-        moderate_count = 0
-        promoter_count = 0
-        detractor_count = 0
+        import math
+        high_risk_prob_sum = 0.0
+        low_risk_prob_sum = 0.0
+        moderate_prob_sum = 0.0
+        promoter_prob_sum = 0.0
+        detractor_prob_sum = 0.0
+        
+        def sigmoid(x, k=15, x0=0.5):
+            # Sigmoid for continuous probability mapping
+            return 1.0 / (1.0 + math.exp(-k * (x - x0)))
         
         for agent in combined_agents:
-            if agent.frustration > 0.6:
-                high_risk_count += 1
-                detractor_count += 1
-            elif agent.frustration <= 0.3 and agent.satisfaction > 0.5:
-                low_risk_count += 1
-                if agent.advocacy > 0.6:
-                    promoter_count += 1
-            else:
-                moderate_count += 1
+            # Probabilistic Risk Mapping
+            hr_prob = sigmoid(agent.frustration, k=15, x0=0.55)
+            # Low risk: not frustrated AND somewhat satisfied
+            not_frustrated_prob = 1.0 - sigmoid(agent.frustration, k=15, x0=0.45)
+            satisfied_prob = sigmoid(agent.satisfaction, k=15, x0=0.5)
+            lr_prob = not_frustrated_prob * satisfied_prob
+            
+            # Normalize so they sum to 1
+            if hr_prob + lr_prob > 1.0:
+                total_prob = hr_prob + lr_prob
+                hr_prob /= total_prob
+                lr_prob /= total_prob
+            mod_prob = max(0.0, 1.0 - hr_prob - lr_prob)
+            
+            high_risk_prob_sum += hr_prob
+            low_risk_prob_sum += lr_prob
+            moderate_prob_sum += mod_prob
+            
+            # NPS Categories
+            detractor_prob_sum += hr_prob
+            # Promoter: must be low risk AND have high advocacy
+            adv_prob = sigmoid(agent.advocacy, k=15, x0=0.55)
+            promoter_prob_sum += lr_prob * adv_prob
                 
-        pop_high_risk = high_risk_count / total
-        pop_low_risk = low_risk_count / total
-        pop_promoters = promoter_count / total
-        pop_detractors = detractor_count / total
+        pop_high_risk = high_risk_prob_sum / total
+        pop_low_risk = low_risk_prob_sum / total
+        pop_promoters = promoter_prob_sum / total
+        pop_detractors = detractor_prob_sum / total
         pop_nps = round((pop_promoters - pop_detractors) * 100, 1)
         
         risk_dist = {
-            "HIGH_RISK": round(high_risk_count / total, 3),
-            "MODERATE": round(moderate_count / total, 3),
-            "LOW_RISK": round(low_risk_count / total, 3)
+            "HIGH_RISK": round(pop_high_risk, 3),
+            "MODERATE": round(moderate_prob_sum / total, 3),
+            "LOW_RISK": round(pop_low_risk, 3)
         }
         
         # 2. Churn velocity & Adoption momentum
+        # Use simple mean for churn/adoption momentum but factor in baseline
         churn_velocity = sum(agent.frustration for agent in combined_agents) / (total * max(timesteps_completed, 1))
-        adoption_momentum = sum(agent.satisfaction - 0.5 for agent in combined_agents) / (total * max(timesteps_completed, 1))
+        adoption_momentum = sum(max(0.0, agent.satisfaction - 0.5) for agent in combined_agents) / (total * max(timesteps_completed, 1))
         
         # 3. Top risk factors
         risk_counts = {}

@@ -20,6 +20,7 @@ from tsc.oasis.models import OASISAgentProfile, OASISSimulationConfig, Simulatio
 from tsc.oasis.simulation_runner import SimulationRunner
 from tsc.oasis.simulation_config_generator import SimulationConfigGenerator
 from tsc.oasis.profile_builder import InitializeOASISAgents
+from tsc.models.graph import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,8 @@ class SimulationManager:
         feature: FeatureProposal,
         company: CompanyContext,
         personas: List[FinalPersona],
-        market_context: Optional[Dict[str, Any]] = None
+        market_context: Optional[Dict[str, Any]] = None,
+        kg: Optional[KnowledgeGraph] = None
     ) -> SimulationMetadata:
         """
         Prepare an isolated workspace with personas and tuned configuration.
@@ -103,6 +105,10 @@ class SimulationManager:
         with open(os.path.join(workspace_path, "company.json"), "w") as f:
             f.write(company.model_dump_json(indent=2))
             
+        if kg:
+            with open(os.path.join(workspace_path, "knowledge_graph.json"), "w") as f:
+                f.write(kg.model_dump_json(indent=2))
+            
         logger.info(f"Preparation complete for {simulation_id}. {len(agent_profiles)} agents ready.")
         return metadata
 
@@ -133,6 +139,13 @@ class SimulationManager:
 
         logger.info(f"Starting execution for {simulation_id}")
         
+        # Load Knowledge Graph if available
+        kg = None
+        kg_path = os.path.join(workspace_path, "knowledge_graph.json")
+        if os.path.exists(kg_path):
+            with open(kg_path, "r") as f:
+                kg = KnowledgeGraph.model_validate_json(f.read())
+        
         # Reconstruct the config object for the runner (it expects OASISSimulationConfig)
         from .models import OASISSimulationConfig
         sim_config = OASISSimulationConfig(**config_dict)
@@ -141,6 +154,7 @@ class SimulationManager:
             config=sim_config,
             agent_profiles=agent_profiles,
             feature=feature,
-            context=company
+            context=company,
+            kg=kg
         )
         return runner

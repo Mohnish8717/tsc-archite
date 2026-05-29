@@ -29,4 +29,5 @@ class NvidiaClient(OpenAIClient):
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=self.NVIDIA_BASE_URL,
+            timeout=300.0,
         )

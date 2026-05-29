@@ -77,7 +77,8 @@ class SimulationRunner:
         agent_profiles: List[OASISAgentProfile],
         feature: FeatureProposal,
         context: CompanyContext,
-        market_context: Optional[Dict[str, Any]] = None
+        market_context: Optional[Dict[str, Any]] = None,
+        kg: Optional[Any] = None
     ) -> int:
         """Spawn the simulation subprocess and start monitoring."""
         if self.run_state.status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
@@ -94,7 +95,8 @@ class SimulationRunner:
             "feature": feature.model_dump(),
             "context": context.model_dump(),
             "market_context": market_context,
-            "base_dir": os.path.dirname(self.workspace)
+            "base_dir": os.path.dirname(self.workspace),
+            "knowledge_graph": kg.model_dump() if kg else None
         }
         
         with open(self.payload_file, 'w', encoding='utf-8') as f:

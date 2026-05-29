@@ -57,15 +57,23 @@ class OpenAIClient(LLMClient):
             model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
-            response_format={"type": "json_object"},
             messages=messages,
+            stream=True,
         )
 
-        text = response.choices[0].message.content or "{}"
+        chunks = []
+        usage = None
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                chunks.append(chunk.choices[0].delta.content)
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage = chunk.usage
+
+        text = "".join(chunks) or "{}"
         logger.debug(f"\n[LLM RESPONSE - analyze]\n{text}\n" + "="*40)
 
         elapsed = time.time() - t0
-        usage = response.usage
+        usage = usage or getattr(response, "usage", None)
         self._log_call(
             "analyze",
             usage.prompt_tokens if usage else 0,
@@ -100,13 +108,22 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
             temperature=temperature,
             messages=messages,
+            stream=True,
         )
 
-        text = response.choices[0].message.content or ""
+        chunks = []
+        usage = None
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                chunks.append(chunk.choices[0].delta.content)
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage = chunk.usage
+
+        text = "".join(chunks) or ""
         logger.debug(f"\n[LLM RESPONSE - generate]\n{text}\n" + "="*40)
 
         elapsed = time.time() - t0
-        usage = response.usage
+        usage = usage or getattr(response, "usage", None)
         self._log_call(
             "generate",
             usage.prompt_tokens if usage else 0,
@@ -114,3 +131,12 @@ class OpenAIClient(LLMClient):
             elapsed,
         )
         return text
+
+    async def acomplete(self, prompt: str) -> str:
+        """Simple completion wrapper for backward compatibility."""
+        return await self.generate(
+            system_prompt="You are a helpful assistant.",
+            user_prompt=prompt,
+            temperature=0.2,
+            max_tokens=2000,
+        )

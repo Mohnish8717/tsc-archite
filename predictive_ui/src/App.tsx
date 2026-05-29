@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText } from 'lucide-react';
 import OASIS3D from './components/layers/OASIS3D';
 import BoardroomDebate from './components/layers/BoardroomDebate';
@@ -13,14 +13,40 @@ import { usePipelineStore } from './store/usePipelineStore';
 
 function App() {
   const ws = useWebSocket();
-  const { isConnected, simulationStatus, simulationTitle, simulationProgress } = usePipelineStore();
+  const { isConnected, simulationStatus, simulationTitle, simulationProgress, pendingAction, sessionId, simulationReport, isBootstrapped } = usePipelineStore();
   const [activeLayer, setActiveLayer] = useState(0); // 0 = landing page
   const [statusWidth, setStatusWidth] = useState(450);
+  const [hasAutoSwitched, setHasAutoSwitched] = useState(false);
+
+  // Auto-switch to Seeds tab when review is needed
+  useEffect(() => {
+    if (pendingAction?.action === 'review_seeds') {
+      setActiveLayer(4);
+    }
+  }, [pendingAction]);
+
+  // Auto-switch to dashboard on load if a simulation already exists
+  useEffect(() => {
+    if (isBootstrapped && sessionId && activeLayer === 0 && !hasAutoSwitched) {
+      if (simulationReport) {
+        setActiveLayer(8); // Handoff
+      } else if (pendingAction?.action === 'review_seeds') {
+        setActiveLayer(4); // Seeds
+      } else {
+        // If simulation is running (or recently started), show the OASIS Sim layer, 
+        // since the user wants the latest simulation to be shown.
+        // Wait, if it's completely empty we'd show ingestion, but if it has a sessionId it's running!
+        setActiveLayer(5); // OASIS Sim
+      }
+      setHasAutoSwitched(true);
+    }
+  }, [isBootstrapped, sessionId, activeLayer, hasAutoSwitched, simulationReport, pendingAction]);
 
   const navItems = [
     { id: 0, name: 'Home', icon: Home },
     { id: 1, name: 'Ingestion', icon: Layers },
     { id: 3, name: 'Personas', icon: Users },
+    { id: 4, name: 'Seeds', icon: FileText },
     { id: 5, name: 'OASIS Sim', icon: Activity },
     { id: 6, name: 'Boardroom', icon: MessageSquare },
     { id: 8, name: 'Handoff', icon: Terminal },
@@ -195,11 +221,12 @@ function App() {
       <main className="flex-1 w-full h-full relative overflow-hidden" style={{ marginTop: '72px' }}>
         {activeLayer === 1 && <IngestorGraph />}
         {activeLayer === 3 && <AssemblyMatrix />}
+        {activeLayer === 4 && <SeedReviewPage />}
         {activeLayer === 5 && <OASIS3D />}
         {activeLayer === 6 && <BoardroomDebate />}
         {activeLayer === 8 && <HandoffTerminal />}
         {/* Fallback empty state when jumping via Preview */}
-        {![1, 3, 5, 6, 8].includes(activeLayer) && activeLayer !== 0 && activeLayer !== 0.5 && (
+        {![1, 3, 4, 5, 6, 8].includes(activeLayer) && activeLayer !== 0 && activeLayer !== 0.5 && (
           <div className="w-full h-full flex flex-col items-center justify-center gap-6">
             <div className="w-20 h-20 bg-brand border-4 border-black flex items-center justify-center animate-pulse shadow-neo-black">
               <Activity size={36} className="text-black" strokeWidth={3} />
@@ -210,9 +237,6 @@ function App() {
             </div>
           </div>
         )}
-        
-        {/* HITL Action Overlays */}
-        <SeedReviewPage />
       </main>
     </div>
   );

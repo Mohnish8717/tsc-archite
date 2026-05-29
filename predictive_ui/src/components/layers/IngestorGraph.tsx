@@ -1,4 +1,6 @@
-import React, { useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback, useState } from 'react';
+import * as THREE from 'three';
+import ForceGraph3D from 'react-force-graph-3d';
 import ReactFlow, { Background, Controls, addEdge, useNodesState, useEdgesState, MarkerType } from 'reactflow';
 import type { Connection, Edge, Node } from 'reactflow';
 import 'reactflow/dist/style.css';
@@ -97,9 +99,10 @@ function buildFlowGraph(ingestionNodes: ReturnType<typeof usePipelineStore>['ing
 }
 
 export default function IngestorGraph() {
-  const { ingestionNodes, isConnected, pipelineStages } = usePipelineStore();
+  const { ingestionNodes, isConnected, pipelineStages, kgNodes, kgEdges } = usePipelineStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [viewMode, setViewMode] = useState<'pipeline' | '3d'>('pipeline');
 
   const stageStatus = pipelineStages.layer1;
   const isWaiting = stageStatus === 'waiting';
@@ -203,35 +206,96 @@ export default function IngestorGraph() {
           </div>
         )}
 
-        {ingestionNodes.length === 0 && !isWaiting && !isRunning ? (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-4">
-            <div className="w-16 h-16 bg-brand border-4 border-black flex items-center justify-center animate-pulse">
-              <Zap size={28} className="text-black" strokeWidth={3} />
+        {viewMode === 'pipeline' ? (
+          ingestionNodes.length === 0 && !isWaiting && !isRunning ? (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+              <div className="w-16 h-16 bg-brand border-4 border-black flex items-center justify-center animate-pulse">
+                <Zap size={28} className="text-black" strokeWidth={3} />
+              </div>
+              <p className="font-black text-sm uppercase tracking-widest">
+                {isConnected ? 'Awaiting ingestion data...' : 'Connecting to backend...'}
+              </p>
             </div>
-            <p className="font-black text-sm uppercase tracking-widest">
-              {isConnected ? 'Awaiting ingestion data...' : 'Connecting to backend...'}
-            </p>
-          </div>
+          ) : (
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              attributionPosition="bottom-left"
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background color="#EEEEEE" gap={20} />
+              <Controls />
+            </ReactFlow>
+          )
         ) : (
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            attributionPosition="bottom-left"
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background color="#EEEEEE" gap={20} />
-            <Controls />
-          </ReactFlow>
+          <div className="w-full h-full bg-white flex items-center justify-center">
+            {kgNodes.length === 0 ? (
+              <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+                <div className="w-16 h-16 bg-brand border-4 border-black flex items-center justify-center animate-pulse">
+                  <Database size={28} className="text-black" strokeWidth={3} />
+                </div>
+                <p className="font-black text-sm uppercase tracking-widest">
+                  No Graph Data Found
+                </p>
+              </div>
+            ) : (
+              <ForceGraph3D
+                graphData={{
+                  nodes: kgNodes.map(n => ({ ...n, name: n.label })),
+                  links: kgEdges.map(e => ({ source: e.source, target: e.target, name: e.relationshipType }))
+                }}
+                nodeLabel={(node: any) => `
+                  <div style="background: #FFFFFF; border: 4px solid #000000; padding: 12px; font-weight: 900; color: #000000; box-shadow: 6px 6px 0 0 #000000; font-family: monospace; text-transform: uppercase;">
+                    <div style="font-size: 10px; color: ${node.entityType === 'Feature' ? '#FF4500' : '#666666'}; margin-bottom: 4px; letter-spacing: 0.1em;">${node.entityType || 'Node'}</div>
+                    <div style="font-size: 14px; letter-spacing: 0.05em;">${node.name}</div>
+                  </div>
+                `}
+                nodeThreeObject={(node: any) => {
+                  const isFeature = node.entityType === 'Feature';
+                  const color = isFeature ? '#FF4500' : '#000000';
+                  const geometry = new THREE.SphereGeometry(isFeature ? 6 : 4, 32, 32);
+                  const material = new THREE.MeshBasicMaterial({ color: color });
+                  return new THREE.Mesh(geometry, material);
+                }}
+                linkColor={() => '#000000'}
+                backgroundColor="#FFFFFF"
+                linkDirectionalParticles={3}
+                linkDirectionalParticleWidth={4}
+                linkDirectionalParticleColor={() => '#FF4500'}
+                linkDirectionalArrowLength={0}
+                width={typeof window !== 'undefined' ? window.innerWidth - 256 : 800} // Subtract side panel width
+              />
+            )}
+          </div>
         )}
 
-        {/* Watermark badge */}
-        <div className="absolute top-4 right-4 bg-black text-white border-4 border-black px-4 py-2 text-xs font-black uppercase tracking-widest flex items-center gap-2 pointer-events-none">
-          <Layers className="w-3.5 h-3.5 text-brand" strokeWidth={3} /> Live Knowledge Graph
+        {/* View Toggle */}
+        <div className="absolute top-4 right-4 flex gap-2 z-50">
+          <button 
+            onClick={() => setViewMode('pipeline')}
+            className={`px-4 py-2 text-xs font-black uppercase tracking-widest border-4 transition-all ${
+              viewMode === 'pipeline' 
+                ? 'bg-black text-white border-black shadow-neo-black' 
+                : 'bg-white text-black border-black hover:bg-gray-100'
+            }`}
+          >
+            Pipeline
+          </button>
+          <button 
+            onClick={() => setViewMode('3d')}
+            className={`px-4 py-2 text-xs font-black uppercase tracking-widest border-4 transition-all flex items-center gap-2 ${
+              viewMode === '3d' 
+                ? 'bg-black text-white border-black shadow-neo-black' 
+                : 'bg-white text-black border-black hover:bg-gray-100'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" strokeWidth={3} /> Live Knowledge Graph
+          </button>
         </div>
       </div>
     </div>

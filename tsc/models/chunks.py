@@ -78,6 +78,8 @@ class EnrichedChunk(BaseModel):
     metrics: list[ExtractedMetric] = Field(default_factory=list)
     is_customer_perspective: bool = False
     enrichment_timestamp: Optional[datetime] = None
+    speaker_name: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceSummary(BaseModel):

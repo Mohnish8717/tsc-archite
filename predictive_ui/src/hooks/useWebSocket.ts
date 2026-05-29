@@ -48,6 +48,10 @@ export function useWebSocket(url: string = defaultUrl) {
     addSycophancyAlert,
     // G7
     addEagleEyeResult,
+    setPendingAction,
+    setSessionId,
+    setIsBootstrapped,
+    setKnowledgeGraph,
   } = usePipelineStore();
 
   useEffect(() => {
@@ -69,6 +73,7 @@ export function useWebSocket(url: string = defaultUrl) {
 
           // ── Standard OASIS agent action (includes INTERVIEW_RESPONSE, FOCUS_GROUP) ──
           if (data.agent_id && data.action_type) {
+            setPendingAction(null);
             // G7: Eagle's Eye interview response — route to dedicated store field too
             if (data.action_type === 'INTERVIEW_RESPONSE') {
               addEagleEyeResult({
@@ -85,10 +90,19 @@ export function useWebSocket(url: string = defaultUrl) {
           // ── Route by type ─────────────────────────────────────────────────
           switch (data.type) {
 
+            // Action required (HITL)
+            case 'action_required':
+              setPendingAction(data);
+              break;
+
             // Layer 1: Ingestion
             case 'ingestion_sync':
               setIngestionNodes(data.nodes ?? []);
               setPipelineStage('layer1', 'done');
+              break;
+
+            case 'knowledge_graph_sync':
+              setKnowledgeGraph(data.nodes ?? [], data.edges ?? []);
               break;
 
              // Layer 3: Personas
@@ -127,6 +141,11 @@ export function useWebSocket(url: string = defaultUrl) {
             case 'pipeline_reset':
               resetPipelineStages();
               resetForNewSimulation('Initializing New Simulation...');
+              if (data.session_id) setSessionId(data.session_id);
+              break;
+
+            case 'bootstrap_complete':
+              setIsBootstrapped(true);
               break;
 
             // Layer 5: Agent spawn into graph
@@ -202,6 +221,9 @@ export function useWebSocket(url: string = defaultUrl) {
                 hub_agent_id: data.hub_agent_id,
                 total_edges: data.total_edges ?? 0,
                 avg_degree: data.avg_degree ?? 0,
+                density: data.density ?? 0,
+                clustering_coefficient: data.clustering_coefficient ?? 0,
+                avg_betweenness_centrality: data.avg_betweenness_centrality ?? 0,
                 edges: data.edges ?? [],
               });
               break;

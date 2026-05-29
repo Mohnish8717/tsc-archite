@@ -36,6 +36,20 @@ export interface IngestionNode {
   status: 'active' | 'pending' | 'error';
 }
 
+export interface KGNode {
+  id: string;
+  label: string;
+  entityType: string;
+  mentions: number;
+}
+
+export interface KGEdge {
+  source: string;
+  target: string;
+  relationshipType: string;
+  weight: number;
+}
+
 // ── Psychological sub-model types (mirror of Python models) ──────────────────
 export interface PersonaEmotionalTriggers {
   excited_by: string[];
@@ -68,8 +82,8 @@ export interface PersonaBuyerJourneyDetail {
   key_proof_points: string[];
   deal_breakers: string[];
   success_metric: string;
-  roi_threshold_months: number;
-  willingness_to_pay_band: string;
+  roi_threshold_months?: number;
+  willingness_to_pay_band?: string;
 }
 export interface PersonaMarketContext {
   company_size_band: string;
@@ -182,7 +196,10 @@ export interface NetworkTopology {
   simulation_id: string;
   hub_agent_id: string;
   total_edges: number;
-  avg_degree: number;
+  avg_degree?: number;
+  density?: number;
+  clustering_coefficient?: number;
+  avg_betweenness_centrality?: number;
   edges: Array<{ from: string; to: string }>;
 }
 
@@ -300,6 +317,11 @@ interface PipelineState {
   setIngestionNodes: (nodes: IngestionNode[]) => void;
   updateIngestionNode: (nodeUpdate: Partial<IngestionNode> & { id: string }) => void;
 
+  // Live Knowledge Graph
+  kgNodes: KGNode[];
+  kgEdges: KGEdge[];
+  setKnowledgeGraph: (nodes: KGNode[], edges: KGEdge[]) => void;
+
   // Layer 3: Personas
   personas: SyntheticPersona[];
   setPersonas: (personas: SyntheticPersona[]) => void;
@@ -403,6 +425,16 @@ interface PipelineState {
   // Connection State
   isConnected: boolean;
   setConnected: (status: boolean) => void;
+  isBootstrapped: boolean;
+  setIsBootstrapped: (status: boolean) => void;
+  
+  // Session tracking
+  sessionId: string | null;
+  setSessionId: (id: string | null) => void;
+
+  // Upvoting state
+  upvotedItems: Record<string, number>;
+  upvoteItem: (id: string) => void;
 }
 
 export const usePipelineStore = create<PipelineState>((set) => ({
@@ -414,6 +446,11 @@ export const usePipelineStore = create<PipelineState>((set) => ({
       n.id === nodeUpdate.id ? { ...n, ...nodeUpdate } : n
     ),
   })),
+
+  // Live Knowledge Graph
+  kgNodes: [],
+  kgEdges: [],
+  setKnowledgeGraph: (nodes, edges) => set({ kgNodes: nodes, kgEdges: edges }),
 
   // Personas
   personas: [],
@@ -430,6 +467,7 @@ export const usePipelineStore = create<PipelineState>((set) => ({
   })),
   resetPipelineStages: () => set({
     pipelineStages: { layer1: 'waiting', layer3: 'waiting', layer5: 'waiting' },
+    pendingAction: null,
   }),
 
   pendingAction: null,
@@ -614,5 +652,22 @@ export const usePipelineStore = create<PipelineState>((set) => ({
 
   // Connection
   isConnected: false,
-  setConnected: (status) => set({ isConnected: status })
+  setConnected: (status) => set({ isConnected: status }),
+  isBootstrapped: false,
+  setIsBootstrapped: (status) => set({ isBootstrapped: status }),
+
+  sessionId: null,
+  setSessionId: (id) => set({ sessionId: id }),
+
+  // Upvoting state
+  upvotedItems: {},
+  upvoteItem: (id) => set((state) => {
+    const currentCount = state.upvotedItems[id] || 0;
+    return {
+      upvotedItems: {
+        ...state.upvotedItems,
+        [id]: currentCount + 1
+      }
+    };
+  })
 }));

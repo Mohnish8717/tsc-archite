@@ -1,7 +1,7 @@
 import React, { useRef, useMemo, useEffect } from 'react';
 import { Canvas, useFrame, useGraph } from '@react-three/fiber';
 import { PerspectiveCamera, Environment, OrbitControls, Html, useGLTF, useAnimations } from '@react-three/drei';
-import { EffectComposer, Bloom } from '@react-three/postprocessing';
+// SSAO removed — clean lighting is sufficient
 import * as THREE from 'three';
 import { SkeletonUtils } from 'three-stdlib';
 import { Cpu, ShieldAlert, Zap, AlertCircle, CheckCircle2, XCircle, MinusCircle, Brain, TrendingUp, TrendingDown } from 'lucide-react';
@@ -12,6 +12,27 @@ import { cleanPersonaName } from '../../utils/nameHelper';
 // Global store to prevent agents from overlapping at the same POI
 const occupiedPOIs = new Set<string>();
 const agentPositions: { [key: string]: THREE.Vector3 } = {}; // For dynamic collision repulsion
+const activeRoamers = new Set<string>(); // Global roamer slot system (max 3)
+
+// Exact coordinates from office.glb with manual NavMesh escape routes
+const BOARDROOM_POIS = [
+  { pos: new THREE.Vector3(-3.16, 0, -4.43), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -4.43), new THREE.Vector3(-1.8, 0, 0)] },
+  { pos: new THREE.Vector3(-3.71, 0, -2.86), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -2.86), new THREE.Vector3(-1.8, 0, 0)] },
+  { pos: new THREE.Vector3(1.08, 0, -1.23), type: 'desk', lookAt: new THREE.Vector3(1.61, 0, -1.05), safePath: [new THREE.Vector3(1.08, 0, 0)] },
+  { pos: new THREE.Vector3(1.57, 0, -3.68), type: 'desk', lookAt: new THREE.Vector3(1.39, 0, -3.15), safePath: [new THREE.Vector3(0.5, 0, -3.68), new THREE.Vector3(0.5, 0, 0)] },
+  { pos: new THREE.Vector3(3.35, 0, -3.68), type: 'desk', lookAt: new THREE.Vector3(3.16, 0, -3.15), safePath: [new THREE.Vector3(4.2, 0, -3.68), new THREE.Vector3(4.2, 0, 0)] },
+  { pos: new THREE.Vector3(3.10, 0, -1.27), type: 'desk', lookAt: new THREE.Vector3(2.57, 0, -1.45), safePath: [new THREE.Vector3(3.10, 0, 0)] },
+  { pos: new THREE.Vector3(-4.13, 0, 4.47), type: 'desk', lookAt: new THREE.Vector3(-3.50, 0, 4.47), safePath: [new THREE.Vector3(-2.0, 0, 4.47), new THREE.Vector3(-1.8, 0, 0)] },
+  { pos: new THREE.Vector3(-1.8, 0, 1.8), type: 'standing', lookAt: new THREE.Vector3(0, 0.5, 0), safePath: [] },
+  { pos: new THREE.Vector3(-3.6, 0, 0.9), type: 'sofa', lookAt: new THREE.Vector3(0, 0, 0.9), safePath: [new THREE.Vector3(-2.0, 0, 0.9), new THREE.Vector3(-1.8, 0, 0)] }, // Sofa Seat 1 (Aligned perfectly on sofa cushions)
+  { pos: new THREE.Vector3(-3.6, 0, 1.9), type: 'sofa', lookAt: new THREE.Vector3(0, 0, 1.9), safePath: [new THREE.Vector3(-2.0, 0, 1.9), new THREE.Vector3(-1.8, 0, 0)] }, // Sofa Seat 2 (Aligned perfectly on sofa cushions)
+
+  // 4 New Standing POIs to unlock movement (Total 14 POIs for 10 agents = 4 vacant slots always)
+  { pos: new THREE.Vector3(0.0, 0, 2.5), type: 'standing', lookAt: new THREE.Vector3(0, 0.5, 0), safePath: [] },
+  { pos: new THREE.Vector3(-2.0, 0, -1.0), type: 'standing', lookAt: new THREE.Vector3(0, 0.5, 0), safePath: [] },
+  { pos: new THREE.Vector3(2.0, 0, 2.0), type: 'standing', lookAt: new THREE.Vector3(-1.0, 0.5, 0), safePath: [] },
+  { pos: new THREE.Vector3(2.5, 0, 0.0), type: 'standing', lookAt: new THREE.Vector3(0, 0.5, 0), safePath: [] },
+];
 
 class BoardroomErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
   constructor(props: { children: React.ReactNode }) {
@@ -34,60 +55,171 @@ class BoardroomErrorBoundary extends React.Component<{ children: React.ReactNode
   }
 }
 
-function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: { position: [number, number, number], color: string, label: string, speaking: boolean, lookAt: [number, number, number] }) {
+function ImportedAgent({ startPos, targetPosProp, color, label, speaking }: { startPos: [number, number, number], targetPosProp: [number, number, number], color: string, label: string, speaking: boolean }) {
   const group = useRef<THREE.Group>(null);
   const { debateMessages } = usePipelineStore();
   const [currentPos, setCurrentPos] = React.useState(new THREE.Vector3(...startPos));
   const [targetPos, setTargetPos] = React.useState(new THREE.Vector3(...startPos));
   const [path, setPath] = React.useState<THREE.Vector3[]>([]);
   const [isMoving, setIsMoving] = React.useState(false);
-  const [isSitting, setIsSitting] = React.useState(false);
+
+  // Dynamic initial sitting state based on assigned starting POI type!
+  const startSitting = useMemo(() => {
+    const initialPoi = BOARDROOM_POIS.find(p => p.pos.distanceTo(new THREE.Vector3(...startPos)) < 0.1);
+    return initialPoi ? (initialPoi.type === 'chair' || initialPoi.type === 'desk' || initialPoi.type === 'sofa') : false;
+  }, [startPos]);
+
+  const [isSitting, setIsSitting] = React.useState(startSitting);
   const [idleAnim, setIdleAnim] = React.useState('Idle');
   const [sitAnim, setSitAnim] = React.useState('Sit_Idle');
 
-  // Claim initial position on mount
+  // Sync positions dynamically when targetPosProp updates from the centralized scheduler
+  useEffect(() => {
+    const newTarget = new THREE.Vector3(...targetPosProp);
+    setTargetPos(newTarget);
+    setIsSitting(false); // Stand up to move
+  }, [targetPosProp]);
+
+  // Sync spawn position if startPos changes (e.g. after initial sofa POI resolution)
+  useEffect(() => {
+    const newPos = new THREE.Vector3(...startPos);
+    setCurrentPos(newPos);
+    if (group.current) group.current.position.copy(newPos);
+  }, [startPos]);
+
+  // Claim initial starting position on mount
   useEffect(() => {
     const key = new THREE.Vector3(...startPos).toArray().join(',');
     occupiedPOIs.add(key);
-    return () => { occupiedPOIs.delete(key); };
-  }, [startPos]);
+    return () => {
+      occupiedPOIs.delete(key);
+      activeRoamers.delete(label);
+    };
+  }, [startPos, label]);
 
   // Load the character model
   const { scene, animations } = useGLTF('/models/character.glb');
 
   const clone = useMemo(() => {
     const clonedScene = SkeletonUtils.clone(scene);
+
+    // Hash for deterministic accessories based on label
+    let hash = 0;
+    for (let i = 0; i < label.length; i++) hash += label.charCodeAt(i);
+    const accessoryType = hash % 3; // 0 = none, 1 = cap, 2 = headphones
+
     clonedScene.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const mesh = child as THREE.Mesh;
-        mesh.material = (mesh.material as THREE.Material).clone();
-        if (mesh.name.toLowerCase().includes('body')) {
-          (mesh.material as THREE.MeshStandardMaterial).color.set(color);
-          (mesh.material as THREE.MeshStandardMaterial).roughness = 1.0;
-          (mesh.material as THREE.MeshStandardMaterial).metalness = 0.0;
-        } else if (mesh.name.toLowerCase().includes('cap') || mesh.name.toLowerCase().includes('headphones')) {
-          mesh.visible = false;
+        const oldMat = mesh.material as THREE.MeshStandardMaterial;
+
+        // Clean satin vinyl — no outlines, no glow, shape speaks for itself
+        const newMat = new THREE.MeshStandardMaterial({
+          color: oldMat?.color,
+          map: oldMat?.map,
+          roughness: 0.28,
+          metalness: 0.18
+        });
+        mesh.material = newMat;
+
+        const nameLower = mesh.name.toLowerCase();
+        if (nameLower.includes('body') || nameLower.includes('skin') || nameLower.includes('torso') || nameLower.includes('arm') || nameLower.includes('leg')) {
+          newMat.color.set('#ECEEF0'); // Soft warm white
+          newMat.roughness = 0.55;  // Matte-satin, zero metalness = no glow
+          newMat.metalness = 0.0;
+        } else if (nameLower.includes('cap')) {
+          mesh.visible = accessoryType === 1;
+          newMat.color.set(color);
+          newMat.roughness = 0.6;
+          newMat.metalness = 0.0;
+        } else if (nameLower.includes('headphones')) {
+          mesh.visible = accessoryType === 2;
+          newMat.color.set(color);
+          newMat.roughness = 0.4;
+          newMat.metalness = 0.3; // Slight sheen only on headphones
         }
+
         mesh.castShadow = true;
         mesh.receiveShadow = true;
       }
     });
+
+    // Fix accessory rigging: attach them to the head bone so they move correctly
+    const headBone = clonedScene.getObjectByName('head');
+    const spineBone = clonedScene.getObjectByName('spine');
+
+    if (headBone) {
+      const capMesh = clonedScene.getObjectByName('cap');
+      const hpMesh = clonedScene.getObjectByName('headphones');
+      if (capMesh) headBone.attach(capMesh);
+      if (hpMesh) headBone.attach(hpMesh);
+
+      // Procedural Detailing: Stylish Glasses
+      if (hash % 4 === 0) {
+        const glasses = new THREE.Group();
+        const lensMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.1, metalness: 0.8 });
+        const lensGeom = new THREE.BoxGeometry(0.12, 0.05, 0.02);
+        const lLens = new THREE.Mesh(lensGeom, lensMat); lLens.position.set(-0.07, 0, 0);
+        const rLens = new THREE.Mesh(lensGeom, lensMat); rLens.position.set(0.07, 0, 0);
+        const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.01, 0.01), lensMat);
+        glasses.add(lLens, rLens, bridge);
+        glasses.position.set(0, 0.1, 0.12); // Approximate face offset
+        headBone.add(glasses);
+      }
+
+      // Procedural Detailing: Neo-Brutalist Halo
+      if (hash % 4 === 1) {
+        const halo = new THREE.Mesh(
+          new THREE.TorusGeometry(0.15, 0.02, 8, 8),
+          new THREE.MeshBasicMaterial({ color: color, wireframe: true })
+        );
+        halo.position.set(0, 0.3, 0);
+        halo.rotation.x = Math.PI / 2;
+        headBone.add(halo);
+      }
+    }
+
+    if (spineBone) {
+      // Procedural Detailing: Bowtie
+      if (hash % 4 === 2) {
+        const bowtie = new THREE.Group();
+        const tieMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.8 });
+        const tieGeom = new THREE.ConeGeometry(0.05, 0.08, 3);
+        const lTie = new THREE.Mesh(tieGeom, tieMat); lTie.rotation.z = Math.PI / 2; lTie.position.set(-0.04, 0, 0);
+        const rTie = new THREE.Mesh(tieGeom, tieMat); rTie.rotation.z = -Math.PI / 2; rTie.position.set(0.04, 0, 0);
+        const knot = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.04), tieMat);
+        bowtie.add(lTie, rTie, knot);
+        bowtie.position.set(0, 0.15, 0.12); // Approximate chest offset
+        spineBone.add(bowtie);
+      }
+
+      // Procedural Detailing: Brutalist Chest Plate / Badge
+      if (hash % 4 === 3) {
+        const badge = new THREE.Mesh(
+          new THREE.OctahedronGeometry(0.06),
+          new THREE.MeshStandardMaterial({ color: color, flatShading: true })
+        );
+        badge.position.set(0, 0.1, 0.15); // Approximate chest offset
+        spineBone.add(badge);
+      }
+    }
+
     return clonedScene;
-  }, [scene, color]);
+  }, [scene, color, label]);
 
   const { actions } = useAnimations(animations, group);
 
   // Exact coordinates from office.glb with manual NavMesh escape routes
   const POIS = useMemo(() => {
     const rawPOIs = [
-      { pos: new THREE.Vector3(-3.16, 0, -4.43), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -4.43), new THREE.Vector3(-2.0, 0, 0)] },
-      { pos: new THREE.Vector3(-3.71, 0, -2.86), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -2.86), new THREE.Vector3(-2.0, 0, 0)] },
+      { pos: new THREE.Vector3(-3.16, 0, -4.43), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -4.43), new THREE.Vector3(-1.8, 0, 0)] },
+      { pos: new THREE.Vector3(-3.71, 0, -2.86), type: 'chair', lookAt: new THREE.Vector3(-2.96, 0, -3.45), safePath: [new THREE.Vector3(-2.0, 0, -2.86), new THREE.Vector3(-1.8, 0, 0)] },
       { pos: new THREE.Vector3(1.08, 0, -1.23), type: 'desk', lookAt: new THREE.Vector3(1.61, 0, -1.05), safePath: [new THREE.Vector3(1.08, 0, 0)] },
       { pos: new THREE.Vector3(1.57, 0, -3.68), type: 'desk', lookAt: new THREE.Vector3(1.39, 0, -3.15), safePath: [new THREE.Vector3(0.5, 0, -3.68), new THREE.Vector3(0.5, 0, 0)] },
       { pos: new THREE.Vector3(3.35, 0, -3.68), type: 'desk', lookAt: new THREE.Vector3(3.16, 0, -3.15), safePath: [new THREE.Vector3(4.2, 0, -3.68), new THREE.Vector3(4.2, 0, 0)] },
       { pos: new THREE.Vector3(3.10, 0, -1.27), type: 'desk', lookAt: new THREE.Vector3(2.57, 0, -1.45), safePath: [new THREE.Vector3(3.10, 0, 0)] },
-      { pos: new THREE.Vector3(-4.13, 0, 4.47), type: 'desk', lookAt: new THREE.Vector3(-3.50, 0, 4.47), safePath: [new THREE.Vector3(-2.0, 0, 4.47), new THREE.Vector3(-2.0, 0, 0)] },
-      { pos: new THREE.Vector3(0, 0, 0), type: 'standing', lookAt: new THREE.Vector3(0, 0, 1), safePath: [] },
+      { pos: new THREE.Vector3(-4.13, 0, 4.47), type: 'desk', lookAt: new THREE.Vector3(-3.50, 0, 4.47), safePath: [new THREE.Vector3(-2.0, 0, 4.47), new THREE.Vector3(-1.8, 0, 0)] },
+      { pos: new THREE.Vector3(-1.8, 0, 1.8), type: 'standing', lookAt: new THREE.Vector3(0, 0.5, 0), safePath: [] }, // Moved from (0,0,0) to open lounge walkway
     ];
 
     const DESK_PULLBACK = 0.1;
@@ -103,13 +235,13 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
 
   // Compute full obstacle-free path when target changes
   useEffect(() => {
-    const startPoi = POIS.find(p => p.pos.distanceTo(currentPos) < 0.1);
-    const endPoi = POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
+    const startPoi = BOARDROOM_POIS.find(p => p.pos.distanceTo(currentPos) < 0.1);
+    const endPoi = BOARDROOM_POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
 
     if (startPoi && endPoi && startPoi !== endPoi && currentPos.distanceTo(targetPos) > 2.0) {
       const fullPath = [
         ...startPoi.safePath,
-        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(-1.8, 0, 0), // Use wide open walkway side corridor instead of centerpiece
         ...[...endPoi.safePath].reverse(),
         endPoi.pos
       ];
@@ -117,7 +249,7 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
     } else {
       setPath([targetPos]);
     }
-  }, [targetPos, POIS]);
+  }, [targetPos, currentPos]);
 
   // Movement Logic
   useFrame((state, delta) => {
@@ -175,6 +307,11 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
         group.current.quaternion.slerp(targetRotation, 0.15);
         const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(group.current.quaternion);
         currentPos.add(forward.multiplyScalar(delta * 1.8)); // Slightly faster walk
+
+        // Strict boundary clamp to prevent agents from ever crossing the room borders / void
+        currentPos.x = THREE.MathUtils.clamp(currentPos.x, -4.5, 4.3);
+        currentPos.z = THREE.MathUtils.clamp(currentPos.z, -4.9, 4.9);
+
         group.current.position.copy(currentPos);
       }
     } else {
@@ -186,7 +323,7 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
         // Snap to exact final position to avoid clipping
         currentPos.copy(targetPos);
 
-        const atPoi = POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
+        const atPoi = BOARDROOM_POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
         if (group.current) {
           group.current.position.copy(currentPos);
 
@@ -203,35 +340,16 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
         }
 
         if (atPoi && !isSitting) {
-          if (atPoi.type === 'chair' || atPoi.type === 'desk') {
+          if (atPoi.type === 'chair' || atPoi.type === 'desk' || atPoi.type === 'sofa') {
             setIsSitting(true);
+            activeRoamers.delete(label); // Arrived! Release our roaming slot
           }
         }
       }
     }
   });
 
-  // Intentional movement decisions (Context-aware)
-  useEffect(() => {
-    if (speaking) return;
-    const interval = setInterval(() => {
-      // 30% chance to move to a new POI every 5 seconds to keep the room dynamic
-      if (Math.random() < 0.30) {
-        const currentKey = targetPos.toArray().join(',');
-        const availablePOIs = POIS.filter(p => !occupiedPOIs.has(p.pos.toArray().join(',')));
-
-        if (availablePOIs.length > 0) {
-          const nextPoi = availablePOIs[Math.floor(Math.random() * availablePOIs.length)];
-          const nextKey = nextPoi.pos.toArray().join(',');
-
-          occupiedPOIs.delete(currentKey);
-          occupiedPOIs.add(nextKey);
-          setTargetPos(nextPoi.pos);
-        }
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [speaking, POIS, targetPos]);
+  // Centralized scheduler manages movement triggers now
 
   // Determine meaning-driven animations based on context
   const { activeSpeaker } = usePipelineStore();
@@ -239,21 +357,16 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
 
   useEffect(() => {
     // Evaluate context based on targetPos (which is reactive) instead of currentPos
-    const atPoi = POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
+    const atPoi = BOARDROOM_POIS.find(p => p.pos.distanceTo(targetPos) < 0.1);
 
-    if (atPoi?.type === 'desk') {
-      // The Sit_Work animation is actually a standing animation with a clipboard,
-      // and 'Sit' is a bouncing animation. The only valid sitting animation is 'Sit_Idle'.
+    if (atPoi?.type === 'desk' || atPoi?.type === 'chair' || atPoi?.type === 'sofa') {
       setSitAnim('Sit_Idle');
     } else {
-      // Cafe chairs are just idle
       setSitAnim('Sit_Idle');
     }
 
-    // The 'Listen' animation in this model looks too much like 'Happy' / bouncing.
-    // Default to 'Idle' for a more professional boardroom stance.
     setIdleAnim('Idle');
-  }, [targetPos, POIS, isSomeoneElseSpeaking]);
+  }, [targetPos, isSomeoneElseSpeaking]);
 
   const lastMessage = useMemo(() => {
     return debateMessages.filter(m => m.sender === label).pop()?.text || "...";
@@ -316,48 +429,223 @@ function ImportedAgent({ position: startPos, color, label, speaking, lookAt }: {
         </Html>
       )}
 
-      {/* Active Speaker Ring */}
+      {/* Active Speaker Ring (Neo-brutalist octagon) */}
       {speaking && (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, 0]}>
-          <ringGeometry args={[0.7, 0.9, 32]} />
-          <meshBasicMaterial color={color} transparent opacity={0.8} />
+          <ringGeometry args={[0.7, 0.9, 8]} />
+          <meshBasicMaterial color={color} />
         </mesh>
       )}
     </group>
   );
 }
 
-function ImportedOffice() {
+function ImportedOffice({ onLoad }: { onLoad: () => void }) {
   const { scene } = useGLTF('/models/office.glb');
+
+  useEffect(() => {
+    let sofaMesh: THREE.Mesh | null = null;
+    scene.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh && child.name.toLowerCase().includes('sofa')) {
+        sofaMesh = child as THREE.Mesh;
+      }
+    });
+
+    if (sofaMesh) {
+      const mesh = sofaMesh as THREE.Mesh;
+
+      // 1. Get world position and rotation of the physical sofa mesh
+      const worldPos = new THREE.Vector3();
+      mesh.getWorldPosition(worldPos);
+      const worldQuat = new THREE.Quaternion();
+      mesh.getWorldQuaternion(worldQuat);
+
+      // 2. Compute local bounding box to find the exact dimensions
+      mesh.geometry.computeBoundingBox();
+      const bbox = mesh.geometry.boundingBox;
+      if (bbox) {
+        const localSize = new THREE.Vector3();
+        bbox.getSize(localSize);
+
+        // Scale dimensions based on mesh scale
+        const scale = mesh.scale;
+        localSize.x *= scale.x;
+        localSize.y *= scale.y;
+        localSize.z *= scale.z;
+
+        // 3. Find seating axis (typically Z axis for sofa in this model)
+        const isZAward = localSize.z > localSize.x;
+        const longAxisLen = isZAward ? localSize.z : localSize.x;
+
+        // Distribute 2 seats on the left and right cushions along the long axis
+        const offset = longAxisLen * 0.22;
+        const seatOffset1 = isZAward ? new THREE.Vector3(0, 0.45, -offset) : new THREE.Vector3(-offset, 0.45, 0);
+        const seatOffset2 = isZAward ? new THREE.Vector3(0, 0.45, offset) : new THREE.Vector3(offset, 0.45, 0);
+
+        // 4. Transform local seat positions to world coordinates
+        const worldSeat1 = seatOffset1.clone().applyQuaternion(worldQuat).add(worldPos);
+        const worldSeat2 = seatOffset2.clone().applyQuaternion(worldQuat).add(worldPos);
+
+        // 5. Determine the sofa's natural world forward direction (perpendicular to backrest)
+        const localForward = isZAward ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+        const worldForward = localForward.clone().applyQuaternion(worldQuat).normalize();
+
+        // Ensure worldForward points INTO the room (towards center corridor) rather than into the wall
+        const toCenter = new THREE.Vector3(0, worldPos.y, worldPos.z).sub(worldPos).normalize();
+        if (worldForward.dot(toCenter) < 0) {
+          worldForward.negate();
+        }
+
+        // 6. Push the seats forward along the worldForward direction to sit on cushions instead of clipping the backrest
+        const CUSHION_PULLFORWARD = 0.22; // Shift 0.22 units forward from backrest centerline
+        worldSeat1.addScaledVector(worldForward, CUSHION_PULLFORWARD);
+        worldSeat2.addScaledVector(worldForward, CUSHION_PULLFORWARD);
+
+        // Ground level for characters is Y=0
+        worldSeat1.y = 0;
+        worldSeat2.y = 0;
+
+        // 7. Calculate perfect lookAt targets directly along the worldForward seating direction
+        const lookAt1 = worldSeat1.clone().addScaledVector(worldForward, 2.0);
+        const lookAt2 = worldSeat2.clone().addScaledVector(worldForward, 2.0);
+
+        // 8. Mutate global BOARDROOM_POIS entries dynamically
+        const sofaPOIs = BOARDROOM_POIS.filter(p => p.type === 'sofa');
+        if (sofaPOIs[0]) {
+          sofaPOIs[0].pos.copy(worldSeat1);
+          sofaPOIs[0].lookAt.copy(lookAt1);
+          sofaPOIs[0].safePath = [
+            worldSeat1.clone().addScaledVector(worldForward, 1.2),
+            new THREE.Vector3(-1.8, 0, 0)
+          ];
+        }
+        if (sofaPOIs[1]) {
+          sofaPOIs[1].pos.copy(worldSeat2);
+          sofaPOIs[1].lookAt.copy(lookAt2);
+          sofaPOIs[1].safePath = [
+            worldSeat2.clone().addScaledVector(worldForward, 1.2),
+            new THREE.Vector3(-1.8, 0, 0)
+          ];
+        }
+
+        console.log("DYNAMIC SOFA SEATING POIS INITIALIZED:", {
+          sofaPos: worldPos,
+          seat1: worldSeat1,
+          lookAt1: lookAt1,
+          seat2: worldSeat2,
+          lookAt2: lookAt2
+        });
+
+        // Trigger reactive update of executive positions
+        onLoad();
+      }
+    }
+  }, [scene, onLoad]);
 
   const clone = useMemo(() => {
     const clonedScene = scene.clone();
+    const meshesToOutline: THREE.Mesh[] = [];
+
     clonedScene.traverse((child) => {
+      // Skip outline meshes we've already injected (prevents infinite recursion)
+      if (child.userData.isOutline) return;
       if ((child as THREE.Mesh).isMesh) {
         child.receiveShadow = true;
         child.castShadow = true;
-        const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
-        if (mat) {
+        const oldMat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+        if (oldMat) {
+          const mat = oldMat.clone();
+          (child as THREE.Mesh).material = mat;
+
           if (mat.emissive) mat.emissiveIntensity = 0;
           mat.roughness = 0.6;
           mat.metalness = 0.1;
 
           const nodeName = child.name.toLowerCase();
 
-          if (nodeName.includes('chair') || nodeName.includes('seat')) {
-            mat.color.set('#34495e');
-          } else if (nodeName.includes('floor')) {
-            mat.color.set('#2c3e50');
-          } else if (nodeName.includes('wall')) {
-            mat.color.set('#f5f5f5');
-          } else if (nodeName.includes('table') || nodeName.includes('desk')) {
-            mat.color.set('#2c3e50');
-          } else if (nodeName.includes('cupboard') || nodeName.includes('cabinet') || nodeName.includes('shelf') || nodeName.includes('wood')) {
-            mat.color.set('#5d4037');
+          // Refined Sleek Room Palette for High Contrast
+          // High-End Retro-Tech & Mid-Century Designer Studio Palette
+          const isPot = nodeName.includes('pot') || nodeName.includes('planter') || nodeName.includes('base') || nodeName.includes('vase');
+          const isScreen = nodeName.includes('screen') || nodeName.includes('display') || nodeName.includes('glass');
+          const isBox = nodeName.includes('box') || nodeName.includes('crate') || nodeName.includes('case') || nodeName.includes('pack') || nodeName.includes('container');
+
+          if (nodeName.includes('plant')) {
+            if (isPot) {
+              mat.color.set('#D37257'); // Classic warm terracotta clay pot
+              mat.roughness = 0.8;
+              mat.metalness = 0.0;
+            } else {
+              mat.color.set('#428C64'); // Lighter, vibrant natural leaf green
+              mat.roughness = 0.65;
+              mat.metalness = 0.08;
+            }
+          } else if (nodeName.includes('floor') || nodeName.includes('border')) {
+            mat.color.set('#3E4249'); // Mid-tone space-grey concrete floor
+            mat.roughness = 0.85;
+          } else if (nodeName.includes('desk') || nodeName.includes('counter')) {
+            mat.color.set('#C69A75'); // Warm Scandinavian Beech/Oak wood top for working desks
+            mat.roughness = 0.6;
+            mat.metalness = 0.0;
+          } else if (nodeName.includes('table')) {
+            mat.color.set('#9CA0A8'); // Raw Brutalist Concrete (béton brut) for the round table
+            mat.roughness = 0.9; // Coarse, raw matte stone texture
+            mat.metalness = 0.0;
+          } else if (nodeName.includes('sofa')) {
+            mat.color.set('#E2A746'); // Iconic mid-century Mustard Yellow bouclé fabric
+            mat.roughness = 0.85;
+            mat.metalness = 0.0;
+          } else if (nodeName.includes('chair')) {
+            mat.color.set('#4A607A'); // Dusty Denim / Indigo Blue upholstery
+            mat.roughness = 0.75;
+            mat.metalness = 0.05;
+          } else if (nodeName.includes('cabinet') || nodeName.includes('shelf') || nodeName.includes('rack')) {
+            mat.color.set('#E5E2DA'); // Minimalist off-white/cream metal frame (high-end designer shelving)
+            mat.roughness = 0.65;
+            mat.metalness = 0.1;
+          } else if (isBox) {
+            mat.color.set('#C69A75'); // Warm honey-oak craft drawers/boxes inside the shelving unit
+            mat.roughness = 0.55;
+            mat.metalness = 0.0;
+          } else if (nodeName.includes('flexo') || nodeName.includes('lamp')) {
+            mat.color.set('#E63946'); // Classic Bauhaus Orange-Red designer accent lamp
+            mat.roughness = 0.3;
+            mat.metalness = 0.2;
+          } else if (nodeName.includes('pc') || nodeName.includes('laptop')) {
+            if (isScreen) {
+              mat.color.set('#1A1D20'); // Dark off-state terminal screen
+              mat.roughness = 0.2;
+              mat.metalness = 0.8;
+            } else {
+              mat.color.set('#E1DDD5'); // Retro Macintosh-style Warm Beige/Cream plastic body
+              mat.roughness = 0.45;
+              mat.metalness = 0.05;
+            }
+          } else if (nodeName.includes('board')) {
+            mat.color.set('#ECEEF0'); // Whiteboard surface
+            mat.roughness = 0.15;
+          } else {
+            mat.color.set('#2C3038'); // Slate fallback
+            mat.roughness = 0.9;
           }
+
+          meshesToOutline.push(child as THREE.Mesh);
         }
       }
     });
+
+    // Add outline wireframes after traverse completes to prevent infinite recursion crash!
+    const wireMat = new THREE.MeshBasicMaterial({
+      color: '#121418',
+      wireframe: true,
+      transparent: true,
+      opacity: 0.18
+    });
+    meshesToOutline.forEach((mesh) => {
+      const wireMesh = new THREE.Mesh(mesh.geometry, wireMat);
+      wireMesh.userData.isOutline = true; // Tag so traversal always skips it
+      mesh.add(wireMesh);
+    });
+
     return clonedScene;
   }, [scene]);
 
@@ -366,8 +654,118 @@ function ImportedOffice() {
   );
 }
 
+function BrutalistCenterpiece() {
+  const innerOrbRef = useRef<THREE.Mesh>(null);
+  const ringXRef = useRef<THREE.Mesh>(null);
+  const ringYRef = useRef<THREE.Mesh>(null);
+  const ringZRef = useRef<THREE.Mesh>(null);
+
+  useFrame((state) => {
+    const elapsed = state.clock.getElapsedTime();
+
+    // Smooth floating/hovering animation for the central core orb
+    if (innerOrbRef.current) {
+      innerOrbRef.current.position.y = 1.1 + Math.sin(elapsed * 2) * 0.05;
+      innerOrbRef.current.rotation.y = elapsed * 0.5;
+    }
+
+    // Mesmerizing counter-rotations on different axes for the gimbal rings
+    if (ringXRef.current) {
+      ringXRef.current.rotation.x = elapsed * 0.4;
+      ringXRef.current.rotation.y = elapsed * 0.1;
+    }
+    if (ringYRef.current) {
+      ringYRef.current.rotation.y = -elapsed * 0.3;
+      ringYRef.current.rotation.z = elapsed * 0.15;
+    }
+    if (ringZRef.current) {
+      ringZRef.current.rotation.z = elapsed * 0.6;
+      ringZRef.current.rotation.x = -elapsed * 0.2;
+    }
+  });
+
+  return (
+    <group>
+      {/* 1. Heavy Industrial Pedestal (anchored to the boardroom desk center) */}
+      <mesh position={[0, 0.4, 0]}>
+        <cylinderGeometry args={[0.3, 0.35, 0.8, 16]} />
+        <meshStandardMaterial color="#1A1C22" roughness={0.75} metalness={0.4} />
+      </mesh>
+      {/* Metallic highlight collar */}
+      <mesh position={[0, 0.8, 0]}>
+        <torusGeometry args={[0.28, 0.03, 8, 24]} />
+        <meshStandardMaterial color="#8C97A5" roughness={0.2} metalness={0.8} />
+      </mesh>
+
+      {/* 2. Floating Gyroscopic Gimbal Assemblies */}
+      <group position={[0, 1.1, 0]}>
+        {/* Central Core: Hovering, Highly Polished Titanium/Chrome Orb representing the AI consensus mind */}
+        <mesh ref={innerOrbRef}>
+          <sphereGeometry args={[0.18, 32, 32]} />
+          <meshStandardMaterial color="#A5B4FC" roughness={0.08} metalness={0.9} />
+        </mesh>
+
+        {/* Inner Ring (X-Axis) - Anodized Bronze/Copper */}
+        <mesh ref={ringXRef}>
+          <torusGeometry args={[0.35, 0.02, 8, 32]} />
+          <meshStandardMaterial color="#C69A75" roughness={0.3} metalness={0.7} />
+        </mesh>
+
+        {/* Middle Ring (Y-Axis) - Polished Gunmetal/Titanium */}
+        <mesh ref={ringYRef}>
+          <torusGeometry args={[0.46, 0.02, 8, 32]} />
+          <meshStandardMaterial color="#8C97A5" roughness={0.15} metalness={0.85} />
+        </mesh>
+
+        {/* Outer Ring (Z-Axis) - Matte Dark Charcoal Iron */}
+        <mesh ref={ringZRef}>
+          <torusGeometry args={[0.57, 0.015, 8, 32]} />
+          <meshStandardMaterial color="#24272E" roughness={0.6} metalness={0.2} />
+        </mesh>
+      </group>
+    </group>
+  );
+}
+
 function Boardroom3D() {
   const { personas, spawnedAgents, activeSpeaker } = usePipelineStore();
+  const [poisLoaded, setPoisLoaded] = React.useState(false);
+  const [assignments, setAssignments] = React.useState<number[]>(() => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const [activeRoamerIdx, setActiveRoamerIdx] = React.useState<number>(0);
+
+  // Centralized Roaming Coordinator (Token Rotation Protocol)
+  // Ensures exactly one agent stands up and walks to a new spot every 20 seconds, cycling through all agents sequentially!
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Pause roaming rotation if someone is speaking to keep focus on debate
+      if (activeSpeaker !== null) return;
+
+      const nextRoamerIdx = (activeRoamerIdx + 1) % 10;
+      setActiveRoamerIdx(nextRoamerIdx);
+
+      setAssignments((prev) => {
+        const next = [...prev];
+        const occupied = new Set(next);
+        
+        // Find all currently unoccupied POIs (including seats and standing spots)
+        const vacantIndices: number[] = [];
+        for (let i = 0; i < BOARDROOM_POIS.length; i++) {
+          if (!occupied.has(i)) {
+            vacantIndices.push(i);
+          }
+        }
+
+        if (vacantIndices.length > 0) {
+          // Relocate the active roamer to a random vacant POI, freeing up their old position
+          const randomVacant = vacantIndices[Math.floor(Math.random() * vacantIndices.length)];
+          next[nextRoamerIdx] = randomVacant;
+        }
+        return next;
+      });
+    }, 20000); // 20-second dynamic rotation interval
+
+    return () => clearInterval(interval);
+  }, [activeRoamerIdx, activeSpeaker]);
 
   const dynamicPersonas = useMemo(() => {
     const list = [
@@ -384,51 +782,48 @@ function Boardroom3D() {
     ];
 
     const colors = [
-      '#FF4500', // CEO
-      '#3B82F6', // CTO
-      '#8B5CF6', // CISO
-      '#EC4899', // CMO
-      '#10B981', // CFO
-      '#F59E0B', // CPO
-      '#F97316', // Legal
-      '#14B8A6', // Data
-      '#6366F1', // Sales
-      '#A855F7', // CS
+      '#D1493E', // CEO (Bauhaus Matte Red accent)
+      '#3A6D8C', // CTO (Anodized Steel Blue)
+      '#2A2E35', // CISO (Stealth Tactical Charcoal)
+      '#D4A373', // CMO (Warm Sand / Terracotta)
+      '#4E6B5A', // CFO (Functional Sage/Olive)
+      '#E07A5F', // CPO (Caution/Safety Orange)
+      '#D9A05B', // Legal (Structured Mustard Ochre)
+      '#527A8C', // Data (Cobalt Grey-Blue)
+      '#6F5E76', // Sales (Muted Slate Plum)
+      '#8A9A86', // CS (Eucalyptus Sage Green)
     ];
 
-    const startPositions: [number, number, number][] = [
-      [1.5, 0, 1.5],
-      [-2, 0, 2.5],
-      [-2.5, 0, -1],
-      [0.5, 0, -2],
-      [2.5, 0, -1.5],
-      [-1.5, 0, 1.0],
-      [1.0, 0, -1.0],
-      [-0.5, 0, 2.0],
-      [2.0, 0, 0.5],
-      [-2.0, 0, -2.0],
-    ];
+    const startPositions = BOARDROOM_POIS.map(p => p.pos.toArray() as [number, number, number]);
 
-    return list.map((p, index) => ({
-      ...p,
-      color: colors[index % colors.length],
-      position: startPositions[index % startPositions.length],
-    }));
-  }, []);
+    return list.map((p, index) => {
+      const assignedPoiIdx = assignments[index] !== undefined ? assignments[index] : index;
+      const targetPos = BOARDROOM_POIS[assignedPoiIdx].pos.toArray() as [number, number, number];
+      
+      return {
+        ...p,
+        color: colors[index % colors.length],
+        startPosition: startPositions[index],
+        targetPosition: targetPos,
+      };
+    });
+  }, [poisLoaded, assignments]);
 
   return (
-    <div className="w-full h-full relative bg-black">
+    <div className="w-full h-full relative bg-[#1F232B]">
       <Canvas shadows dpr={[1, 2]}>
+        <color attach="background" args={['#1F232B']} />
         {/* Isometric-style perspective */}
         <PerspectiveCamera makeDefault position={[8, 8, 8]} fov={35} />
         <OrbitControls enablePan={false} maxPolarAngle={Math.PI / 2.2} minPolarAngle={0.1} />
 
-        {/* Bright, clean lighting to match "The Delegation" aesthetic on the 3D models */}
-        <ambientLight intensity={0.7} />
+        {/* Dramatic cinematic lighting setup */}
+        <ambientLight intensity={0.6} />
         <directionalLight
           position={[10, 20, 10]}
-          intensity={1.0}
+          intensity={1.5}
           castShadow
+          shadow-bias={-0.0005}
           shadow-mapSize={[2048, 2048]}
           shadow-camera-far={50}
           shadow-camera-left={-10}
@@ -436,37 +831,33 @@ function Boardroom3D() {
           shadow-camera-top={10}
           shadow-camera-bottom={-10}
         />
-        <pointLight position={[0, 5, 0]} intensity={0.5} color="#ffffff" />
+        {/* Rich warm accent fills and steel blue highlights */}
+        <pointLight position={[-6, 4, -6]} intensity={0.6} color="#FF9E59" />
+        <pointLight position={[6, 3, -4]} intensity={0.4} color="#5C9DFF" />
 
-        <Environment preset="city" />
+        {/* Atmospheric depth fog - fades smoothly into the medium-dark background */}
+        <fog attach="fog" args={['#1F232B', 22, 45]} />
+
 
         <group position={[0, 0, 0]}>
-          <ImportedOffice />
+          <ImportedOffice onLoad={() => setPoisLoaded(true)} />
+          {/* Tactical Retro-Tech Floor Grid - extremely subtle to blend into the floor */}
+          <gridHelper args={[20, 20, '#374151', '#111827']} position={[0, 0.01, 0]} />
+
           {dynamicPersonas.map((exec) => (
             <ImportedAgent
               key={exec.id}
               label={exec.name}
-              position={exec.position as [number, number, number]}
+              startPos={exec.startPosition}
+              targetPosProp={exec.targetPosition}
               color={exec.color}
               speaking={activeSpeaker === exec.id}
-              lookAt={[0, 0.5, 0]}
             />
           ))}
-          {/* Holographic Centerpiece */}
-          <mesh position={[0, 1.0, 0]}>
-            <sphereGeometry args={[0.3, 32, 32]} />
-            <meshPhysicalMaterial
-              color="#FF4500"
-              wireframe
-              emissive="#FF4500"
-              emissiveIntensity={2}
-            />
-          </mesh>
-        </group>
 
-        <EffectComposer disableNormalPass>
-          <Bloom luminanceThreshold={0.9} luminanceSmoothing={0.9} height={300} intensity={0.15} />
-        </EffectComposer>
+          {/* Animated Cybernetic Centerpiece */}
+          <BrutalistCenterpiece />
+        </group>
       </Canvas>
     </div>
   );
@@ -478,8 +869,8 @@ function DebateChat() {
   const verdictColor = consensusResult?.overall_verdict === 'APPROVE'
     ? { bg: 'bg-green-500', text: 'text-green-600', border: 'border-green-500' }
     : consensusResult?.overall_verdict === 'REJECT'
-    ? { bg: 'bg-red-500', text: 'text-red-600', border: 'border-red-500' }
-    : { bg: 'bg-yellow-400', text: 'text-yellow-600', border: 'border-yellow-400' };
+      ? { bg: 'bg-red-500', text: 'text-red-600', border: 'border-red-500' }
+      : { bg: 'bg-yellow-400', text: 'text-yellow-600', border: 'border-yellow-400' };
 
   return (
     <div className="w-full h-full flex flex-col bg-white border-l-8 border-black font-mono">
@@ -499,8 +890,8 @@ function DebateChat() {
             {consensusResult.overall_verdict === 'APPROVE'
               ? <CheckCircle2 className="w-5 h-5 text-white" strokeWidth={3} />
               : consensusResult.overall_verdict === 'REJECT'
-              ? <XCircle className="w-5 h-5 text-white" strokeWidth={3} />
-              : <MinusCircle className="w-5 h-5 text-white" strokeWidth={3} />}
+                ? <XCircle className="w-5 h-5 text-white" strokeWidth={3} />
+                : <MinusCircle className="w-5 h-5 text-white" strokeWidth={3} />}
             <span className="font-black text-sm uppercase text-white tracking-widest flex-1">
               Boardroom Consensus: {consensusResult.overall_verdict}
             </span>
@@ -604,7 +995,7 @@ export default function BoardroomDebate() {
           <span className={`w-2 h-2 ${isConnected ? 'bg-[#FF4500] animate-pulse' : 'bg-black opacity-20'}`} />
           {isConnected ? 'Hindsight Link Active' : 'Bridge Offline'}
         </div>
-        
+
         {/* Feature Discovery Banner */}
         {simulationConfig?.feature_title && (
           <div className="absolute bottom-4 left-4 max-w-lg border-4 border-black bg-white shadow-neo-black p-4 font-mono pointer-events-none">

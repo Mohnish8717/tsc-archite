@@ -202,25 +202,58 @@ def patch_openai_globally() -> None:
             model = kwargs.get("model", "")
             base_url = str(getattr(self._client, "base_url", ""))
             is_gemini = "generativelanguage" in base_url or "gemini" in model.lower() or "gemma" in model.lower()
+            is_nvidia = "nvidia" in base_url or os.getenv("TSC_LLM_PROVIDER") == "nvidia"
             
             if is_gemini:
-                # Synchronous request rate limiting for Gemini
-                # We enforce a dynamic delay proportional to our GEMINI_FREE_RPM limit.
-                # E.g. at 3 RPM, this delay will be 20.0s, perfectly avoiding any 429s.
                 rpm_limit = int(os.getenv("GEMINI_FREE_RPM", "10"))
                 delay = max(4.0, 60.0 / max(1, rpm_limit))
                 logger.info(f"⏳ Globally rate-limiting synchronous Gemini call ({model}) with a {delay:.1f}s delay...")
                 time.sleep(delay)
+            elif is_nvidia:
+                delay = 2.0
+                time.sleep(delay)
             elif "groq" in base_url or "llama" in model.lower():
-                # Enforce a short delay for Groq to be safe
                 time.sleep(0.5)
                 
-            return orig_sync_create(self, *args, **kwargs)
+            # Robust retry loop to prevent synchronous RateLimitErrors (e.g. from Autogen/AG2 debate)
+            import openai
+            max_sync_retries = 5
+            backoff = 2.0
+            for attempt in range(max_sync_retries):
+                try:
+                    return orig_sync_create(self, *args, **kwargs)
+                except openai.RateLimitError as e:
+                    if attempt == max_sync_retries - 1:
+                        raise e
+                    logger.warning(
+                        f"⏳ Sync Rate Limit hit for {model} (attempt {attempt+1}/{max_sync_retries}). "
+                        f"Retrying in {backoff:.1f}s..."
+                    )
+                    time.sleep(backoff)
+                    backoff = min(60.0, backoff * 2.0)
             
         async def patched_async_create(self, *args, **kwargs):
             model = kwargs.get("model", "")
             base_url = str(getattr(self._client, "base_url", ""))
             is_gemini = "generativelanguage" in base_url or "gemini" in model.lower() or "gemma" in model.lower()
+            is_nvidia = "nvidia" in base_url or os.getenv("TSC_LLM_PROVIDER") == "nvidia"
+            
+            async def _execute_with_retry():
+                import openai
+                max_async_retries = 8
+                backoff = 2.0
+                for attempt in range(max_async_retries):
+                    try:
+                        return await orig_async_create(self, *args, **kwargs)
+                    except openai.RateLimitError as e:
+                        if attempt == max_async_retries - 1:
+                            raise e
+                        logger.warning(
+                            f"⏳ Async Rate Limit hit for {model} (attempt {attempt+1}/{max_async_retries}). "
+                            f"Retrying in {backoff:.1f}s..."
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(60.0, backoff * 1.5)
             
             if is_gemini:
                 bucket = get_gemini_bucket()
@@ -233,7 +266,14 @@ def patch_openai_globally() -> None:
                 
                 # Space out async Gemini calls through the leaky bucket singleton
                 leaky = get_leaky_bucket()
-                return await leaky.call(orig_async_create(self, *args, **kwargs))
+                return await leaky.call(_execute_with_retry())
+            elif is_nvidia:
+                # NVIDIA NIM limits are often strict; use a leaky bucket to space calls out
+                global _nvidia_leaky
+                if '_nvidia_leaky' not in globals():
+                    _nvidia_leaky = LeakyBucketQueue(rpm=20) # 20 RPM for NVIDIA NIM
+                    asyncio.create_task(_nvidia_leaky.start())
+                return await _nvidia_leaky.call(_execute_with_retry())
             elif "groq" in base_url or "llama" in model.lower():
                 bucket = get_groq_bucket()
                 messages = kwargs.get("messages", [])
@@ -241,7 +281,7 @@ def patch_openai_globally() -> None:
                 estimated = (input_chars // 4) + kwargs.get("max_tokens", 1000)
                 await bucket.acquire(estimated)
                 
-            return await orig_async_create(self, *args, **kwargs)
+            return await _execute_with_retry()
             
         patched_sync_create._is_patched = True
         patched_async_create._is_patched = True

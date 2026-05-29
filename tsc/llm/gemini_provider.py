@@ -62,7 +62,6 @@ class GeminiClient(LLMClient):
         """
         cfg_kwargs: dict[str, Any] = {
             "temperature": temperature,
-            "max_output_tokens": max_tokens,
             # Disable Automatic Function Calling — we never send tools,
             # so AFC just adds an unnecessary round-trip and log noise.
             "automatic_function_calling": genai_types.AutomaticFunctionCallingConfig(
@@ -80,9 +79,9 @@ class GeminiClient(LLMClient):
         model_name: str,
         contents: str,
         config: genai_types.GenerateContentConfig,
-        max_retries: int = 3,
-        base_backoff: float = 2.0,
-        timeout: float = 120.0,
+        max_retries: int = 5,
+        base_backoff: float = 4.0,
+        timeout: float = 300.0,
     ) -> Any | None:
         """Try *model_name* up to *max_retries* times.
 

@@ -142,3 +142,9 @@ class WorldDataBank:
     async def recall(self, bank: str, query: str, run_id: str = "global") -> list[str]:
         engine = _require_engine()
         return await engine.recall(bank=bank, query=query, run_id=run_id)
+
+    async def query_graph(self, cypher: str, params: dict = None) -> list:
+        if params is None:
+            params = {}
+        engine = _require_engine()
+        return await engine.query_graph(cypher=cypher, params=params)

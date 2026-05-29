@@ -33,6 +33,7 @@ async def main():
     from tsc.oasis.models import OASISSimulationConfig, OASISAgentProfile
     from tsc.models.inputs import FeatureProposal, CompanyContext
     from tsc.oasis.simulation_engine import RunOASISSimulation
+    from tsc.models.graph import KnowledgeGraph
 
     if len(sys.argv) < 2:
         logger.error("Usage: python worker.py <payload_json_path>")
@@ -55,6 +56,8 @@ async def main():
         context = CompanyContext(**payload["context"])
         market_context = payload.get("market_context")
         base_dir = payload.get("base_dir", "/tmp/oasis_runs")
+        kg_data = payload.get("knowledge_graph")
+        kg = KnowledgeGraph(**kg_data) if kg_data else None
 
         series = await RunOASISSimulation(
             config=config,
@@ -63,6 +66,7 @@ async def main():
             context=context,
             market_context=market_context,
             base_dir=base_dir,
+            kg=kg,
         )
 
         result_path = payload_path.replace(".json", "_result.json")

@@ -49,43 +49,152 @@ from tsc.config import settings as tsc_settings, LLMProvider
 
 
 # =============================================================================
-# EXECUTIVE SUMMARY PROMPT (module-level constant)
+# MULTI-AGENT DAG REPORT ORCHESTRATION
 # =============================================================================
-_EXEC_SUMMARY_SYSTEM = """\
-You are a senior market research analyst preparing a simulation-derived executive brief.
+from typing import List
+from pydantic import BaseModel, Field
 
-<data_contract>
-You will receive a JSON object containing simulation metrics.
-YOU MUST:
-- Use ONLY numbers and quotes present in that JSON. Do NOT invent, estimate, or
-  extrapolate any metric not explicitly in the data.
-- If a field is missing, zero, or empty (e.g. focus_group_insights is {}),
-  state "Focus group data unavailable for this run" — do not omit or fabricate.
-- Quote agents verbatim from decision_events[].quote only. Never paraphrase quotes.
-</data_contract>
+class ReportFacts(BaseModel):
+    nps: float = Field(..., description="Exact Net Promoter Score.")
+    churn_velocity: float = Field(..., description="Exact Churn Velocity.")
+    adoption_momentum: float = Field(..., description="Exact Adoption Momentum.")
+    high_risk_percentage: float = Field(..., description="High risk percentage.")
+    moderate_risk_percentage: float = Field(..., description="Moderate risk percentage.")
+    low_risk_percentage: float = Field(..., description="Low risk percentage.")
+    focus_group_wtp: str = Field(..., description="Average Willingness To Pay from FG.")
+    focus_group_adoption_intent: str = Field(..., description="Stated adoption intent from FG.")
+    focus_group_churn_delta: str = Field(..., description="Churn risk delta from FG.")
+    top_objections: List[str] = Field(..., description="Top objections from FG or general population.")
+    verbatim_quote: str = Field(..., description="Must be an exact string from the decision_events array.")
 
-<output_format>
-Write exactly 3 paragraphs. No headers. No bullet points anywhere.
+class FactCheckResult(BaseModel):
+    is_valid: bool = Field(..., description="True if absolutely no hallucinations.")
+    errors: List[str] = Field(..., description="List of detected hallucinations or mismatches. Empty if valid.")
 
-PARAGRAPH 1 — VERDICT
-Lead with the single most surprising finding. Then state one clear recommendation:
-"ship" / "ship with changes" / "do not ship" / "needs more data".
-Cite the exact NPS, churn_velocity, and adoption_momentum values from the JSON.
-Use hedged language: "simulation suggests", not "will" or "is".
+_ANALYST_SYSTEM = """\
+<role>
+You are the Data Analyst Agent for a simulation-derived report. You specialize in extracting exact numerical facts and verbatim quotes from complex JSON metrics.
+</role>
 
-PARAGRAPH 2 — RISK PROFILE
-Name the top 2 risks from top_risk_factors. For each, state likelihood as
-Low/Medium/High using the risk_distribution percentages to justify the label.
-Include one verbatim agent quote from decision_events[].quote — copy it exactly,
-wrap in quotation marks, do not shorten it.
+<task>
+Analyze the provided JSON dataset and extract the raw numerical facts and exactly one relevant verbatim quote.
+</task>
 
-PARAGRAPH 3 — NEXT STEPS
-Give exactly 3 recommendations. Each must be a single testable action
-(verifiable true/false within 30 days). At least one must directly address
-the highest-churn segment identified in the segments field.
-</output_format>
+<constraints>
+- You MUST NOT round, estimate, or modify any numbers. Extract them exactly as provided.
+- You MUST NOT fabricate quotes. The quote must exist verbatim in the 'decision_events' array.
+- Your output MUST strictly match the required JSON schema, focusing on the target metrics.
+</constraints>
+"""
 
-Write for a VP of Product with 90 seconds to read this. Be direct."""
+_REVIEWER_SYSTEM = """\
+<role>
+You are the Guardrail Fact-Checker Agent. Your sole responsibility is to protect the integrity of the data pipeline by strictly verifying the Analyst's output against the raw JSON.
+</role>
+
+<task>
+Compare every metric and quote in the Analyst's extracted facts against the source JSON dataset.
+</task>
+
+<constraints>
+- Verification 1 (Quote): Did the Analyst fabricate or alter the quote? It MUST exist exactly in the JSON decision_events.
+- Verification 2 (Metrics): Are the NPS, Churn, Adoption, and Risk percentages exactly matching the JSON down to the decimal?
+- Verification 3 (Focus Group): Are the Focus Group metrics exact?
+- If there is ANY mismatch, output is_valid=False and detail the exact errors. If perfectly matching, output is_valid=True with empty errors.
+</constraints>
+"""
+
+_WRITER_SYSTEM = """\
+<role>
+You are the Executive Narrative Writer for a VP of Product. You synthesize complex, verified facts into concise, professional executive summaries.
+</role>
+
+<task>
+You will receive VALIDATED facts. Write exactly 3 paragraphs synthesizing these facts.
+</task>
+
+<constraints>
+- You do NOT have access to the raw JSON. You MUST NOT hallucinate or calculate any new numbers. Use ONLY the provided verified metrics.
+- Format: Exactly 3 paragraphs. NO bullet points.
+- PARAGRAPH 1 (VERDICT): Lead with the single most surprising finding. State one clear recommendation: "ship" / "ship with changes" / "do not ship". Explicitly cite the exact NPS, Churn Velocity, and Adoption Momentum.
+- PARAGRAPH 2 (FOCUS GROUP): Explicitly integrate the Focus Group WTP, Adoption Intent, and Churn Risk Delta. Contrast these with the general population's risk percentages. Include the verbatim agent quote.
+- PARAGRAPH 3 (NEXT STEPS): Give exactly 3 actionable recommendations in a single paragraph. At least one must address the top Focus Group objection.
+</constraints>
+
+<behavioral_guidelines>
+- Use a professional, objective, and analytical tone.
+- Be concise; favor direct statements over filler text.
+</behavioral_guidelines>
+"""
+
+class ReportOrchestrator:
+    def __init__(self, model, exec_data_str: str):
+        self.model = model
+        self.exec_data_str = exec_data_str
+        
+    async def run(self) -> str:
+        from camel.agents.chat_agent import ChatAgent
+        from camel.messages.base import BaseMessage
+        import re
+        import json
+        
+        analyst = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(role_name="System", content=_ANALYST_SYSTEM + "\nOutput strictly in JSON format matching the ReportFacts schema."),
+            model=self.model,
+        )
+        reviewer = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(role_name="System", content=_REVIEWER_SYSTEM + "\nOutput strictly in JSON format matching FactCheckResult."),
+            model=self.model,
+        )
+        writer = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(role_name="System", content=_WRITER_SYSTEM),
+            model=self.model,
+        )
+        
+        max_retries = 3
+        valid_facts = None
+        current_error = None
+        
+        for attempt in range(max_retries):
+            prompt = self.exec_data_str
+            if current_error:
+                prompt += f"\n\nPREVIOUS ERROR TO FIX:\n{current_error}"
+                
+            resp = await analyst.astep(BaseMessage.make_user_message(role_name="User", content=prompt))
+            content = resp.msgs[0].content if resp.msgs else "{}"
+            
+            try:
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if not json_match:
+                    raise ValueError("No JSON found")
+                facts = ReportFacts.model_validate_json(json_match.group())
+            except Exception as e:
+                current_error = f"Failed to parse JSON into ReportFacts: {e}"
+                continue
+                
+            review_prompt = f"RAW DATA:\n{self.exec_data_str}\n\nEXTRACTED FACTS:\n{facts.model_dump_json()}"
+            rev_resp = await reviewer.astep(BaseMessage.make_user_message(role_name="User", content=review_prompt))
+            rev_content = rev_resp.msgs[0].content if rev_resp.msgs else "{}"
+            
+            try:
+                rev_json = re.search(r'\{.*\}', rev_content, re.DOTALL)
+                check = FactCheckResult.model_validate_json(rev_json.group()) if rev_json else FactCheckResult(is_valid=True, errors=[])
+            except Exception:
+                check = FactCheckResult(is_valid=True, errors=[])
+                
+            if check.is_valid:
+                valid_facts = facts
+                break
+            else:
+                current_error = "Validation Failed:\n" + "\n".join(check.errors)
+                
+        if not valid_facts:
+            logger.warning("DAG validation failed 3 times. Returning fallback.")
+            return "Executive summary generation failed due to hallucination guardrails."
+            
+        writer_resp = await writer.astep(BaseMessage.make_user_message(role_name="User", content=valid_facts.model_dump_json()))
+        return writer_resp.msgs[0].content if writer_resp.msgs else ""
+
 
 
 # =============================================================================
@@ -104,6 +213,7 @@ async def RunOASISSimulation(
     available_actions: Optional[List[Any]] = None,
     llm_client: Optional[Any] = None,  # Added structured Game Master LLM Client
     interactive_cb: Optional[Any] = None, # Added interactive callback for human-in-the-loop
+    kg: Optional[Any] = None, # Injected GraphRAG KnowledgeGraph
 ) -> MarketSentimentSeries:
     """
     Run a CAMEL-AI OASIS social simulation with full macOS deadlock immunity.
@@ -292,6 +402,11 @@ async def RunOASISSimulation(
 
     # ── 5. Platform Infrastructure ───────────────────────────────────────────
     from oasis.clock.clock import Clock
+    from oasis.social_agent.agent_graph import AgentGraph
+    import numpy as np
+    
+    # Initialize native CAMEL-AI Graph Topology
+    agent_graph = AgentGraph(backend="igraph")
     unique_db = os.path.join(sim_dir, f"{config.simulation_name}.sqlite")
     channel   = Channel()
     
@@ -304,7 +419,10 @@ async def RunOASISSimulation(
         recsys_type=RecsysType(config.platform_type),
         channel=channel,
         sandbox_clock=sandbox_clock,
-        start_time=start_time
+        start_time=start_time,
+        refresh_rec_post_count=5,     # Tell OASIS to dynamically select 5 posts per agent
+        max_rec_post_len=15,          # Buffer pool of 15 for stochastic/algorithmic sampling
+        following_post_count=2        # Include up to 2 posts from agents they follow
     )
     platform_task = asyncio.create_task(platform_obj.running())
 
@@ -357,11 +475,37 @@ async def RunOASISSimulation(
         ActionType.CREATE_POST,
         ActionType.REPOST,
         ActionType.QUOTE_POST,
+        
+        # Social Graph Evolution
+        ActionType.FOLLOW,
+        ActionType.UNFOLLOW,
+        ActionType.MUTE,
+        ActionType.UNMUTE,
+        
+        # Information Seeking
+        ActionType.SEARCH_POSTS,
+        ActionType.SEARCH_USER,
+        ActionType.TREND,
+        
+        # Group & Faction Dynamics
+        ActionType.CREATE_GROUP,
+        ActionType.JOIN_GROUP,
+        ActionType.LEAVE_GROUP,
+        ActionType.SEND_TO_GROUP,
+        ActionType.LISTEN_FROM_GROUP,
     ]
 
     social_agents: List[SocialAgent] = []
     for profile in agent_profiles:
-        user_info = UserInfo(**profile.user_info_dict)
+        # ── FIX: Copy user_profile into other_info so OASIS can read it ──
+        info = profile.user_info_dict
+        if info.get("profile"):
+            top_profile = info["profile"].get("user_profile", "")
+            if top_profile:
+                info["profile"].setdefault("other_info", {})
+                info["profile"]["other_info"]["user_profile"] = top_profile
+        
+        user_info = UserInfo(**info)
         agent = SocialAgent(
             agent_id=str(profile.agent_id),
             user_info=user_info,
@@ -371,6 +515,7 @@ async def RunOASISSimulation(
         )
         logger.info(f"Agent {agent.agent_id} initialized with Hindsight-backed Memory architecture.")
         social_agents.append(agent)
+        agent_graph.add_agent(agent)
 
     # ── 7.1 Platform Registration (CRITICAL: Fixes empty user table) ─────────
     logger.info(f"Registering ({len(agent_profiles)}) agents on the OASIS platform...")
@@ -488,6 +633,7 @@ async def RunOASISSimulation(
     for profile in agent_profiles:
         if int(profile.agent_id) != int(proposer_id):
             await platform_obj.follow(agent_id=int(profile.agent_id), followee_id=int(proposer_id))
+            agent_graph.add_edge(str(profile.agent_id), str(proposer_id))
 
     # Layer 2: Peer-to-peer preferential attachment with homophily
     follow_edges: set = set()  # Track (follower, followee) to avoid duplicates
@@ -558,6 +704,7 @@ async def RunOASISSimulation(
             if edge not in follow_edges:
                 follow_edges.add(edge)
                 await platform_obj.follow(agent_id=agent_id, followee_id=followee_id)
+                agent_graph.add_edge(str(agent_id), str(followee_id))
 
     # Layer 3: Stochastic reciprocity (30% chance of follow-back)
     reciprocal_edges = set()
@@ -567,18 +714,35 @@ async def RunOASISSimulation(
             if random.random() < 0.30:
                 reciprocal_edges.add(reverse)
                 await platform_obj.follow(agent_id=followee, followee_id=follower)
+                agent_graph.add_edge(str(followee), str(follower))
 
-    total_edges = len(follow_edges) + len(reciprocal_edges) + (num_agents - 1)  # peers + reciprocal + proposer
-    avg_degree = total_edges / max(1, num_agents)
-    logger.info(f"🕸️  Network Topology Built: {total_edges} edges, avg degree {avg_degree:.1f} "
-                f"(peers: {len(follow_edges)}, reciprocal: {len(reciprocal_edges)}, hub: {num_agents - 1})")
+    # ── Extract Advanced Analytics via Native AgentGraph (igraph) ──
+    try:
+        density = agent_graph.graph.density()
+        clustering = agent_graph.graph.transitivity_undirected()
+        betweenness = agent_graph.graph.betweenness()
+        avg_betweenness = np.mean(betweenness) if betweenness else 0.0
+        
+        # Guard against NaN from igraph when calculations are undefined
+        import math
+        if math.isnan(density): density = 0.0
+        if math.isnan(clustering): clustering = 0.0
+        if math.isnan(avg_betweenness): avg_betweenness = 0.0
+    except Exception as e:
+        logger.warning(f"Could not compute advanced graph metrics: {e}")
+        density, clustering, avg_betweenness = 0.0, 0.0, 0.0
+
+    logger.info(f"🕸️ Native Topology Built: Density {density:.2f}, Clustering {clustering:.2f}, Avg Betweenness {avg_betweenness:.2f}")
+
     # G4: Emit social network topology so the 3D graph can render real edges
     local_logger.log_simulation_event("network_topology", {
         "simulation_id": config.simulation_name,
         "hub_agent_id": str(proposer_id),
-        "total_edges": total_edges,
-        "avg_degree": round(avg_degree, 2),
-        "edges": [{"from": str(f), "to": str(t)} for f, t in list(follow_edges)[:500] + list(reciprocal_edges)[:200]],
+        "total_edges": agent_graph.get_num_edges(),
+        "density": round(density, 4),
+        "clustering_coefficient": round(clustering, 4),
+        "avg_betweenness_centrality": round(avg_betweenness, 4),
+        "edges": [{"from": str(f), "to": str(t)} for f, t in agent_graph.get_edges()[:700]],
     })
 
     # ── 8.1 Seed Platform — Source-to-Synth Pipeline ────────────────────────────
@@ -771,6 +935,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         # ── 3. Execute with retry-with-error-correction (structured-outputs.md) ──────
         last_error = ""
+        system_prompt = "You are a Senior Social Simulation Architect."
         for attempt in range(2):
             try:
                 if attempt > 0 and last_error:
@@ -781,9 +946,9 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                         f"8 strings in the JSON array. No other text.\n\n"
                         f"Task context:\n{prompt}"
                     )
-                    response_text = await llm.async_generate(correction_prompt)
+                    response_text = await llm.generate(system_prompt=system_prompt, user_prompt=correction_prompt)
                 else:
-                    response_text = await llm.async_generate(prompt)
+                    response_text = await llm.generate(system_prompt=system_prompt, user_prompt=prompt)
 
                 # XML-tag extraction (immune to markdown code fences and prose)
                 xml_match = re.search(r'<seed_posts>(.*?)</seed_posts>', response_text, re.DOTALL)
@@ -915,13 +1080,6 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         return seeds or [f"New feature proposal: {feat_title}. {feat_desc[:500]}"]
 
-    controversy_seeds = _extract_controversy_seeds(feature, context, market_ctx if 'market_ctx' in dir() else {})
-    # G12: Emit seed posts so the UI can show the debate context from T=0
-    local_logger.log_simulation_event("seed_posts", {
-        "simulation_id": config.simulation_name,
-        "seeds": [{"index": i, "content": s[:500]} for i, s in enumerate(controversy_seeds)],
-    })
-
     # ── 8.2 Seed Post Dispatch: AI-First, Template-Fallback ────────────────────
     # Try to generate highly contextual seed posts using the LLM.
     # The LLM reads the actual feature spec, community feedback, and company
@@ -935,14 +1093,35 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         # AI-First: Generate grounded seeds
         ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
+        fallback_seeds = [
+            # Seed 1: Friction-first — forces agents to declare position on real pain points
+            f"[Honest review after 6 months with {product_desc}]: "
+            f"The {product_stack} integration is genuinely useful day-to-day, "
+            f"but onboarding new team members is still painful every single time. "
+            f"What's everyone's actual experience? Specifically: "
+            f"what do you wish worked differently, and what would it take for you to recommend this internally?",
+
+            # Seed 2: Competitive threat
+            f"Given the recent updates to {competitors}, is anyone else re-evaluating their stack? "
+            f"I'm trying to map out the real switching costs vs long-term value. "
+            f"Would love to hear from teams who have recently migrated either way.",
+
+            # Seed 3: Exit / renewal signal
+            f"Genuine question for power users: at what point does the cost of staying "
+            f"with {product_desc} outweigh the switching cost? "
+            f"Our contract renewal is coming up and I'm struggling to justify "
+            f"the line item to leadership without concrete productivity numbers. "
+            f"Has anyone actually measured the ROI?",
+        ]
+        
         if interactive_cb:
             logger.info("⏸️ Halting for Human-in-the-Loop review of behavioral seed posts")
             res = await interactive_cb("review_seeds", {
-                "seeds": ai_seeds or [],
+                "seeds": ai_seeds or fallback_seeds,
                 "feature": feature.model_dump() if feature else None,
                 "context": context.model_dump() if context else None
             })
-            seed_posts = res.get("seeds", ai_seeds)
+            seed_posts = res.get("seeds", ai_seeds or fallback_seeds)
             logger.info(f"🧑‍💻 Human-in-the-Loop: Using {len(seed_posts)} refined seed posts")
         elif ai_seeds:
             seed_posts = ai_seeds
@@ -974,20 +1153,23 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         for post in seed_posts:
             await platform_obj.create_post(agent_id=int(proposer_id), content=post)
+        final_seeds = seed_posts
     else:
         # FEATURE TEST MODE
         logger.info(f"🔬 Generating seed posts for feature: {feature.title}")
 
         # AI-First: Generate contextual seeds from feature + community feedback
         ai_seeds = await _generate_ai_seed_posts(feature, context, llm_client)
+        fallback_seeds = _extract_controversy_seeds(feature, context, market_context)
+        
         if interactive_cb:
             logger.info("⏸️ Halting for Human-in-the-Loop review of feature test seed posts")
             res = await interactive_cb("review_seeds", {
-                "seeds": ai_seeds or [],
+                "seeds": ai_seeds or fallback_seeds,
                 "feature": feature.model_dump() if feature else None,
                 "context": context.model_dump() if context else None
             })
-            controversy_seeds = res.get("seeds", ai_seeds)
+            controversy_seeds = res.get("seeds", ai_seeds or fallback_seeds)
             logger.info(f"🧑‍💻 Human-in-the-Loop: Using {len(controversy_seeds)} refined seed posts")
         elif ai_seeds:
             controversy_seeds = ai_seeds
@@ -1003,14 +1185,16 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
             await platform_obj.create_post(agent_id=poster_id, content=seed)
             logger.info(f"  📝 Seed post {i+1}/{len(controversy_seeds)} by agent {poster_id}")
 
+        final_seeds = controversy_seeds
+
     # G12: Emit all seed posts so the UI can show the debate context from T=0
     local_logger.log_simulation_event("seed_posts", {
         "simulation_id": config.simulation_name,
         "seeds": [{
             "index": i,
             "content": s[:500],
-            "source": "ai_generated" if ai_seeds else "template_fallback"
-        } for i, s in enumerate(ai_seeds if ai_seeds else controversy_seeds)],
+            "source": "final"
+        } for i, s in enumerate(final_seeds)],
     })
 
     await platform_obj.update_rec_table()
@@ -1035,8 +1219,33 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                         role_name="INTERVIEWER", content=question
                     )
                     response = await asyncio.wait_for(agent.astep(msg), timeout=120.0)
+            
+            raw_content = response.msgs[0].content if response.msgs else ""
+            tool_val = None
+            if response and hasattr(response, 'info') and response.info:
+                tool_info = response.info.get('tool_calls', [])
+                for tc in (tool_info if isinstance(tool_info, list) else []):
+                    if hasattr(tc, 'args'):
+                        args = tc.args
+                    elif isinstance(tc, dict):
+                        args = tc.get('arguments', tc.get('args', {}))
+                    else:
+                        args = {}
+                    if isinstance(args, dict):
+                        tool_val = args.get('content') or args.get('quote_content') or args.get('text')
+                        if tool_val:
+                            break
+            
+            selected_content = tool_val if tool_val else raw_content
+            
+            import re
+            cleaned = re.sub(r'<thought>.*?</thought>', '', selected_content, flags=re.DOTALL)
+            cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
+            final_content = cleaned.strip() or "No response"
+
             return {
-                "content": response.msgs[0].content if response.msgs else "No response",
+                "content": final_content,
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as e:
@@ -1472,6 +1681,10 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
     # =====================================================================
     # MAIN SIMULATION LOOP (PHASE 1)
     # =====================================================================
+    
+    feature_title = getattr(feature, 'title', None) if feature else None
+    topic_anchor  = f'"{feature_title}"' if feature_title else "the topic in the posts"
+
     try:
         for t in range(config.num_timesteps):
             await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
@@ -1508,14 +1721,18 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 # ── Context window guard ──
                                 # Limit to 5 posts × 3 comments to keep gemma-4-31b-it
                                 # inference under ~30s. Full history causes 4+ min timeouts.
-                                MAX_POSTS = 5
+                                # MAX_POSTS = 5
                                 MAX_COMMENTS_PER_POST = 3
-                                platform_obs = "\n\nCURRENT PLATFORM STATE:\n"
-                                for p in posts[:MAX_POSTS]:
-                                    platform_obs += f"- [PostID {p['post_id']}] (User {p['user_id']}): {p['content']}\n"
+                                platform_obs = f'Discussion topic: {topic_anchor}\n\n'
+                                # for p in posts[:MAX_POSTS]:
+                                for p in posts:
+                                    poster_name = agent_id_to_name.get(str(p['user_id']), f"User_{p['user_id']}")
+                                    platform_obs += f"@{poster_name}: {p['content']}\n"
                                     if p.get('comments'):
                                         for c in p['comments'][-MAX_COMMENTS_PER_POST:]:
-                                            platform_obs += f"  └─ [CommentID {c['comment_id']}] (User {c['user_id']}): {c['content']}\n"
+                                            c_name = agent_id_to_name.get(str(c['user_id']), f"User_{c['user_id']}")
+                                            platform_obs += f"  ↳ @{c_name}: {c['content']}\n"
+                                    platform_obs += "\n"
 
                             # ── Persona-Grounded Anti-Sycophancy Prompt ──
                             # Fix #5: use agent_id_to_profile dict (not agent_profiles[idx])
@@ -1537,30 +1754,36 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                             )
                             _ts_directive = {
                                 "OPENING": "State your initial position clearly. Stake a specific view.",
-                                "MID-DISCUSSION": "React to what others have said. Build on or push back against SPECIFIC points already made.",
+                                "MID-DISCUSSION": "React to what others have said. Build on or push back, and clearly state your own unique perspective on this topic.",
                                 "CLOSING": "Consolidate your view. Has anything changed your position? State your final stance explicitly.",
                             }[_ts_phase]
 
                             persona_grounding = (
-                                f"\nCRITICAL BEHAVIORAL RULES FOR {agent_name} "
-                                f"[Timestep {t+1}/{config.num_timesteps} — {_ts_phase}]:\n"
-                                f"1. ANTI-SYCOPHANCY: Do NOT change your stated position because others disagree. "
-                                f"Only update if shown concrete evidence that matches your specific concern.\n"
-                                f"2. Your communication style is: {comm_style}\n"
-                                f"3. Your TOP concern is: {pain_points[0] if pain_points else 'daily usability'}\n"
-                                f"4. If you agree, ADD a new perspective from your own usage. "
-                                f"If you disagree, explain how their view conflicts with your practical needs.\n"
-                                f"5. Reference SPECIFIC features, workflows, or policies from the posts. "
-                                f"Avoid abstract philosophy.\n"
-                                f"6. Your user type is '{agent_type}' with satisfaction={satisfaction:.1f} — act accordingly.\n"
-                                f"7. PHASE DIRECTIVE: {_ts_directive}\n"
-                                f"8. Keep your response under 150 words. Speak naturally as a real user.\n"
+                                f"[Turn {t+1}/{config.num_timesteps} — {_ts_phase}]\n"
+                                f"The discussion is about: {topic_anchor}\n"
+                                f"Phase: {_ts_directive}\n"
+                                f"Communication style: {comm_style}\n"
+                                f"Stay on topic. Your action must relate to {topic_anchor}.\n"
+                                f"Speak exactly like a real user on social media. Be opinionated. DO NOT sound like an AI assistant.\n"
+                                f"Do not raise issues unrelated to {topic_anchor}.\n"
                             )
                             
                             # ── Decision Journal Injection ──
                             journal_ctx = ""
                             if agent_id in decision_journals:
                                 journal_ctx = decision_journals[agent_id].prompt_summary()
+                            
+                            action_cue = (
+                                f"The posts above are about {topic_anchor}.\n"
+                                f"Choose ONE action that keeps the discussion on {topic_anchor}.\n\n"
+                                f"ON-TOPIC (good):\n"
+                                f"- Engaging with what someone said about {topic_anchor}\n"
+                                f"- Sharing your view on {topic_anchor} based on how you use this product\n"
+                                f"- Liking or reposting a perspective on {topic_anchor} you agree with\n\n"
+                                f"OFF-TOPIC (avoid):\n"
+                                f"- Raising a different feature or complaint not mentioned in the posts\n"
+                                f"- Generic reactions with no connection to {topic_anchor}\n"
+                            )
                             
                             # P3 fix: content ordering per context-management.md
                             # §Recommended Ordering + §Lost-in-the-Middle mitigation.
@@ -1572,20 +1795,70 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                             #   - Platform state + hindsight = content (middle = lower bias OK)
                             #   - persona_grounding = directive (end = highest recency bias)
                             #   - Closing action cue = final trigger (bottom = highest attention)
+                            
+                            platform_block = ""
+                            if platform_obs:
+                                platform_block = f"<posts>\n{platform_obs}\n</posts>\n\n"
+                                
+                            graph_block = ""
+                            if kg:
+                                facts = []
+                                # 1. Context Aggregation
+                                agent_name_str = agent_name if agent_name else ""
+                                platform_obs_str = platform_obs if platform_obs else ""
+                                hindsight_str = hindsight_context if hindsight_context else ""
+                                context_text = f"{agent_name_str} {platform_obs_str} {hindsight_str}".lower()
+                                
+                                # 2. Zero-LLM Entity Identification
+                                active_entity_ids = set()
+                                for entity_id, entity in kg.nodes.items():
+                                    if (entity.name and entity.name.lower() in context_text) or \
+                                       (entity.full_name and entity.full_name.lower() in context_text):
+                                        active_entity_ids.add(entity_id)
+                                
+                                # 3. Neighborhood Traversal
+                                active_edges = []
+                                if active_entity_ids:
+                                    for edge in kg.edges:
+                                        if edge.source_entity in active_entity_ids or edge.target_entity in active_entity_ids:
+                                            active_edges.append(edge)
+                                
+                                # 4. Prioritization & Extraction
+                                if active_edges:
+                                    top_edges = sorted(active_edges, key=lambda e: getattr(e, 'weight', 0.0), reverse=True)[:15]
+                                else:
+                                    # 5. Fallback Mechanism (global top 5)
+                                    top_edges = sorted(kg.edges, key=lambda e: getattr(e, 'weight', 0.0), reverse=True)[:5]
+
+                                for e in top_edges:
+                                    src = kg.get_entity(e.source_entity)
+                                    tgt = kg.get_entity(e.target_entity)
+                                    if src and tgt:
+                                        facts.append(f"- {src.name} {e.relationship_type.name} {tgt.name}")
+                                        
+                                if facts:
+                                    graph_block = (
+                                        "[MANDATORY SYSTEM FACTS - DO NOT HALLUCINATE]\n"
+                                        "Based on the knowledge graph, the following facts are true:\n"
+                                        + "\n".join(facts) +
+                                        "\nYou must base your subsequent thoughts and actions strictly on these facts.\n\n"
+                                    )
+
                             step_msg = BaseMessage.make_user_message(
                                 role_name="ENVIRONMENT",
                                 content=(
                                     # BUCKET 1 (top): Current observations — data, not directives
-                                    # USER REQUEST: Removed injection of actions/platform_state
-                                    # f"<platform_state>\n{platform_obs}\n</platform_state>\n\n"
+                                    platform_block
                                     # BUCKET 2 (middle): Narrative memory from prior turns
-                                    f"<memory>\n{hindsight_context}\n</memory>\n\n"
+                                    + f"<memory>\n{hindsight_context}\n</memory>\n\n"
                                     # BUCKET 3 (middle): Agent's own emotional state summary
-                                    f"<journal>\n{journal_ctx}\n</journal>\n\n"
+                                    + f"<journal>\n{journal_ctx}\n</journal>\n\n"
                                     # BUCKET 4 (bottom — highest recency attention): Behavioral rules
-                                    f"<rules>\n{persona_grounding}\n</rules>\n\n"
+                                    + f"<rules>\n{persona_grounding}\n</rules>\n\n"
+                                    # GraphRAG System Facts
+                                    + graph_block
                                     # Closing action cue — very last token, maximum LLM focus
-                                    "Review your state above and select ONE action to take now."
+                                    + action_cue
                                 )
                             )
 
@@ -1626,10 +1899,30 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                         cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
                         # Remove markdown bold/italic tags and optional thought prefixes
                         cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
-                        content = cleaned.strip() or "No content"
+                        content = cleaned.strip()
 
                         # Fix #2: pass action_resp so tool call name is read first
                         action_type = _detect_action_type(content, action_resp=action_resp)
+                        
+                        if not content or content == "No content":
+                            if action_type == "LIKE":
+                                content = "[Liked a post]"
+                            elif action_type == "DISLIKE":
+                                content = "[Disliked a post]"
+                            elif action_type == "SEARCH":
+                                content = "[Searched for content]"
+                            elif action_type == "REFRESH":
+                                content = "[Refreshed their feed]"
+                            elif action_type == "SCROLL":
+                                content = "[Scrolled their feed]"
+                            elif action_type == "FOLLOW":
+                                content = "[Followed a user]"
+                            elif action_type == "UNFOLLOW":
+                                content = "[Unfollowed a user]"
+                            elif action_type not in ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST"]:
+                                content = f"[{action_type.replace('_', ' ').capitalize()} action]"
+                            else:
+                                content = "No content"
 
                         # Step D: Proactively query the SQLite platform database for the clean post/comment content actually saved.
                         # This guarantees that we use the final, clean text registered in the simulation platform.
@@ -2020,19 +2313,9 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 "focus_group_insights": report.focus_group_insights,
                 "decision_events": report.decision_events[:5],
             }, default=str)
-            _exec_agent = ChatAgent(
-                system_message=BaseMessage.make_assistant_message(
-                    role_name="System", content=_EXEC_SUMMARY_SYSTEM
-                ),
-                model=model,
-            )
-            _exec_resp = await asyncio.wait_for(
-                _exec_agent.astep(
-                    BaseMessage.make_user_message(role_name="Analyst", content=_exec_data)
-                ),
-                timeout=60.0,
-            )
-            report.executive_summary = _exec_resp.msgs[0].content if _exec_resp.msgs else ""
+            orchestrator = ReportOrchestrator(model=model, exec_data_str=_exec_data)
+            final_report = await asyncio.wait_for(orchestrator.run(), timeout=180.0)
+            report.executive_summary = final_report
             logger.info("📝 Executive summary generated.")
         except Exception as _e:
             logger.warning(f"Executive summary generation skipped: {_e}")

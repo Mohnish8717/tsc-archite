@@ -56,7 +56,7 @@ const getBuyerJourneyIndex = (journey: string): number => {
   return -1;
 };
 
-interface BioSections {
+export interface BioSections {
   identityAnchor: string;
   behavioralRules: string;
   communicationFingerprint: string;
@@ -101,7 +101,7 @@ export const normalizeBio = (bio: any): string => {
   return String(bio);
 };
 
-const parseBioSections = (bioText: any = ''): BioSections => {
+export const parseBioSections = (bioText: any = ''): BioSections => {
   const bioStr = normalizeBio(bioText);
   const sections = {
     identityAnchor: '',
@@ -501,32 +501,57 @@ const renderPsychologyTab = (persona: any) => {
       )}
 
       {/* ── Identity Anchor Narrative ────────────────────────────────────── */}
-      <div>
-        <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Identity & Narrative Anchors</h5>
-        <div className="bg-black/5 border-4 border-black p-5 font-bold text-black/85 leading-relaxed text-sm whitespace-pre-line">
-          {parsedBio.identityAnchor || parsedBio.rawBio || 'No narrative identity anchor generated yet.'}
-        </div>
-      </div>
+      {(() => {
+        const FormatBracketText = ({ text }: { text: string }) => {
+          if (!text) return null;
+          const parts = text.split(/(\[[A-Z0-9\s_&/-]+\])/g);
+          return (
+            <>
+              {parts.map((part, i) => {
+                if (part.startsWith('[') && part.endsWith(']')) {
+                  return (
+                    <span key={i} className="inline-block bg-yellow-200 text-black border border-black rounded-[2px] px-1.5 py-0.5 mx-1 font-black text-[10px] tracking-widest uppercase shadow-[1px_1px_0_#000]">
+                      {part.substring(1, part.length - 1)}
+                    </span>
+                  );
+                }
+                return <span key={i}>{part}</span>;
+              })}
+            </>
+          );
+        };
 
-      {/* ── Behavioral Rules ─────────────────────────────────────────────── */}
-      {parsedBio.behavioralRules && (
-        <div>
-          <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Behavioral Decision Matrix</h5>
-          <div className="bg-black/5 border-4 border-black p-5 font-mono text-xs font-bold text-black/80 leading-relaxed whitespace-pre-line">
-            {parsedBio.behavioralRules}
-          </div>
-        </div>
-      )}
+        return (
+          <>
+            <div>
+              <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Identity & Narrative Anchors</h5>
+              <div className="bg-black/5 border-4 border-black p-5 font-bold text-black/85 leading-relaxed text-sm whitespace-pre-line">
+                <FormatBracketText text={parsedBio.identityAnchor || parsedBio.rawBio || 'No narrative identity anchor generated yet.'} />
+              </div>
+            </div>
 
-      {/* ── Communication Fingerprint from bio ───────────────────────────── */}
-      {parsedBio.communicationFingerprint && (
-        <div>
-          <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Communication Fingerprint (Narrative)</h5>
-          <div className="bg-black/5 border-4 border-black p-5 font-bold text-black/85 leading-relaxed text-sm whitespace-pre-line">
-            {parsedBio.communicationFingerprint}
-          </div>
-        </div>
-      )}
+            {/* ── Behavioral Rules ─────────────────────────────────────────────── */}
+            {parsedBio.behavioralRules && (
+              <div className="mt-4">
+                <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Behavioral Decision Matrix</h5>
+                <div className="bg-black/5 border-4 border-black p-5 font-mono text-xs font-bold text-black/80 leading-relaxed whitespace-pre-line">
+                  <FormatBracketText text={parsedBio.behavioralRules} />
+                </div>
+              </div>
+            )}
+
+            {/* ── Communication Fingerprint from bio ───────────────────────────── */}
+            {parsedBio.communicationFingerprint && (
+              <div className="mt-4">
+                <h5 className="font-mono font-black text-xs uppercase tracking-widest text-black/40 mb-2">Communication Fingerprint (Narrative)</h5>
+                <div className="bg-black/5 border-4 border-black p-5 font-bold text-black/85 leading-relaxed text-sm whitespace-pre-line">
+                  <FormatBracketText text={parsedBio.communicationFingerprint} />
+                </div>
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {/* ── Profile Quality Meters ───────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4">

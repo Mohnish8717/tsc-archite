@@ -2,19 +2,26 @@ import React, { useState, useEffect } from 'react';
 import { usePipelineStore } from '../../store/usePipelineStore';
 
 export const SeedReviewPage = () => {
-  const { pendingAction, setPendingAction, simulationConfig } = usePipelineStore();
+  const { pendingAction, setPendingAction, simulationConfig, seedPosts, sessionId } = usePipelineStore();
   const [instruction, setInstruction] = useState('');
   const [isRefining, setIsRefining] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [glitchText, setGlitchText] = useState('HUMAN-IN-THE-LOOP');
   
-  if (!pendingAction || pendingAction.action !== 'review_seeds') {
-    return null;
-  }
+  const payload = pendingAction?.payload;
   
-  const payload = pendingAction.payload;
-  // Make a local copy of seeds to show
-  const [currentSeeds, setCurrentSeeds] = useState<string[]>(payload.seeds || []);
+  // Make a local copy of seeds to show. Prioritize pendingAction payload, fallback to global seedPosts state.
+  const getInitialSeeds = () => {
+    if (payload?.seeds && payload.seeds.length > 0) return payload.seeds;
+    if (seedPosts && seedPosts.length > 0) return seedPosts.map((s: any) => s.content || s);
+    return [];
+  };
+  
+  const [currentSeeds, setCurrentSeeds] = useState<string[]>(getInitialSeeds());
+
+  useEffect(() => {
+    setCurrentSeeds(getInitialSeeds());
+  }, [payload?.seeds, seedPosts]);
 
   // Cyberpunk glitch effect on title
   useEffect(() => {
@@ -26,6 +33,8 @@ export const SeedReviewPage = () => {
     }, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  const isReviewMode = pendingAction?.action === 'review_seeds';
 
   const handleRefine = async () => {
     if (!instruction.trim()) return;
@@ -62,8 +71,8 @@ export const SeedReviewPage = () => {
   const handleApprove = async () => {
     setIsSubmitting(true);
     try {
-      const sessionId = simulationConfig?.simulation_id || 'default';
-      const res = await fetch(`http://localhost:8000/api/simulation/${sessionId}/command`, {
+      const activeSessionId = sessionId || simulationConfig?.simulation_id || 'default';
+      const res = await fetch(`http://localhost:8000/api/simulation/${activeSessionId}/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -85,7 +94,7 @@ export const SeedReviewPage = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col p-4 md:p-8 overflow-y-auto bg-pink-50 selection:bg-cyan-400 selection:text-black" style={{
+    <div className="w-full h-full flex flex-col p-4 md:p-8 overflow-y-auto bg-pink-50 selection:bg-cyan-400 selection:text-black" style={{
       backgroundImage: 'radial-gradient(#000 1px, transparent 1px)',
       backgroundSize: '24px 24px'
     }}>
@@ -95,13 +104,15 @@ export const SeedReviewPage = () => {
         <div className="w-full lg:w-1/3 flex flex-col gap-6 sticky top-8 h-fit">
           <div className="border-4 border-black bg-white p-6 shadow-[8px_8px_0_0_#000]">
             <div className="inline-block bg-black text-cyan-400 font-mono font-black text-xs px-2 py-1 mb-4 uppercase tracking-widest">
-              SYSTEM OVERRIDE // ACTIVE
+              {isReviewMode ? 'SYSTEM OVERRIDE // ACTIVE' : 'SYSTEM STATUS // IDLE'}
             </div>
             <h2 className="font-black text-4xl uppercase tracking-tighter leading-none mb-2 text-pink-600">
-              {glitchText}
+              {isReviewMode ? glitchText : 'SEED VIEWER'}
             </h2>
             <p className="font-bold text-black uppercase tracking-widest text-sm border-l-4 border-cyan-400 pl-3 mt-4">
-              Awaiting operator authorization. Review generated seeds before simulation lock.
+              {isReviewMode 
+                ? 'Awaiting operator authorization. Review generated seeds before simulation lock.'
+                : 'View mode active. Simulation has already proceeded or no review is required.'}
             </p>
           </div>
 
@@ -119,11 +130,11 @@ export const SeedReviewPage = () => {
                 placeholder="> INJECT SKILL: Make posts sound highly critical, use cynical tone..."
                 value={instruction}
                 onChange={e => setInstruction(e.target.value)}
-                disabled={isRefining || isSubmitting}
+                disabled={!isReviewMode || isRefining || isSubmitting}
               />
               <button 
                 onClick={handleRefine}
-                disabled={isRefining || isSubmitting || !instruction.trim()}
+                disabled={!isReviewMode || isRefining || isSubmitting || !instruction.trim()}
                 className="w-full py-4 bg-cyan-400 border-2 border-black font-black uppercase tracking-widest text-black hover:bg-pink-500 hover:text-white transition-none disabled:opacity-50 active:translate-y-1 active:shadow-none"
               >
                 {isRefining ? 'EXECUTING...' : 'APPLY MUTATION'}
@@ -133,10 +144,10 @@ export const SeedReviewPage = () => {
 
           <button 
             onClick={handleApprove}
-            disabled={isSubmitting || isRefining}
-            className="w-full py-6 bg-brand border-4 border-black font-black uppercase tracking-widest text-xl hover:bg-black hover:text-brand transition-none shadow-[8px_8px_0_0_#000] active:shadow-none active:translate-y-2 active:translate-x-2 disabled:opacity-50"
+            disabled={!isReviewMode || isSubmitting || isRefining}
+            className="w-full py-6 bg-brand border-4 border-black font-black uppercase tracking-widest text-xl hover:bg-black hover:text-brand transition-none shadow-[8px_8px_0_0_#000] active:shadow-none active:translate-y-2 active:translate-x-2 disabled:opacity-50 disabled:bg-gray-300 disabled:text-gray-500 disabled:border-gray-500 disabled:shadow-[8px_8px_0_0_#888]"
           >
-            {isSubmitting ? 'INITIALIZING...' : 'AUTHORIZE SIMULATION'}
+            {isSubmitting ? 'INITIALIZING...' : (isReviewMode ? 'AUTHORIZE SIMULATION' : 'AUTHORIZATION NOT REQUIRED')}
           </button>
         </div>
 

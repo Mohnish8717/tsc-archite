@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
@@ -24,6 +25,14 @@ from tsc.api.persona_api import router as persona_router  # G6
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TSC v2.0", description="Feature Evaluation Pipeline")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # G6: mount persona REST API
 app.include_router(persona_router)
@@ -216,7 +225,7 @@ async def refine_seeds(payload: RefineSeedsPayload):
         if payload.model:
             req_settings.llm_model = payload.model
             
-        llm = create_llm_client(req_settings)
+        llm = create_llm_client(settings=req_settings)
         
         system_prompt = (
             "## 1. Identity & Role\n"

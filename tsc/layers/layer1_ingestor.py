@@ -215,11 +215,19 @@ class ContextualIngestor:
                 continue
 
             # Store complete document text — NO truncation
-            await self._session.retain("world", full_text, metadata={
-                "type": "full_document",
-                "document_type": doc_type,
-                "word_count": len(full_text.split()),
-            })
+            if hasattr(self._session, "ingest_document"):
+                await self._session.ingest_document(
+                    document_text=full_text,
+                    document_name=f"{doc_type}_input.txt",
+                    doc_type=doc_type,
+                    run_id="global"
+                )
+            else:
+                await self._session.retain("world", full_text, metadata={
+                    "type": "full_document",
+                    "document_type": doc_type,
+                    "word_count": len(full_text.split()),
+                })
 
             # Store structured JSON if available (company context, proposals)
             if norm.json_parsed:
@@ -490,10 +498,10 @@ class ContextualIngestor:
             if not norm.normalized_text:
                 continue
 
-            # Skip small company context/feature docs for LLM chunking if they are already small (< 500 words)
+            # Skip small company context/feature docs for LLM chunking if they are already small (< 2000 words)
             word_count = len(norm.normalized_text.split())
-            if word_count < 500:
-                logger.info("Skipping LLM chunking for small document (%s)", norm.document_type.value)
+            if word_count < 2000:
+                logger.info("Skipping LLM chunking for small document (%s, %d words)", norm.document_type.value, word_count)
                 doc_chunks = self._simple_chunk_fallback(norm)
                 for c in doc_chunks:
                    c.chunk_id = f"chunk_{global_idx:04d}"
@@ -513,6 +521,7 @@ class ContextualIngestor:
                     system_prompt=SEMANTIC_CHUNKING_SYSTEM,
                     user_prompt=prompt,
                     temperature=0.1,
+                    max_tokens=8000,
                 )
                 
                 # Clean up response if it has markdown wrappers (sometimes happens even in JSON mode)

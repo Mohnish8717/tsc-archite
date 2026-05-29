@@ -140,6 +140,17 @@ export default function HandoffTerminal() {
                   <div className="font-black text-sm uppercase tracking-widest text-brand border-b-4 border-black pb-2">
                     Prediction Report — {simulationReport.feature_title}
                   </div>
+                  
+                  {/* Executive Summary */}
+                  {simulationReport.executive_summary && (
+                    <div className="border-4 border-black shadow-neo-black p-5 bg-black text-white relative">
+                      <div className="absolute -top-3 -left-3 w-6 h-6 bg-brand border-2 border-black flex items-center justify-center">
+                        <FileCode2 className="w-3 h-3 text-black" strokeWidth={3} />
+                      </div>
+                      <div className="text-xs font-black uppercase tracking-widest text-brand mb-3 ml-2">Executive Summary</div>
+                      <p className="text-sm font-bold text-white/90 whitespace-pre-wrap leading-relaxed">{simulationReport.executive_summary}</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-3 divide-x-4 divide-black border-4 border-black shadow-neo-black">
                     <div className="p-4 text-center">
                       <div className="text-xs font-black uppercase tracking-widest text-black/40 mb-1">Net Promoter</div>
@@ -170,7 +181,7 @@ export default function HandoffTerminal() {
                     ))}
                   </div>
 
-                  <div className="grid grid-cols-2 gap-0 divide-x-4 divide-black border-4 border-black shadow-neo-black">
+                  <div className="grid grid-cols-3 gap-0 divide-x-4 divide-black border-4 border-black shadow-neo-black">
                     <div className="p-4">
                       <div className="text-xs font-black uppercase tracking-widest text-black/40 mb-3">Satisfaction Curve</div>
                       <Sparkline data={simulationReport.satisfaction_curve} color="#22C55E" />
@@ -178,6 +189,10 @@ export default function HandoffTerminal() {
                     <div className="p-4">
                       <div className="text-xs font-black uppercase tracking-widest text-black/40 mb-3">Frustration Curve</div>
                       <Sparkline data={simulationReport.frustration_curve} color="#EF4444" />
+                    </div>
+                    <div className="p-4">
+                      <div className="text-xs font-black uppercase tracking-widest text-black/40 mb-3">Trust Curve</div>
+                      <Sparkline data={simulationReport.trust_curve} color="#3B82F6" />
                     </div>
                   </div>
 

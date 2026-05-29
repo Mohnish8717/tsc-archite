@@ -1,12 +1,12 @@
-import React, { useRef, useState, useMemo } from 'react';
+import React, { useRef, useState, useMemo, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrthographicCamera, OrbitControls, Html, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { usePipelineStore } from '../../store/usePipelineStore';
 import type { AgentAction } from '../../store/usePipelineStore';
 import { cleanPersonaName } from '../../utils/nameHelper';
-import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2 } from 'lucide-react';
-import { normalizeBio } from './AssemblyMatrix';
+import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2, ThumbsUp } from 'lucide-react';
+import { normalizeBio, parseBioSections } from './AssemblyMatrix';
 import { EagleEyeInterrogationModal } from './EagleEyeInterrogationModal';
 
 
@@ -343,7 +343,7 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
               boxShadow: '8px 8px 0 0 #000000',
               borderRadius: '16px',
               padding: '20px',
-              width: '320px',
+              width: '360px',
               maxHeight: '65vh',
               overflowY: 'auto',
               fontFamily: 'monospace',
@@ -425,11 +425,79 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
               </div>
             </div>
 
-            {/* Bio */}
-            <div style={{ marginBottom: '14px' }}>
-              <div style={{ fontSize: '9px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase', marginBottom: '4px' }}>Agent Narrative</div>
-              <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, lineHeight: 1.4, color: '#374151' }}>{normalizeBio(agent.bio)}</p>
-            </div>
+            {/* Parsed Bio Sections */}
+            {(() => {
+              const sections = parseBioSections(agent.bio);
+              
+              const FormatBracketText = ({ text }: { text: string }) => {
+                const parts = text.split(/(\[[A-Z0-9\s_&/-]+\])/g);
+                return (
+                  <>
+                    {parts.map((part, i) => {
+                      if (part.startsWith('[') && part.endsWith(']')) {
+                        return (
+                          <span key={i} style={{
+                            display: 'inline-block',
+                            fontSize: '7px',
+                            fontWeight: 900,
+                            color: '#000000',
+                            backgroundColor: '#FEF08A',
+                            padding: '1px 4px',
+                            margin: '0 3px',
+                            border: '1px solid #000000',
+                            borderRadius: '2px',
+                            boxShadow: '1px 1px 0 #000000',
+                            verticalAlign: 'middle',
+                            letterSpacing: '0.05em',
+                            textTransform: 'uppercase',
+                          }}>
+                            {part.substring(1, part.length - 1)}
+                          </span>
+                        );
+                      }
+                      return <span key={i}>{part}</span>;
+                    })}
+                  </>
+                );
+              };
+
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '14px' }}>
+                  {sections.identityAnchor && (
+                    <div>
+                      <div style={{ fontSize: '8px', fontWeight: 900, color: '#2563EB', textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.05em' }}>Identity Anchor</div>
+                      <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, lineHeight: 1.5, color: '#374151' }}>
+                        <FormatBracketText text={sections.identityAnchor} />
+                      </p>
+                    </div>
+                  )}
+                  {sections.behavioralRules && (
+                    <div style={{ border: '2px solid #000000', padding: '8px', background: '#F9FAFB', borderRadius: '4px', boxShadow: '2px 2px 0px #000000' }}>
+                      <div style={{ fontSize: '8px', fontWeight: 900, color: '#DC2626', textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.05em' }}>Behavioral Rules</div>
+                      <p style={{ fontSize: '10px', fontFamily: 'monospace', fontWeight: 700, margin: 0, lineHeight: 1.5, color: '#4B5563', whiteSpace: 'pre-wrap' }}>
+                        <FormatBracketText text={sections.behavioralRules} />
+                      </p>
+                    </div>
+                  )}
+                  {sections.communicationFingerprint && (
+                    <div style={{ border: '2px solid #000000', padding: '8px', background: '#FFFBEB', borderRadius: '4px', boxShadow: '2px 2px 0px #000000' }}>
+                      <div style={{ fontSize: '8px', fontWeight: 900, color: '#D97706', textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.05em' }}>Communication Style</div>
+                      <p style={{ fontSize: '10px', fontWeight: 700, margin: 0, lineHeight: 1.5, color: '#4B5563', whiteSpace: 'pre-wrap' }}>
+                        <FormatBracketText text={sections.communicationFingerprint} />
+                      </p>
+                    </div>
+                  )}
+                  {!sections.identityAnchor && !sections.behavioralRules && !sections.communicationFingerprint && (
+                    <div>
+                      <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase', marginBottom: '4px' }}>Agent Narrative</div>
+                      <p style={{ fontSize: '11px', fontWeight: 700, margin: 0, lineHeight: 1.5, color: '#374151' }}>
+                        <FormatBracketText text={sections.rawBio} />
+                      </p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* OCEAN Scores with custom bars */}
             {agent.ocean && agent.ocean.O !== undefined && (
@@ -710,6 +778,7 @@ export default function OASIS3D() {
     activeAgents, hotScoreAvg, tensionStatus, actions,
     networkTopology, sycophancyAlerts, eagleEyeResults, seedPosts,
     simulationStatus,
+    upvotedItems, upvoteItem, sqliteData
   } = usePipelineStore();
   const [selectedPos, setSelectedPos] = useState<[number, number, number] | null>(null);
   const [showMonitorPanel, setShowMonitorPanel] = useState(true);
@@ -772,7 +841,7 @@ export default function OASIS3D() {
     }
   };
 
-  const [activityFilter, setActivityFilter] = useState<'all' | 'content' | 'interactions'>('all');
+  const [activityFilter, setActivityFilter] = useState<'combined' | 'posts' | 'comments'>('combined');
   const [expandedActionIds, setExpandedActionIds] = useState<Set<string>>(new Set());
 
   const toggleActionExpanded = (id: string) => {
@@ -784,15 +853,90 @@ export default function OASIS3D() {
     });
   };
 
-  const filteredActions = useMemo(() => {
-    return actions.slice().reverse().filter(a => {
-      if (activityFilter === 'all') return true;
-      const isInteraction = ['upvote', 'downvote', 'repost', 'follow', 'like', 'agree', 'disagree'].includes(a.action_type.toLowerCase());
-      if (activityFilter === 'content') return !isInteraction;
-      if (activityFilter === 'interactions') return isInteraction;
-      return true;
+  const combinedFeed = useMemo(() => {
+    const items: any[] = [];
+    
+    // Add Seed Posts
+    seedPosts.forEach((s, i) => {
+      items.push({
+        id: `seed_${i}`,
+        type: 'post',
+        author: 'SYSTEM',
+        content: s.content,
+        timestamp: new Date(0).toISOString(),
+        source: 'seed',
+        original: s
+      });
     });
-  }, [actions, activityFilter]);
+
+    // Add SQLite Posts
+    if (sqliteData?.posts) {
+      sqliteData.posts.forEach((p: any) => {
+        items.push({
+          id: p.post_id,
+          type: 'post',
+          author: cleanPersonaName(p.user_name || p.user_id),
+          content: p.content,
+          timestamp: p.created_at,
+          source: 'sqlite',
+          original: p
+        });
+      });
+    }
+
+    // Add SQLite Comments
+    if (sqliteData?.comments) {
+      sqliteData.comments.forEach((c: any) => {
+        items.push({
+          id: c.comment_id,
+          type: 'comment',
+          author: cleanPersonaName(c.user_name || c.user_id),
+          content: c.content,
+          timestamp: c.created_at,
+          targetId: c.post_id,
+          source: 'sqlite',
+          original: c
+        });
+      });
+    }
+
+    // Add Actions
+    actions.forEach((a, i) => {
+      const typeLower = (a.action_type || '').toLowerCase();
+      let type = 'other';
+      if (typeLower === 'post' || typeLower === 'spawn') type = 'post';
+      else if (typeLower === 'comment') type = 'comment';
+      else if (typeLower === 'upvote' || typeLower === 'downvote' || typeLower === 'like') type = 'interaction';
+      
+      items.push({
+        id: `action_${a.agent_id}_${i}_${a.timestamp}`,
+        type: type,
+        author: cleanPersonaName(a.agent_name),
+        content: a.content,
+        timestamp: a.timestamp,
+        targetId: a.metadata?.target_id,
+        source: 'action',
+        original: a
+      });
+    });
+
+    // Sort by timestamp
+    return items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [actions, sqliteData, seedPosts]);
+
+  const filteredFeed = useMemo(() => {
+    if (activityFilter === 'combined') return combinedFeed;
+    if (activityFilter === 'posts') return combinedFeed.filter(item => item.type === 'post');
+    if (activityFilter === 'comments') return combinedFeed.filter(item => item.type === 'comment');
+    return combinedFeed;
+  }, [combinedFeed, activityFilter]);
+
+  const getPostContent = (targetId?: string) => {
+    if (!targetId) return null;
+    const post = combinedFeed.find(item => String(item.id) === String(targetId));
+    if (post) return post.content;
+    return 'Original post content hidden or deleted.';
+  };
 
   // --- Sub-render blocks for sidebar sections ---
   const debateSeedsBody = (
@@ -846,7 +990,7 @@ export default function OASIS3D() {
     <div className="flex-1 flex flex-col min-h-0 bg-white">
       {/* Filter Tabs */}
       <div className="flex border-b-4 border-black font-black text-xs uppercase">
-        {(['all', 'content', 'interactions'] as const).map(tab => (
+        {(['combined', 'posts', 'comments'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActivityFilter(tab)}
@@ -861,58 +1005,73 @@ export default function OASIS3D() {
 
       {/* Activity Feed */}
       <div className="flex-1 overflow-y-auto divide-y-2 divide-black/10">
-        {filteredActions.map((a) => {
-          const actionKey = `action-${a.agent_id}-${a.timestamp}-${a.action_type}`;
+        {filteredFeed.map((item) => {
+          const actionKey = item.id;
           const isExpanded = expandedActionIds.has(actionKey);
-          const hasContent = !!a.content;
-          const timeStr = a.timestamp ? new Date(a.timestamp).toLocaleTimeString() : '';
-          const cleanName = cleanPersonaName(a.agent_name);
+          const hasContent = !!item.content;
+          const timeStr = item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '';
 
           let iconColor = 'bg-brand';
-          if (a.action_type === 'upvote') iconColor = 'bg-green-500';
-          else if (a.action_type === 'downvote') iconColor = 'bg-red-500';
-          else if (a.action_type === 'post') iconColor = 'bg-blue-500';
-          else if (a.action_type === 'comment') iconColor = 'bg-purple-500';
+          if (item.type === 'post') iconColor = 'bg-blue-500';
+          else if (item.type === 'comment') iconColor = 'bg-purple-500';
+          else if (item.type === 'interaction') {
+             if (item.original.action_type === 'upvote') iconColor = 'bg-green-500';
+             else if (item.original.action_type === 'downvote') iconColor = 'bg-red-500';
+          }
+
+          const upvotes = upvotedItems[actionKey] || 0;
 
           return (
             <div
               key={actionKey}
-              onClick={() => hasContent && toggleActionExpanded(actionKey)}
-              className={`p-3 transition-colors text-left ${hasContent ? 'cursor-pointer hover:bg-neutral-50' : ''}`}
+              className={`p-3 transition-colors text-left ${hasContent ? 'hover:bg-neutral-50' : ''}`}
             >
               <div className="flex items-start gap-2.5">
-                <span className={`w-2.5 h-2.5 mt-1 border border-black shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] ${iconColor}`} />
+                <span className={`w-2.5 h-2.5 mt-1 border border-black shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] flex-none ${iconColor}`} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-black text-xs uppercase truncate text-black/90">
-                      {cleanName}
+                      {item.author}
                     </span>
                     <span className="text-[9px] font-black text-black/40 flex-none">
                       {timeStr}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="text-[10px] font-black uppercase text-brand/90 border border-brand bg-brand/5 px-1 py-0.2 select-none">
-                      {a.action_type}
-                    </span>
-                    {(a.metadata as any)?.target_name && (
-                      <span className="text-[10px] font-bold text-black/50 truncate">
-                        &rarr; {cleanPersonaName((a.metadata as any).target_name)}
-                      </span>
-                    )}
-                  </div>
+                  
+                  {item.type === 'comment' && item.targetId && (
+                    <div className="mt-2 mb-2 p-2 bg-neutral-100 border-l-4 border-black/20 text-[10px] font-bold text-black/60 italic rounded-r line-clamp-2">
+                      ↳ Replying to: "{getPostContent(item.targetId)}"
+                    </div>
+                  )}
 
-                  {a.content && (
-                    <p className="text-xs font-bold text-black/70 leading-relaxed mt-2 border-l-2 border-brand/50 pl-2">
-                      {isExpanded ? a.content : `${a.content.slice(0, 100)}${a.content.length > 100 ? '...' : ''}`}
+                  {item.content && (
+                    <p 
+                      onClick={() => hasContent && toggleActionExpanded(actionKey)}
+                      className={`text-xs font-bold text-black/70 leading-relaxed mt-1 border-l-2 border-brand/50 pl-2 ${hasContent ? 'cursor-pointer' : ''}`}
+                    >
+                      {isExpanded ? item.content : `${item.content.slice(0, 100)}${item.content.length > 100 ? '...' : ''}`}
                     </p>
+                  )}
+
+                  {['post', 'comment'].includes(item.type) && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); upvoteItem(actionKey); }}
+                        className={`flex items-center gap-1.5 px-2 py-1 border-2 border-black font-black text-[10px] uppercase transition-colors ${
+                          upvotes > 0 ? 'bg-orange-500 text-white' : 'bg-white text-black hover:bg-orange-100'
+                        }`}
+                      >
+                        <ThumbsUp className="w-3 h-3" strokeWidth={3} />
+                        {upvotes > 0 ? upvotes : 'Upvote'}
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
             </div>
           );
         })}
-        {filteredActions.length === 0 && (
+        {filteredFeed.length === 0 && (
           <div className="p-8 text-center font-black text-xs uppercase tracking-widest text-black/30">
             Awaiting live activity feed...
           </div>
@@ -1092,17 +1251,27 @@ export default function OASIS3D() {
           </button>
           <div className="divide-y-4 divide-black">
             <div className="flex justify-between px-4 py-2">
-              <span className="font-black text-xs uppercase tracking-widest text-black/50">Hub Agent</span>
-              <span className="font-black text-xs text-brand truncate max-w-28 text-right">{networkTopology.hub_agent_id}</span>
-            </div>
-            <div className="flex justify-between px-4 py-2">
               <span className="font-black text-xs uppercase tracking-widest text-black/50">Total Edges</span>
               <span className="font-black text-xl">{networkTopology.total_edges.toLocaleString()}</span>
             </div>
-            <div className="flex justify-between px-4 py-2">
-              <span className="font-black text-xs uppercase tracking-widest text-black/50">Avg Degree</span>
-              <span className="font-black text-xl">{networkTopology.avg_degree.toFixed(1)}</span>
-            </div>
+            {networkTopology.density !== undefined && (
+              <div className="flex justify-between px-4 py-2">
+                <span className="font-black text-xs uppercase tracking-widest text-black/50">Density</span>
+                <span className="font-black text-xl">{(networkTopology.density * 100).toFixed(1)}%</span>
+              </div>
+            )}
+            {networkTopology.clustering_coefficient !== undefined && (
+              <div className="flex justify-between px-4 py-2">
+                <span className="font-black text-xs uppercase tracking-widest text-black/50">Echo Chamber</span>
+                <span className="font-black text-xl">{networkTopology.clustering_coefficient.toFixed(2)}</span>
+              </div>
+            )}
+            {networkTopology.avg_betweenness_centrality !== undefined && (
+              <div className="flex justify-between px-4 py-2">
+                <span className="font-black text-xs uppercase tracking-widest text-black/50">Info Brokers</span>
+                <span className="font-black text-xl">{networkTopology.avg_betweenness_centrality.toFixed(1)}</span>
+              </div>
+            )}
           </div>
         </div>
       )}

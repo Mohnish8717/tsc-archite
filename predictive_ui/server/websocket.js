@@ -117,7 +117,7 @@ function readSqliteData(run) {
     // Social comments (the actual simulation interactions)
     try {
       result.comments = db.prepare(`
-        SELECT c.comment_id, c.user_id, u.name as user_name, c.content, c.created_at, c.num_likes, c.num_dislikes
+        SELECT c.comment_id, c.post_id, c.user_id, u.name as user_name, c.content, c.created_at, c.num_likes, c.num_dislikes
         FROM comment c LEFT JOIN user u ON c.user_id = u.user_id
         ORDER BY c.created_at DESC LIMIT 200
       `).all();
@@ -147,6 +147,7 @@ function bootstrapClient(ws, run) {
   if (!run) {
     console.log('[WS] No simulation data found — sending waiting state to client');
     send({ type: 'pipeline_reset', stages: { layer1: 'waiting', layer3: 'waiting', layer5: 'waiting' } });
+    send({ type: 'bootstrap_complete' });
     return;
   }
 
@@ -175,6 +176,7 @@ function bootstrapClient(ws, run) {
 
   if (!fs.existsSync(run.actionsFile)) {
     console.log('[WS] No actions.jsonl yet — waiting for simulation to begin');
+    send({ type: 'bootstrap_complete' });
     return;
   }
 
@@ -244,6 +246,7 @@ function bootstrapClient(ws, run) {
     }
   }
 
+  send({ type: 'bootstrap_complete' });
   console.log(`[WS] 📦 Bootstrap complete: replayed ${actionLinesCount} events, sqlite=${!!sqliteData}`);
 }
 
@@ -275,17 +278,33 @@ function startTailing(run) {
   if (!fs.existsSync(run.actionsFile)) {
     console.log(`[WS] 📡 Waiting for actions.jsonl to appear in: ${run.fullPath}`);
     const dirWatcher = fs.watch(run.fullPath, (eventType, filename) => {
-      if (filename === 'actions.jsonl' && fs.existsSync(run.actionsFile)) {
+      if (fs.existsSync(run.actionsFile)) {
         dirWatcher.close();
+        if (activeRun && activeRun.fallbackInterval) clearInterval(activeRun.fallbackInterval);
         startTailing(run); // retry now that the file exists
       }
     });
-    activeRun = { ...run, watcher: dirWatcher, reportWatcher: null };
+    const fallbackInterval = setInterval(() => {
+      if (fs.existsSync(run.actionsFile)) {
+        dirWatcher.close();
+        clearInterval(fallbackInterval);
+        startTailing(run);
+      }
+    }, 1000);
+    activeRun = { ...run, watcher: dirWatcher, reportWatcher: null, fallbackInterval };
     return;
   }
 
   console.log(`[WS] 📡 LIVE tailing: ${run.actionsFile}`);
   let lastSize = fs.statSync(run.actionsFile).size;
+  if (lastSize > 0) {
+    try {
+      const lines = fs.readFileSync(run.actionsFile, 'utf-8').split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        try { broadcast(JSON.parse(line)); } catch {}
+      }
+    } catch {}
+  }
 
   const watcher = fs.watch(run.actionsFile, (eventType) => {
     if (eventType !== 'change') return;
@@ -295,6 +314,7 @@ function startTailing(run) {
 
       const readStart = lastSize;
       const readEnd = stats.size;
+      lastSize = readEnd; // advance synchronously to prevent duplicate reads on rapid events
 
       const stream = fs.createReadStream(run.actionsFile, {
         start: readStart,
@@ -306,7 +326,7 @@ function startTailing(run) {
       stream.on('data', chunk => {
         buffer += chunk;
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep the incomplete line (or empty string if it ended with \n)
+        buffer = lines.pop();
         lines.forEach(line => {
           if (line.trim()) {
             try { broadcast(JSON.parse(line)); } catch(e) { console.error('[WS] Parse error in actions:', e.message) }
@@ -314,15 +334,10 @@ function startTailing(run) {
         });
       });
 
-      // ── Bug fix #2: advance lastSize only AFTER the stream has fully drained.
-      // The original code advanced it synchronously, so a second fs.watch event
-      // firing within the same tick saw size <= lastSize and silently skipped lines.
-      // This was dropping the majority of agent action events during busy timesteps.
       stream.on('end', () => { 
         if (buffer.trim()) {
           try { broadcast(JSON.parse(buffer)); } catch(e) {}
         }
-        lastSize = readEnd; 
       });
     } catch {}
   });
@@ -423,17 +438,33 @@ function startTailingPipeline(run) {
   if (!fs.existsSync(pipelineFile)) {
     console.log(`[WS] 📡 Waiting for pipeline.jsonl to appear in: ${run.fullPath}`);
     const dirWatcher = fs.watch(run.fullPath, (eventType, filename) => {
-      if (filename === 'pipeline.jsonl' && fs.existsSync(pipelineFile)) {
+      if (fs.existsSync(pipelineFile)) {
         dirWatcher.close();
-        startTailingPipeline({ ...run, pipelineFile });
+        if (activePipelineTail && activePipelineTail.fallbackInterval) clearInterval(activePipelineTail.fallbackInterval);
+        startTailingPipeline(run);
       }
     });
-    activePipelineTail = { name: run.name, watcher: dirWatcher };
+    const fallbackInterval = setInterval(() => {
+      if (fs.existsSync(pipelineFile)) {
+        dirWatcher.close();
+        clearInterval(fallbackInterval);
+        startTailingPipeline(run);
+      }
+    }, 1000);
+    activePipelineTail = { ...run, watcher: dirWatcher, fallbackInterval };
     return;
   }
 
   console.log(`[WS] 📡 LIVE tailing pipeline: ${pipelineFile}`);
   let lastSize = fs.statSync(pipelineFile).size;
+  if (lastSize > 0) {
+    try {
+      const lines = fs.readFileSync(pipelineFile, 'utf-8').split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        try { broadcast(JSON.parse(line)); } catch {}
+      }
+    } catch {}
+  }
 
   const watcher = fs.watch(pipelineFile, (eventType) => {
     if (eventType !== 'change') return;

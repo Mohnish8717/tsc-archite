@@ -16,6 +16,8 @@ os.environ["USE_TORCH"] = "1"
 # SOTA BGE-M3 is 2.3GB and slow to download. Switch to the fully-cached all-MiniLM-L6-v2.
 os.environ["EMBEDDING_MODEL"] = "sentence-transformers/all-MiniLM-L6-v2"
 os.environ["EMBEDDING_DIM"] = "384"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 # MUST be spawn to prevent PyTorch/gRPC fork deadlocks on macOS Apple Silicon
 try:
@@ -31,13 +33,13 @@ import dotenv
 dotenv.load_dotenv(PROJECT_ROOT / ".env")
 
 # Model configurations
-os.environ["TSC_LLM_PROVIDER"] = "nvidia"
-os.environ["TSC_LLM_MODEL"] = "qwen/qwen3-next-80b-a3b-instruct"
+os.environ["TSC_LLM_PROVIDER"] = "google"
+os.environ["TSC_LLM_MODEL"] = "gemma-4-31b-it"
 os.environ["TSC_GM_LLM_PROVIDER"] = "ollama"
 os.environ["TSC_GM_LLM_MODEL"] = "gemma4:e2b"
 os.environ["HINDSIGHT_URL"] = "" # Disable Hindsight to avoid 402 API errors
-os.environ["GEMINI_FREE_RPM"] = "35"
-os.environ["TSC_GEMINI_RPM_LIMIT"] = "35"
+os.environ["GEMINI_FREE_RPM"] = "12"
+os.environ["TSC_GEMINI_RPM_LIMIT"] = "12"
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

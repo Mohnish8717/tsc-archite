@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from pathlib import Path
 from typing import Any, Optional
 
@@ -175,6 +176,48 @@ class TSCPipeline:
         # ── Emit Layer 1 ingestion nodes (real file names) ─────────────────────
         ingestion_nodes = self._build_ingestion_nodes(documents)
         self._write_jsonl_event({"type": "ingestion_sync", "nodes": ingestion_nodes})
+
+        # ── Emit Live Knowledge Graph from Neo4j ──────────────────────────
+        try:
+            # Query Neo4j for the global company knowledge graph
+            cypher = "MATCH (n)-[r]->(m) RETURN n.name AS source, type(r) AS rel, m.name AS target, labels(n) AS src_labels, labels(m) AS tgt_labels LIMIT 300"
+            graph_results = await world_bank.query_graph(cypher, {})
+            
+            kg_nodes = {}
+            kg_edges = []
+            
+            for res in graph_results:
+                rec = res.metadata
+                src_name = rec.get("source", "Unknown")
+                tgt_name = rec.get("target", "Unknown")
+                
+                src_label = rec.get("src_labels", ["Entity"])[0] if rec.get("src_labels") else "Entity"
+                tgt_label = rec.get("tgt_labels", ["Entity"])[0] if rec.get("tgt_labels") else "Entity"
+                
+                if src_name not in kg_nodes:
+                    kg_nodes[src_name] = {"id": src_name, "label": src_name, "entityType": src_label, "mentions": 1}
+                else:
+                    kg_nodes[src_name]["mentions"] += 1
+                    
+                if tgt_name not in kg_nodes:
+                    kg_nodes[tgt_name] = {"id": tgt_name, "label": tgt_name, "entityType": tgt_label, "mentions": 1}
+                else:
+                    kg_nodes[tgt_name]["mentions"] += 1
+                    
+                kg_edges.append({
+                    "source": src_name,
+                    "target": tgt_name,
+                    "relationshipType": rec.get("rel", "RELATED_TO"),
+                    "weight": 1
+                })
+                
+            self._write_jsonl_event({
+                "type": "knowledge_graph_sync",
+                "nodes": list(kg_nodes.values()),
+                "edges": kg_edges
+            })
+        except Exception as e:
+            logger.warning(f"Failed to fetch Neo4j graph for UI: {e}")
 
         # Layer 2: OASIS Behavioral Analysis (Social Simulation)
         self._emit_progress(2, "Behavioral Analysis (OASIS)", "running")

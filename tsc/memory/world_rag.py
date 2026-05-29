@@ -828,22 +828,25 @@ Text: {text[:3000]}"""
                 return
             data = json.loads(json_match.group())
 
-            # C1 fix: whitelist labels and relation types before Cypher interpolation
-            ALLOWED_LABELS = {
-                "Company", "Feature", "Competitor", "Regulation",
-                "Risk", "CustomerSegment", "Market", "Persona",
-            }
-            ALLOWED_RELATIONS = {
-                "COMPETES_WITH", "GOVERNED_BY", "RAISES_RISK",
-                "TARGETS", "SUPPORTS", "VETOES", "PART_OF", "MENTIONS",
-            }
             driver = _get_neo4j()
+            import re
+            
+            def format_node_label(label: str) -> str:
+                if not label: return "Entity"
+                # e.g., CUSTOMER_SEGMENT -> Customer Segment -> CustomerSegment
+                cleaned = "".join(word.capitalize() for word in label.replace("_", " ").split())
+                cleaned = re.sub(r'[^A-Za-z0-9]', '', cleaned)
+                return cleaned if cleaned else "Entity"
+
+            def format_rel_type(rel: str) -> str:
+                if not rel: return "RELATED_TO"
+                cleaned = rel.upper().replace(" ", "_")
+                cleaned = re.sub(r'[^A-Z0-9_]', '', cleaned)
+                return cleaned if cleaned else "RELATED_TO"
+
             async with driver.session() as s:
                 for ent in data.get("entities", []):
-                    label = ent.get("type", "Entity")
-                    if label not in ALLOWED_LABELS:
-                        logger.warning("C1: Skipping unknown entity type from LLM: %r", label)
-                        continue
+                    label = format_node_label(ent.get("type", "Entity"))
                     # C3 fix: MERGE on name only — Plane-1 entities are global singletons
                     # run_id stored as property, not part of uniqueness key
                     await s.run(
@@ -853,10 +856,7 @@ Text: {text[:3000]}"""
                         name=ent["name"], run_id=run_id, source=source,
                     )
                 for rel in data.get("relations", []):
-                    rel_type = rel.get("relation", "")
-                    if rel_type not in ALLOWED_RELATIONS:
-                        logger.warning("C1: Skipping unknown relation type from LLM: %r", rel_type)
-                        continue
+                    rel_type = format_rel_type(rel.get("relation", ""))
                     # C3 fix: MATCH on name only (no run_id in key)
                     await s.run(
                         "MATCH (a {name: $from_name}) "
