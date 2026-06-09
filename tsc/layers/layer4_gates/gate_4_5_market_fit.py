@@ -23,15 +23,10 @@ try:
 except ImportError:
     HINDSIGHT_AVAILABLE = False
 
-# Legacy Fallback
-from tsc.mesa.simulation import RunMesaSimulation
-
 logger = logging.getLogger(__name__)
 
 class MarketFitMode(str, Enum):
     OASIS_ONLY = "OASIS_ONLY"
-    MESA_ONLY = "MESA_ONLY"
-    HYBRID_DUAL = "HYBRID_DUAL"
 
 class MarketFitGate(BaseGate):
     """
@@ -84,7 +79,7 @@ class MarketFitGate(BaseGate):
         details = {}
 
         try:
-            if self.mode in [MarketFitMode.OASIS_ONLY, MarketFitMode.HYBRID_DUAL]:
+            if self.mode == MarketFitMode.OASIS_ONLY:
                 logger.info("Running Actual OASIS Simulation (Primary Path)")
                 try:
                     # 1. Initialize agents from personas (mapping to UserInfo)
@@ -191,29 +186,11 @@ class MarketFitGate(BaseGate):
                     
                 except Exception as e:
                     logger.error(f"OASIS Simulation failed: {e}", exc_info=True)
-                    if self.mode == MarketFitMode.OASIS_ONLY:
-                        raise
-                    logger.warning("Falling back to legacy Mesa simulation...")
-
-            if (self.mode == MarketFitMode.MESA_ONLY) or \
-               (self.mode == MarketFitMode.HYBRID_DUAL and oasis_result is None):
-                logger.info("Running Mesa Simulation (Fallback Path)")
-                mesa_raw = await RunMesaSimulation(feature, personas, company, self.num_agents)
-                mesa_result = {
-                    "adoption_rate": mesa_raw.final_adoption_rate,
-                    "convergence": mesa_raw.convergence_steps,
-                    "status": "SUCCESS"
-                }
-                
-                score = mesa_raw.final_adoption_rate
-                verdict = GateVerdict.PASS if score > 0.5 else GateVerdict.RISKY
-                if not reasoning:
-                    reasoning = f"Fallback Mesa simulation predicted {score*100:.1f}% adoption rate."
+                    raise
 
             # Consolidate results
             details = {
                 "oasis": oasis_result,
-                "mesa": mesa_result,
                 "mode_used": self.mode.value,
                 "execution_time": time.time() - t0
             }

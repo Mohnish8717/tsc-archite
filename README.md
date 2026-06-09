@@ -99,9 +99,9 @@ HINDSIGHT_URL=http://localhost:8888
 ```
 
 ### 4️⃣ Launch Your First Simulation
-Run the Slack AI Controversy scenario:
+Run the AI Fitness Case Study scenario:
 ```bash
-python run_slack_scenario.py
+./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py
 ```
 
 ---
@@ -112,7 +112,7 @@ The engine supports multiple execution modes depending on your research needs:
 
 | Mode | Command | Description |
 | :--- | :--- | :--- |
-| **Standard Scenario** | `python run_slack_scenario.py` | Runs a pre-configured scenario with 20 simulations and full boardroom debate. |
+| **Standard Scenario** | `./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py` | Runs a pre-configured case study with simulations and full boardroom debate. |
 | **Production Pipeline** | `python run_production_pipeline.py` | High-stakes mode for real enterprise data. Supports parallel simulation scaling. |
 | **OASIS Isolated** | `./run_oasis.sh` | Runs only the social simulation layer to test user sentiment without executive debate. |
 | **Memory Purge** | `./start_hindsight_local.sh purge` | Deletes all simulation memory banks for a fresh start. |
@@ -127,7 +127,7 @@ The engine generates a comprehensive **Prediction Report** at the end of every r
 *   **Market Sentiment Series:** Time-series data of user trust and frustration (NPS/Churn).
 *   **Decision Journals:** A chronological log of every cognitive threshold crossed by the simulated market.
 *   **Tension Ledger:** An audit trail of why the CTO voted "High Risk."
-*   **PRD Output:** Found in `slack_scenario_result.json` or your specified output path.
+*   **PRD Output:** Found in the `tsc_results/` directory or your specified output path.
 
 ---
 

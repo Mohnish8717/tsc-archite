@@ -11,22 +11,17 @@ from tsc.models.chunks import ProblemContextBundle
 from tsc.models.gates import GateResult, GateVerdict
 from tsc.llm.temperatures import L4_RED_TEAM
 
-# Legacy Fallback
-from tsc.mesa.red_team import RunRedTeamSimulation
-
 from enum import Enum
 
 class RedTeamMode(Enum):
     OASIS_ONLY = "oasis_only"
-    MESA_ONLY = "mesa_only"
-    HYBRID = "hybrid"
 
 logger = logging.getLogger(__name__)
 
 class RedTeamGate(BaseGate):
     """
-    Gate 4.6: Red-Team Adversarial Analysis (Hybrid/OASIS)
-    Uses OASIS insights for stakeholder-specific risks + Mesa for cascading failures.
+    Gate 4.6: Red-Team Adversarial Analysis (OASIS)
+    Uses OASIS insights for stakeholder-specific risks and cascading failures.
     """
     gate_id = "4.6"
     gate_name = "Red-Team Adversarial Analysis"
@@ -54,18 +49,7 @@ class RedTeamGate(BaseGate):
         t0 = time.time()
         logger.info(f"Executing Red Team Analysis (Mode: {self._mode.value})")
 
-        if self._mode == RedTeamMode.OASIS_ONLY:
-            return await self._evaluate_oasis(feature, company, graph, bundle, personas, t0)
-        
-        try:
-            # Legacy Mesa path
-            result = await RunRedTeamSimulation(feature, company, personas, graph, bundle)
-            result.execution_time_seconds = float(round(time.time() - t0, 1))
-            return result
-
-        except Exception as e:
-            logger.error(f"Mesa Red Team analysis failed: {e}")
-            return await self._evaluate_oasis(feature, company, graph, bundle, personas, t0)
+        return await self._evaluate_oasis(feature, company, graph, bundle, personas, t0)
 
     async def _evaluate_oasis(
         self,
