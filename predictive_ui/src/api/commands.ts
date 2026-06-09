@@ -24,3 +24,28 @@ export async function sendEagleEyeCommand(
 
   return await response.json();
 }
+
+export async function sendInterventionCommand(
+  sessionId: string,
+  event: string
+): Promise<{ status: string; message: string }> {
+  const payload = {
+    action: "intervention",
+    event: event,
+  };
+
+  const response = await fetch(`http://localhost:8000/api/simulation/${sessionId}/command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || "Failed to send intervention command.");
+  }
+
+  return await response.json();
+}

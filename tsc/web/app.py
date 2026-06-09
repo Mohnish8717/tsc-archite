@@ -204,6 +204,7 @@ class CommandPayload(BaseModel):
     data: Optional[dict] = None
     target_agent_id: Optional[str] = None
     questions: Optional[list[str]] = None
+    event: Optional[str] = None
 
 class RefineSeedsPayload(BaseModel):
     seeds: list[str]
@@ -327,13 +328,17 @@ class ConnectionManager:
         except Exception:
             self.disconnect(ws)
 
-
 manager = ConnectionManager()
+
+# Holds the currently running pipeline task so /api/simulation/stop can cancel it.
+# None when no simulation is active.
+_active_pipeline_task: Optional[asyncio.Task] = None
 
 
 @app.websocket("/ws/evaluate")
 async def ws_evaluate(ws: WebSocket):
     """Run evaluation with real-time progress via WebSocket."""
+    global _active_pipeline_task
     await manager.connect(ws)
     try:
         # Receive config
@@ -380,9 +385,11 @@ async def ws_evaluate(ws: WebSocket):
 
         pipeline.set_interactive_callback(on_interactive)
 
-        # Run
+        # Run — register this task so /api/simulation/stop can cancel it
+        _active_pipeline_task = asyncio.current_task()
         await manager.send_json(ws, {"type": "started"})
-        result = await pipeline.evaluate(**files)
+        boardroom_only = config.get("boardroom_only", False)
+        result = await pipeline.evaluate(**files, boardroom_only=boardroom_only)
 
         await manager.send_json(ws, {
             "type": "complete",
@@ -391,6 +398,14 @@ async def ws_evaluate(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("Client disconnected")
+    except asyncio.CancelledError:
+        # User hit Stop — write a stop event so the port-8080 bridge can notify the frontend
+        logger.info("Pipeline cancelled by user request")
+        try:
+            pipeline._write_jsonl_event({"type": "simulation_stopped", "reason": "user_requested"})
+        except Exception:
+            pass
+        raise  # re-raise so asyncio properly marks the task as cancelled
     except Exception as e:
         logger.error("Evaluation failed: %s", e)
         await manager.send_json(ws, {
@@ -399,7 +414,18 @@ async def ws_evaluate(ws: WebSocket):
             "traceback": traceback.format_exc(),
         })
     finally:
+        _active_pipeline_task = None
         manager.disconnect(ws)
+
+
+@app.post("/api/simulation/stop")
+async def stop_simulation():
+    """Cancel the active pipeline task and notify clients via pipeline.jsonl."""
+    global _active_pipeline_task
+    if _active_pipeline_task and not _active_pipeline_task.done():
+        _active_pipeline_task.cancel()
+        return {"status": "stopping", "message": "Pipeline cancellation requested"}
+    return {"status": "idle", "message": "No simulation currently running"}
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):

@@ -29,6 +29,7 @@ from typing import Any
 
 from tsc.layers.layer4_gates import GateExecutor
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L5_REFINEMENT
 from tsc.models.chunks import ProblemContextBundle
 from tsc.models.gates import GatesSummary
 from tsc.models.graph import KnowledgeGraph
@@ -143,7 +144,7 @@ class RefinementEngine:
             refinement_response = await self._llm.analyze(
                 system_prompt=system_prompt,
                 user_prompt=refinement_prompt,
-                temperature=0.5,
+                temperature=L5_REFINEMENT,
                 max_tokens=3000,
             )
 

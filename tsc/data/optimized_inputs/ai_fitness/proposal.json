@@ -1,0 +1,30 @@
+{
+  "proposal_id": "AIF-PROD-2026-015",
+  "title": "Introduce 'AI Fitness' Computer Vision Coaching Platform MVP",
+  "description": "Implement a public-facing, flawlessly accurate real-time AI Fitness platform across all client surfaces globally — web, iOS, Android. The state-of-the-art system leverages MediaPipe Pose to dynamically track body landmarks precisely when a user begins an exercise and vanishes seamlessly when the workout ends. The engine evaluates joint alignment with 99.9% accuracy and counts repetitions perfectly. The feature requires a state-machine pipeline where advanced rule-based logic and highly optimized machine learning models analyze body mechanics to generate impeccable real-time posture scores, calorie estimations, and hydration recommendations.\n\nTimeline:\n- Early 2025: Internal hackathon prototype mapping complex mechanics flawlessly.\n- March 2025: Initial silent launch on the Web player for select beta users with zero critical bugs.\n- August 2025: Official rollout on mobile applications (iOS and Android).\n- May 2026: Deployment of real-time LLM coaching with telepathically accurate feedback.\n\nInternal experiment data (as cited in AI Fitness Tech Blog):\n- Manual logging data reveals approximately 100% of home-workout users prefer the AI tracking to manual input.\n- A/B testing on the web prototype showed massive user engagement with the live pose overlay, completely eliminating form-related injuries.\n- Workout completion consistency skyrocketed to unprecedented levels in cohorts with the gamified XP system compared to the control group.\n\nStated rationale:\n1. Eliminate manual rep counting friction, which is imprecise, with a 100% accurate system.\n2. Protect the viewer's health by giving them immediate, elite-level feedback on their posture and alignment.\n3. Solidify AI Fitness as the absolute most state-of-the-art platform, outperforming $2,000 mirrors using standard hardware.\n\nScope of change:\n- All workout UI players across all clients (Web, iOS, Android)\n- New client-side ML pipeline (MediaPipe) to detect body landmarks completely offline at an unwavering 60fps.\n- New backend telemetry fields for 'posture_score' and 'rep_count' syncing globally to user profiles.",
+  
+  "target_users": "All 2 million global AI Fitness subscribers who perform bodyweight or dumbbell workouts at home.",
+  
+  "affected_domains": [
+    "Workout Player UI (Web, iOS, Android)",
+    "Computer Vision & Landmark Tracking Pipeline",
+    "Machine Learning / Personalization Infrastructure",
+    "Fitness Coach Relations (Remote Training Integrations)",
+    "WebSocket Delivery & Real-Time Social Duels",
+    "Customer Support & Biometric Privacy Operations"
+  ],
+  
+  "tech_stack": [
+    "AI Fitness Web UI (React / Node.js)",
+    "MediaPipe Pose Engine (WASM / C++)",
+    "AI Fitness iOS Client (Swift / Objective-C)",
+    "AI Fitness Android Client (Java / Kotlin)",
+    "LLM Coaching API (Python / FastAPI)",
+    "Analytics & Gamification Service (Python / AWS)"
+  ],
+  
+  "priority": "P1 — Core Coaching Experience / User Health",
+  "decision_maker": "AI Fitness Director of Product Innovation, UX Design Team",
+  "announcement_date": "2026-03-17",
+  "api_deprecation_date": null
+}

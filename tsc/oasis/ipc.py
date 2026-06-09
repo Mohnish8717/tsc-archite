@@ -49,6 +49,13 @@ class CommandListener:
                 # Clear command file *after* extracting data
                 os.remove(self.command_file)
                 return interview_payload
+            elif action == "intervention":
+                intervention_payload = {
+                    "action": "intervention",
+                    "event": cmd.get("event", ""),
+                }
+                os.remove(self.command_file)
+                return intervention_payload
                 
             # Clear command file after reading
             if os.path.exists(self.command_file):
@@ -61,9 +68,12 @@ class CommandListener:
         """Blocking loop for the worker if a 'pause' command is active, and handles interviews."""
         # Always check for new commands at least once
         payload = await self.check_commands()
-        if payload and isinstance(payload, dict) and "questions" in payload and interview_callback:
-            logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
-            await interview_callback(payload)
+        if payload and isinstance(payload, dict):
+            if "questions" in payload and interview_callback:
+                logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
+                await interview_callback(payload)
+            elif payload.get("action") == "intervention":
+                return payload
 
         if self.is_paused:
             logger.info("Simulation PAUSED. Waiting for resume...")
@@ -71,9 +81,12 @@ class CommandListener:
         while self.is_paused:
             await asyncio.sleep(1)
             payload = await self.check_commands()
-            if payload and isinstance(payload, dict) and "questions" in payload and interview_callback:
-                logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
-                await interview_callback(payload)
+            if payload and isinstance(payload, dict):
+                if "questions" in payload and interview_callback:
+                    logger.info(f"Performing mid-simulation interview with {len(payload['questions'])} questions")
+                    await interview_callback(payload)
+                elif payload.get("action") == "intervention":
+                    return payload
                 
             if self.should_stop:
                 break

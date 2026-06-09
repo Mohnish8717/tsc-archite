@@ -8,6 +8,7 @@ import { cleanPersonaName } from '../../utils/nameHelper';
 import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2, ThumbsUp } from 'lucide-react';
 import { normalizeBio, parseBioSections } from './AssemblyMatrix';
 import { EagleEyeInterrogationModal } from './EagleEyeInterrogationModal';
+import { InterventionPanel } from './InterventionPanel';
 
 
 // ─── Stable hash → position ──────────────────────────────────────────────────
@@ -31,14 +32,17 @@ function Ground() {
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.95, 0]} receiveShadow>
       <planeGeometry args={[250, 250]} />
-      <meshStandardMaterial color="#FAF9F6" roughness={0.9} metalness={0.1} />
+      <meshBasicMaterial color="#F8FAFC" />
     </mesh>
   );
 }
 
 function GridLines() {
-  const grid = useMemo(() => new THREE.GridHelper(120, 24, '#CBD5E1', '#E2E8F0'), []);
-  return <primitive object={grid} position={[0, -1.94, 0]} receiveShadow />;
+  const size = 150;
+  const divisions = 40;
+  return (
+    <gridHelper args={[size, divisions, '#CBD5E1', '#F1F5F9']} position={[0, -1.94, 0]} />
+  );
 }
 
 // ─── Connection edge between two agents ──────────────────────────────────────
@@ -48,8 +52,8 @@ function ConnectionEdge({ from, to, active, actionType }: {
   active: boolean;
   actionType: string;
 }) {
-  const color = actionType === 'upvote' ? '#10B981' : actionType === 'downvote' ? '#EF4444' : '#F59E0B';
-  const opacity = active ? 0.95 : 0.2;
+  const color = '#000000';
+  const opacity = 1;
 
   const points = useMemo(() => {
     // Shift up to connect perfectly to the glossy spheres
@@ -72,10 +76,10 @@ function ConnectionEdge({ from, to, active, actionType }: {
   return (
     <Line
       points={points}
-      color={color}
-      lineWidth={active ? 3.0 : 1.2}
-      transparent
-      opacity={opacity}
+      color="#94A3B8"
+      lineWidth={active ? 3.0 : 1.5}
+      transparent={true}
+      opacity={0.6}
     />
   );
 }
@@ -122,14 +126,14 @@ function TopologyEdge({ from, to }: {
     <group>
       <Line
         points={points.points}
-        color="#06B6D4"
+        color="#38BDF8"
         lineWidth={1.5}
-        transparent
-        opacity={0.35}
+        transparent={true}
+        opacity={0.4}
       />
       <mesh ref={pulseRef}>
-        <sphereGeometry args={[0.2, 16, 16]} />
-        <meshStandardMaterial color="#22D3EE" emissive="#06B6D4" emissiveIntensity={1.5} />
+        <boxGeometry args={[0.3, 0.3, 0.3]} />
+        <meshBasicMaterial color="#38BDF8" />
       </mesh>
     </group>
   );
@@ -162,14 +166,16 @@ function Pulse({ from, to, actionType, onDone }: {
     if (ref.current) {
       const pt = curve.getPointAt(t.current);
       ref.current.position.copy(pt);
+      ref.current.rotation.x += delta * 5;
+      ref.current.rotation.y += delta * 5;
     }
     if (t.current >= 1) onDone();
   });
 
   return (
     <mesh ref={ref}>
-      <sphereGeometry args={[0.3, 16, 16]} />
-      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1.2} />
+      <boxGeometry args={[0.5, 0.5, 0.5]} />
+      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.5} />
     </mesh>
   );
 }
@@ -190,11 +196,18 @@ const ROLE_SKIN: Record<string, string> = {
   'Churn Risk': '#EF4444',      // Red alert
 };
 
-function roleSkin(role: string) {
-  return ROLE_SKIN[role] ?? '#8B5CF6'; // Vibrant Purple as premium fallback
+function roleSkin(role: string, name?: string) {
+  if (ROLE_SKIN[role]) return ROLE_SKIN[role];
+  const fallbackColors = ['#F59E0B', '#10B981', '#3B82F6', '#EC4899', '#8B5CF6', '#14B8A6', '#F43F5E'];
+  if (!name) return '#334155';
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h += name.charCodeAt(i);
+  return fallbackColors[h % fallbackColors.length];
 }
 
-// ─── Premium Abstract Node Pin (Replaces Blocky humanoid geometry) ──────────
+// Removed WorldGlobe to prevent clipping and visual clutter
+
+// ─── Premium Abstract Node Pin ────────────────────────────────────────────────
 function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
   agent: any; isSelected: boolean; onClick: () => void; onInterrogate?: (id: string) => void;
 }) {
@@ -210,7 +223,7 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
     }
   }, [isSelected]);
 
-  const skin = isSelected ? '#F59E0B' : roleSkin(agent.role);
+  const skin = isSelected || agent.hot ? '#F59E0B' : '#F8FAFC';
 
   useFrame(({ clock }) => {
     if (!groupRef.current) return;
@@ -249,51 +262,39 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
   return (
     <group ref={groupRef} position={agent.pos}>
 
-      {/* Modern Soft Ground Shadow disc */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.94, 0]}>
-        <circleGeometry args={[1.4, 32]} />
-        <meshStandardMaterial color="#000000" transparent opacity={0.12} roughness={1} />
+      {/* Soft Drop Shadow on Ground */}
+      <mesh position={[0, -1.95, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[1.5, 32]} />
+        <meshBasicMaterial color="#000000" transparent opacity={0.1} />
       </mesh>
 
-      {/* Beveled slate pedestal / Base disc */}
+      {/* Clean Flat Base Pedestal */}
       <mesh position={[0, -1.8, 0]} castShadow receiveShadow {...pp}>
-        <cylinderGeometry args={[0.9, 1.1, 0.3, 8]} />
-        <meshStandardMaterial color={isSelected ? '#F59E0B' : '#1F2937'} roughness={0.4} metalness={0.8} />
-      </mesh>
-      <mesh position={[0, -1.8, 0]}>
-        <cylinderGeometry args={[0.92, 1.12, 0.31, 8]} />
-        <meshBasicMaterial color="#000000" wireframe />
+        <cylinderGeometry args={[0.9, 0.9, 0.3, 32]} />
+        <meshBasicMaterial color={isSelected ? '#F59E0B' : '#FFFFFF'} />
       </mesh>
 
-      {/* High-gloss Chrome Stand / Stem */}
+      {/* Stem */}
       <mesh position={[0, -1.0, 0]} castShadow {...pp}>
-        <cylinderGeometry args={[0.06, 0.06, 1.3, 12]} />
-        <meshStandardMaterial color="#E5E7EB" roughness={0.05} metalness={0.95} />
-      </mesh>
-      <mesh position={[0, -1.0, 0]}>
-        <cylinderGeometry args={[0.07, 0.07, 1.31, 12]} />
-        <meshBasicMaterial color="#000000" wireframe />
+        <cylinderGeometry args={[0.12, 0.12, 1.3, 8]} />
+        <meshStandardMaterial color="#334155" roughness={0.5} metalness={0.4} />
       </mesh>
 
-      {/* Glossy Core Sphere */}
+      {/* Soft Flat Core Sphere */}
       <mesh ref={headRef} position={[0, 0.4, 0]} castShadow receiveShadow {...pp}>
         <sphereGeometry args={[0.75, 32, 32]} />
-        <meshStandardMaterial color={skin} roughness={0.15} metalness={0.4} />
-      </mesh>
-      <mesh position={[0, 0.4, 0]}>
-        <sphereGeometry args={[0.77, 12, 12]} />
-        <meshBasicMaterial color="#000000" wireframe transparent opacity={0.35} />
+        <meshStandardMaterial color={skin} roughness={0.6} metalness={0.2} />
+        <mesh>
+          <sphereGeometry args={[0.79, 32, 32]} />
+          <meshBasicMaterial color="#000000" side={THREE.BackSide} />
+        </mesh>
       </mesh>
 
       {/* Active Aura/Halo Torus */}
       {(agent.hot || isSelected) && (
         <mesh ref={ringRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.4, 0]}>
-          <torusGeometry args={[1.15, 0.08, 8, 32]} />
-          <meshStandardMaterial 
-            color={isSelected ? '#F59E0B' : '#06B6D4'} 
-            emissive={isSelected ? '#D97706' : '#0891B2'} 
-            emissiveIntensity={1.8} 
-          />
+          <torusGeometry args={[1.25, 0.1, 16, 32]} />
+          <meshBasicMaterial color={isSelected ? '#F59E0B' : '#000000'} />
         </mesh>
       )}
 
@@ -337,11 +338,10 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
             onPointerDown={(e) => e.stopPropagation()}
             style={{
               transform: 'translateY(-40%)',
-              background: 'rgba(255, 255, 255, 0.90)',
-              backdropFilter: 'blur(16px)',
+              background: '#FFFFFF',
               border: '6px solid #000000',
               boxShadow: '8px 8px 0 0 #000000',
-              borderRadius: '16px',
+              borderRadius: '0px',
               padding: '20px',
               width: '360px',
               maxHeight: '65vh',
@@ -350,15 +350,15 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
               color: '#000000',
               zIndex: 2147483647,
             }}>
-            {/* Header */}
+              {/* Header */}
             <div style={{ borderBottom: '4px solid #000000', paddingBottom: '12px', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <div style={{ flex: 1, minWidth: 0, marginRight: '16px' }}>
                 <div style={{ fontWeight: 900, fontSize: '16px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.name}</div>
                 <div style={{ 
                   fontSize: '9px', 
                   fontWeight: 900, 
-                  background: skin, 
-                  color: isSelected ? '#000000' : '#FFFFFF', 
+                  background: '#FFFFFF', 
+                  color: '#000000', 
                   padding: '4px 8px',
                   border: '2px solid #000000',
                   boxShadow: '2px 2px 0px #000000',
@@ -414,12 +414,12 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
             {/* MBTI & Journey Details */}
             <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
               {agent.mbti && (
-                <div style={{ flex: 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
+                <div style={{ flex: 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '0px' }}>
                   <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase' }}>MBTI</div>
                   <div style={{ fontSize: '13px', fontWeight: 900, color: '#000000' }}>{agent.mbti}</div>
                 </div>
               )}
-              <div style={{ flex: agent.mbti ? 1.5 : 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '4px' }}>
+              <div style={{ flex: agent.mbti ? 1.5 : 1, border: '3px solid #000000', padding: '6px', background: '#F3F4F6', textAlign: 'center', borderRadius: '0px' }}>
                 <div style={{ fontSize: '8px', fontWeight: 900, color: '#6B7280', textTransform: 'uppercase' }}>Journey Stage</div>
                 <div style={{ fontSize: '11px', fontWeight: 900, color: '#F59E0B', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.buyerJourney || 'UNKNOWN'}</div>
               </div>
@@ -507,35 +507,37 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   {[
-                    { label: 'O - Openness', val: agent.ocean.O, color: '#EC4899' },
-                    { label: 'C - Conscientious', val: agent.ocean.C, color: '#2563EB' },
-                    { label: 'E - Extraversion', val: agent.ocean.E, color: '#0D9488' },
-                    { label: 'A - Agreeable', val: agent.ocean.A, color: '#F59E0B' },
-                    { label: 'N - Neuroticism', val: agent.ocean.N, color: '#EF4444' }
-                  ].map((trait, i) => (
+                    { label: 'O - Openness', val: agent.ocean.O },
+                    { label: 'C - Conscientious', val: agent.ocean.C },
+                    { label: 'E - Extraversion', val: agent.ocean.E },
+                    { label: 'A - Agreeable', val: agent.ocean.A },
+                    { label: 'N - Neuroticism', val: agent.ocean.N }
+                  ].map((trait, i, arr) => {
+                    const isMax = trait.val === Math.max(...arr.map(t => t.val));
+                    return (
                     <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 900 }}>
                         <span>{trait.label}</span>
                         <span>{trait.val}%</span>
                       </div>
-                      <div style={{ height: '8px', border: '2px solid #000000', background: '#E5E7EB', overflow: 'hidden', borderRadius: '2px' }}>
-                        <div style={{ height: '100%', width: `${trait.val}%`, background: trait.color }} />
+                      <div style={{ height: '8px', border: '2px solid #000000', background: '#FFFFFF', overflow: 'hidden', borderRadius: '2px' }}>
+                        <div style={{ height: '100%', width: `${trait.val}%`, background: isMax ? '#F59E0B' : '#000000' }} />
                       </div>
                     </div>
-                  ))}
+                  )})}
                 </div>
               </div>
             )}
 
             {/* Vote stats */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0', border: '4px solid #000000', marginBottom: '12px', borderRadius: '4px', overflow: 'hidden' }}>
-              <div style={{ padding: '6px', textAlign: 'center', borderRight: '2px solid #000000', background: '#F0FDF4' }}>
-                <div style={{ fontSize: '8px', fontWeight: 900, color: '#16A34A', textTransform: 'uppercase' }}>Trust Upvotes</div>
-                <div style={{ fontSize: '18px', fontWeight: 900, color: '#16A34A' }}>{agent.upvotes}</div>
+              <div style={{ padding: '6px', textAlign: 'center', borderRight: '2px solid #000000', background: '#FFFFFF' }}>
+                <div style={{ fontSize: '8px', fontWeight: 900, color: '#000000', textTransform: 'uppercase' }}>Trust Upvotes</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#000000' }}>{agent.upvotes}</div>
               </div>
-              <div style={{ padding: '6px', textAlign: 'center', borderLeft: '2px solid #000000', background: '#FEF2F2' }}>
-                <div style={{ fontSize: '8px', fontWeight: 900, color: '#DC2626', textTransform: 'uppercase' }}>Friction Downvotes</div>
-                <div style={{ fontSize: '18px', fontWeight: 900, color: '#DC2626' }}>{agent.downvotes}</div>
+              <div style={{ padding: '6px', textAlign: 'center', borderLeft: '2px solid #000000', background: '#FFFFFF' }}>
+                <div style={{ fontSize: '8px', fontWeight: 900, color: '#000000', textTransform: 'uppercase' }}>Friction Downvotes</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#000000' }}>{agent.downvotes}</div>
               </div>
             </div>
 
@@ -558,7 +560,7 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                     style={{
                       border: '2px solid #000000',
                       padding: '6px',
-                      background: a.action_type === 'upvote' ? '#F0FDF4' : a.action_type === 'downvote' ? '#FEF2F2' : '#FFF7ED',
+                      background: '#F9FAFB',
                       cursor: 'pointer',
                       borderRadius: '4px',
                     }}
@@ -568,8 +570,8 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                         fontSize: '7px', fontWeight: 900, textTransform: 'uppercase',
                         padding: '1px 4px',
                         border: '1px solid #000000',
-                        background: a.action_type === 'upvote' ? '#16A34A' : a.action_type === 'downvote' ? '#DC2626' : '#FF4500',
-                        color: '#FFFFFF',
+                        background: '#E5E7EB',
+                        color: '#000000',
                       }}>{a.action_type}</span>
                       <span style={{ fontSize: '8px', color: '#6B7280', fontWeight: 700 }}>{new Date(a.timestamp).toLocaleTimeString()}</span>
                     </div>
@@ -777,7 +779,7 @@ export default function OASIS3D() {
   const {
     activeAgents, hotScoreAvg, tensionStatus, actions,
     networkTopology, sycophancyAlerts, eagleEyeResults, seedPosts,
-    simulationStatus,
+    simulationStatus, sessionId,
     upvotedItems, upvoteItem, sqliteData
   } = usePipelineStore();
   const [selectedPos, setSelectedPos] = useState<[number, number, number] | null>(null);
@@ -785,6 +787,7 @@ export default function OASIS3D() {
   const [showAlerts, setShowAlerts] = useState(false);
   const [showTopologyLines, setShowTopologyLines] = useState(false);
   const [isInterrogationModalOpen, setIsInterrogationModalOpen] = useState(false);
+  const [isInterventionModalOpen, setIsInterventionModalOpen] = useState(false);
   const [interrogationAgentId, setInterrogationAgentId] = useState<string>('');
   
   // Custom drag reveal width states
@@ -792,8 +795,10 @@ export default function OASIS3D() {
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  const [activeColumnIndex, setActiveColumnIndex] = useState(0);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<'seeds' | 'eagle' | 'swarm'>('seeds');
+  const [isEagleCollapsed, setIsEagleCollapsed] = useState(false);
+  const [isSeedsCollapsed, setIsSeedsCollapsed] = useState(false);
+  const [isSwarmCollapsed, setIsSwarmCollapsed] = useState(false);
 
   const isPanelExpanded = panelWidth > 750;
 
@@ -825,21 +830,6 @@ export default function OASIS3D() {
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, [isDragging]);
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const container = e.currentTarget;
-    const index = Math.round(container.scrollLeft / container.clientWidth);
-    setActiveColumnIndex(index);
-  };
-
-  const scrollToColumn = (index: number) => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({
-        left: index * scrollRef.current.clientWidth,
-        behavior: 'smooth'
-      });
-    }
-  };
 
   const [activityFilter, setActivityFilter] = useState<'combined' | 'posts' | 'comments'>('combined');
   const [expandedActionIds, setExpandedActionIds] = useState<Set<string>>(new Set());
@@ -873,7 +863,7 @@ export default function OASIS3D() {
     if (sqliteData?.posts) {
       sqliteData.posts.forEach((p: any) => {
         items.push({
-          id: p.post_id,
+          id: `post_${p.post_id}`,
           type: 'post',
           author: cleanPersonaName(p.user_name || p.user_id),
           content: p.content,
@@ -888,12 +878,12 @@ export default function OASIS3D() {
     if (sqliteData?.comments) {
       sqliteData.comments.forEach((c: any) => {
         items.push({
-          id: c.comment_id,
+          id: `comment_${c.comment_id}`,
           type: 'comment',
           author: cleanPersonaName(c.user_name || c.user_id),
           content: c.content,
           timestamp: c.created_at,
-          targetId: c.post_id,
+          targetId: c.post_id ? String(c.post_id) : undefined,
           source: 'sqlite',
           original: c
         });
@@ -908,20 +898,38 @@ export default function OASIS3D() {
       else if (typeLower === 'comment') type = 'comment';
       else if (typeLower === 'upvote' || typeLower === 'downvote' || typeLower === 'like') type = 'interaction';
       
+      const rawEntityId = a.metadata?.entity_id ? String(a.metadata.entity_id) : null;
+      let namespacedId = `action_${a.agent_id}_${i}_${a.timestamp}`;
+      if (rawEntityId) {
+        if (type === 'post') namespacedId = `post_${rawEntityId}`;
+        else if (type === 'comment') namespacedId = `comment_${rawEntityId}`;
+        else namespacedId = `interaction_${rawEntityId}`;
+      }
+      
       items.push({
-        id: `action_${a.agent_id}_${i}_${a.timestamp}`,
+        id: namespacedId,
         type: type,
         author: cleanPersonaName(a.agent_name),
         content: a.content,
         timestamp: a.timestamp,
-        targetId: a.metadata?.target_id,
+        targetId: a.metadata?.target_id ? String(a.metadata.target_id) : undefined,
         source: 'action',
         original: a
       });
     });
 
+    // Deduplicate by ID (prefer sqlite source as the source of truth)
+    const uniqueItemsMap = new Map();
+    items.forEach(item => {
+      if (!uniqueItemsMap.has(item.id) || item.source === 'sqlite') {
+        uniqueItemsMap.set(item.id, item);
+      }
+    });
+    
+    const uniqueItems = Array.from(uniqueItemsMap.values());
+
     // Sort by timestamp
-    return items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return uniqueItems.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [actions, sqliteData, seedPosts]);
 
   const filteredFeed = useMemo(() => {
@@ -933,14 +941,18 @@ export default function OASIS3D() {
 
   const getPostContent = (targetId?: string) => {
     if (!targetId) return null;
-    const post = combinedFeed.find(item => String(item.id) === String(targetId));
+    const post = combinedFeed.find(item => 
+      String(item.id) === `post_${targetId}` || 
+      String(item.id) === `comment_${targetId}` || 
+      String(item.id) === String(targetId)
+    );
     if (post) return post.content;
     return 'Original post content hidden or deleted.';
   };
 
   // --- Sub-render blocks for sidebar sections ---
   const debateSeedsBody = (
-    <div className="flex-1 divide-y-2 divide-black/10 bg-white overflow-y-auto">
+    <div className="flex-1 divide-y-2 divide-black/10 bg-white overflow-y-auto invisible-scroll">
       {seedPosts.map((s, i) => (
         <div key={i} className="flex gap-3 p-3 text-left">
           <span className="font-black text-[10px] border-2 border-black bg-brand px-2 py-0.5 h-fit mt-0.5 flex-none shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
@@ -957,24 +969,130 @@ export default function OASIS3D() {
     </div>
   );
 
+  const QAPairBlock = ({ question, answer }: { question: string, answer: string }) => {
+    const [expanded, setExpanded] = React.useState(false);
+    const cleanQ = question.replace(/^Q:\s*/, '').trim();
+    const cleanA = answer.replace(/^A:\s*/, '').trim();
+
+    return (
+      <div className="flex flex-col mb-8 mt-2">
+        <div 
+          className={`p-5 bg-white border-2 border-black shadow-[4px_4px_0_0_#000] cursor-pointer hover:bg-neutral-50 transition-colors relative z-10`}
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+        >
+          <div className="absolute -top-3 left-3 text-white text-[9px] font-black uppercase tracking-widest px-2 py-0.5 border-2 border-black bg-[#FF4500] shadow-[2px_2px_0_0_#000]">
+            Interrogation
+          </div>
+          <span className="text-black font-medium font-sans block pt-1 text-sm whitespace-pre-wrap leading-relaxed">
+            {cleanQ}
+          </span>
+          {cleanA && (
+            <div className="mt-3 text-right">
+              <span className="text-[10px] font-black uppercase text-[#FF4500] border-b-2 border-transparent hover:border-[#FF4500] transition-colors pb-0.5">
+                {expanded ? '[-]' : '[+]'}
+              </span>
+            </div>
+          )}
+        </div>
+        
+        {expanded && cleanA && (
+          <div className="p-5 bg-[#F8FAFC] border-2 border-black shadow-[4px_4px_0_0_#000] ml-6 mt-6 relative z-0">
+            <div className="absolute -top-3 left-3 text-white text-[9px] font-black uppercase tracking-widest px-2 py-0.5 border-2 border-black bg-[#10B981] shadow-[2px_2px_0_0_#000]">
+              Response
+            </div>
+            <span className="text-black font-medium font-sans block pt-1 text-sm whitespace-pre-wrap leading-relaxed">
+              {cleanA}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const InterrogationContent = ({ content, globalExpanded }: { content: string, globalExpanded: boolean }) => {
+    if (!content.includes('Q:') && !content.includes('A:')) {
+      const text = globalExpanded ? content : `${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`;
+      return <span className="text-black/80 font-mono whitespace-pre-wrap text-[13px] leading-relaxed block mt-2">{text}</span>;
+    }
+
+    const parts = content.split(/(?=^Q:|^A:)/m);
+    
+    const blocks: React.ReactNode[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.startsWith('Q:')) {
+        let answer = '';
+        if (i + 1 < parts.length && parts[i + 1].startsWith('A:')) {
+          answer = parts[i + 1];
+          i++; 
+        }
+        blocks.push(<QAPairBlock key={i} question={part} answer={answer} />);
+      } else if (part.startsWith('A:')) {
+        blocks.push(
+          <div key={i} className="p-4 bg-[#F8FAFC] border-2 border-black shadow-[4px_4px_0_0_#000] mb-4 relative ml-4 mt-4">
+            <div className="absolute -top-3 left-3 text-white text-[9px] font-black uppercase tracking-widest px-2 py-0.5 border-2 border-black bg-[#10B981] shadow-[2px_2px_0_0_#000]">
+              Response
+            </div>
+            <span className="text-black font-medium font-sans block pt-2 text-sm whitespace-pre-wrap leading-relaxed">
+              {part.replace(/^A:\s*/, '').trim()}
+            </span>
+          </div>
+        );
+      } else if (part.trim()) {
+        const text = globalExpanded ? part.trim() : `${part.trim().slice(0, 150)}${part.trim().length > 150 ? '...' : ''}`;
+        blocks.push(
+          <span key={i} className="text-black/80 font-mono whitespace-pre-wrap text-[13px] leading-relaxed block mb-4">
+            {text}
+          </span>
+        );
+      }
+    }
+
+    return (
+      <div className="flex flex-col mt-4 font-mono">
+        {blocks}
+      </div>
+    );
+  };
+
   const eaglesEyeBody = (
-    <div className="flex-1 divide-y-2 divide-black/10 bg-white overflow-y-auto">
+    <div className="flex-1 divide-y-2 divide-black/10 bg-[#FAF9F6] overflow-y-auto invisible-scroll">
       {eagleEyeResults.slice().reverse().map((r, i) => {
         const actionKey = `eagle-${i}`;
         const isExpanded = expandedActionIds.has(actionKey);
+        // Use current time if timestamp is missing
+        const timeStr = r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+        
         return (
           <div
             key={i}
             onClick={() => toggleActionExpanded(actionKey)}
-            className="p-3 hover:bg-neutral-50 cursor-pointer transition-colors text-left"
+            className={`p-4 hover:bg-neutral-100 cursor-pointer transition-colors text-left border-b-2 border-black/5 last:border-b-0 ${isExpanded ? 'bg-neutral-50' : ''}`}
           >
-            <div className="flex justify-between items-center mb-1">
-              <span className="font-black text-xs uppercase text-black/80">{r.agent_name}</span>
-              <span className="text-[10px] font-black text-black/40">INTERCEPTED</span>
+            <div className={`flex justify-between items-center ${isExpanded ? 'mb-3' : ''}`}>
+              <div className="flex items-center gap-2">
+                <div className="w-3.5 h-3.5 bg-[#FF5722] border-2 border-black shadow-[1px_1px_0px_0px_rgba(0,0,0,1)]" />
+                <span className="font-black text-xs uppercase tracking-widest text-black">{r.agent_name}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] font-black text-black/40 uppercase tracking-widest">{timeStr}</span>
+                <span className="text-[10px] font-black text-brand uppercase tracking-widest select-none w-4 text-center">
+                  {isExpanded ? '[-]' : '[+]'}
+                </span>
+              </div>
             </div>
-            <p className="text-xs font-bold text-black/60 leading-relaxed whitespace-pre-wrap">
-              {isExpanded ? r.content : `${r.content.slice(0, 100)}${r.content.length > 100 ? '...' : ''}`}
-            </p>
+            
+            {isExpanded ? (
+              <div className="ml-1.5 pl-4 border-l-[3px] border-[#FF5722]/50">
+                <div className="text-[13px] font-mono font-bold leading-relaxed whitespace-pre-wrap">
+                  <InterrogationContent content={r.content} globalExpanded={isExpanded} />
+                </div>
+              </div>
+            ) : (
+              <div className="ml-6 mt-1 text-[10px] font-bold text-black/40 uppercase tracking-widest truncate">
+                {r.content.replace(/\n+/g, ' ').slice(0, 60)}...
+              </div>
+            )}
           </div>
         );
       })}
@@ -988,23 +1106,8 @@ export default function OASIS3D() {
 
   const liveSwarmBody = (
     <div className="flex-1 flex flex-col min-h-0 bg-white">
-      {/* Filter Tabs */}
-      <div className="flex border-b-4 border-black font-black text-xs uppercase">
-        {(['combined', 'posts', 'comments'] as const).map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActivityFilter(tab)}
-            className={`flex-1 py-2 text-center border-r-4 last:border-r-0 border-black cursor-pointer transition-colors ${
-              activityFilter === tab ? 'bg-brand text-black font-black' : 'bg-neutral-100 text-black/60 hover:bg-neutral-200'
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
       {/* Activity Feed */}
-      <div className="flex-1 overflow-y-auto divide-y-2 divide-black/10">
+      <div className="flex-1 overflow-y-auto divide-y-2 divide-black/10 invisible-scroll">
         {filteredFeed.map((item) => {
           const actionKey = item.id;
           const isExpanded = expandedActionIds.has(actionKey);
@@ -1029,13 +1132,23 @@ export default function OASIS3D() {
               <div className="flex items-start gap-2.5">
                 <span className={`w-2.5 h-2.5 mt-1 border border-black shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] flex-none ${iconColor}`} />
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
+                  <div 
+                    className={`flex items-center justify-between gap-2 ${hasContent ? 'cursor-pointer' : ''}`}
+                    onClick={() => hasContent && toggleActionExpanded(actionKey)}
+                  >
                     <span className="font-black text-xs uppercase truncate text-black/90">
                       {item.author}
                     </span>
-                    <span className="text-[9px] font-black text-black/40 flex-none">
-                      {timeStr}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] font-black text-black/40 flex-none">
+                        {timeStr}
+                      </span>
+                      {hasContent && (
+                        <span className="text-[10px] font-black text-brand uppercase tracking-widest select-none w-4 text-center">
+                          {isExpanded ? '[-]' : '[+]'}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   
                   {item.type === 'comment' && item.targetId && (
@@ -1045,12 +1158,28 @@ export default function OASIS3D() {
                   )}
 
                   {item.content && (
-                    <p 
+                    <div 
                       onClick={() => hasContent && toggleActionExpanded(actionKey)}
-                      className={`text-xs font-bold text-black/70 leading-relaxed mt-1 border-l-2 border-brand/50 pl-2 ${hasContent ? 'cursor-pointer' : ''}`}
+                      className={`mt-2 ${hasContent ? 'cursor-pointer' : ''} ${
+                        isExpanded 
+                          ? `border-l-[3px] pl-3 ${
+                              item.sentiment === 'positive' ? 'border-[#10B981]/50' : 
+                              item.sentiment === 'negative' ? 'border-[#EF4444]/50' : 
+                              'border-[#FF5722]/50'
+                            }` 
+                          : 'ml-0'
+                      }`}
                     >
-                      {isExpanded ? item.content : `${item.content.slice(0, 100)}${item.content.length > 100 ? '...' : ''}`}
-                    </p>
+                      {isExpanded ? (
+                        <div className="text-[13px] font-mono font-bold leading-relaxed whitespace-pre-wrap text-black/80">
+                          <InterrogationContent content={item.content} globalExpanded={isExpanded} />
+                        </div>
+                      ) : (
+                        <div className="mt-1 text-[10px] font-bold text-black/40 uppercase tracking-widest truncate">
+                          {item.content.replace(/\n+/g, ' ').slice(0, 60)}...
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {['post', 'comment'].includes(item.type) && (
@@ -1174,14 +1303,15 @@ export default function OASIS3D() {
       )}
 
       {/* ── 3D Canvas ─── */}
-      <div className="absolute inset-0" style={{ top: '44px' }}>
+      <div className="absolute inset-0" style={{ top: '44px', backgroundColor: '#F8FAFC' }}>
         <Canvas shadows dpr={[1, 1.5]}>
+          <color attach="background" args={['#F8FAFC']} />
           <OrthographicCamera makeDefault position={[40, 40, 40]} zoom={16} near={-200} far={200} />
-          <ambientLight intensity={0.7} />
-          <hemisphereLight skyColor="#ffffff" groundColor="#1a1a2e" intensity={0.4} />
+          <ambientLight intensity={1.0} />
           <directionalLight
             position={[20, 40, 20]}
-            intensity={1.4}
+            intensity={0.5}
+            color="#FFFFFF"
             castShadow
             shadow-mapSize-width={2048}
             shadow-mapSize-height={2048}
@@ -1193,7 +1323,6 @@ export default function OASIS3D() {
             shadow-camera-bottom={-40}
             shadow-bias={-0.0005}
           />
-          <pointLight position={[-15, 25, -15]} intensity={1.8} color="#F97316" distance={80} decay={1.5} />
           <CamController selectedPos={selectedPos} />
           <NetworkScene 
             onSelect={setSelectedPos} 
@@ -1279,113 +1408,232 @@ export default function OASIS3D() {
       {/* ── Consolidated Monitor Sidebar (right) ─── */}
       {showMonitorPanel && (
         <div 
-          className={`absolute top-14 right-4 bottom-14 bg-white border-8 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-mono ${
+          className={`absolute top-14 right-4 bottom-14 bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-sans ${
             isDragging ? '' : 'transition-all duration-300'
           }`}
           style={{ width: `${panelWidth}px`, zIndex: 2147483646 }}
         >
-          {/* Dynamic Drag Edge Resizer */}
+          {/* Invisible Drag Handle */}
           <div
             onMouseDown={handleMouseDown}
-            className="absolute top-0 bottom-0 left-0 w-2 cursor-ew-resize bg-black hover:bg-brand transition-colors z-30 flex items-center justify-center select-none"
+            className="absolute -left-2 top-0 bottom-0 w-4 cursor-ew-resize z-30 flex items-center justify-center select-none group"
             title="Drag to resize panel"
           >
-            <div className="w-[1.5px] h-8 bg-white/40 rounded-full" />
+            <div className="w-1.5 h-16 bg-black opacity-0 group-hover:opacity-100 transition-opacity rounded-full shadow-[2px_2px_0_0_#FF4500]" />
           </div>
 
-          <div className="bg-black text-white px-4 py-3 border-b-4 border-brand flex items-center justify-between pl-6">
-            <div className="flex items-center gap-2">
-              <Activity className="w-5 h-5 text-brand" strokeWidth={3} />
-              <span className="font-black text-xs uppercase tracking-widest select-none">OASIS Monitor Panel</span>
+          <div className="bg-white text-black px-4 py-3 border-b-4 border-black flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 flex-none">
+              <Activity className="w-6 h-6 text-brand" strokeWidth={4} />
+              {isPanelExpanded && (
+                <span className="font-black text-base uppercase tracking-[0.2em] select-none hidden sm:inline">Monitor Panel</span>
+              )}
             </div>
-            <div className="flex items-center gap-3">
+
+            {!isPanelExpanded && (
+              <div className="flex flex-1 gap-2 max-w-[400px]">
+                {[
+                  { id: 'seeds', label: `SEEDS (${seedPosts.length})` },
+                  { id: 'eagle', label: `EAGLE (${eagleEyeResults.length})` },
+                  { id: 'swarm', label: `SWARM (${actions.length})` }
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id as any)}
+                    className={`flex-1 py-1.5 px-1 text-center font-black text-[10px] uppercase tracking-widest border-2 border-black transition-all duration-150 truncate ${
+                      activeTab === tab.id
+                        ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[2px] translate-y-[2px]'
+                        : 'bg-white text-black shadow-[4px_4px_0_0_#000] hover:bg-neutral-50 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[3px_3px_0_0_#000]'
+                    }`}
+                    title={tab.label}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 flex-none">
               <button 
                 onClick={() => setPanelWidth(isPanelExpanded ? 400 : 1100)} 
-                className="text-white hover:text-brand cursor-pointer transition-colors p-1"
+                className="text-black hover:text-brand cursor-pointer transition-transform hover:scale-110 p-1 bg-white border-2 border-transparent hover:border-black hover:shadow-[2px_2px_0_0_#000] rounded-sm"
                 title={isPanelExpanded ? "Collapse panel to side" : "Expand panel to full-width side-by-side"}
               >
                 {isPanelExpanded ? <Minimize2 className="w-5 h-5" strokeWidth={3} /> : <Maximize2 className="w-5 h-5" strokeWidth={3} />}
               </button>
-              <button onClick={() => setShowMonitorPanel(false)} className="text-white hover:text-brand cursor-pointer transition-colors p-1">
+              <button 
+                onClick={() => setShowMonitorPanel(false)} 
+                className="text-black hover:text-brand cursor-pointer transition-transform hover:scale-110 p-1 bg-white border-2 border-transparent hover:border-black hover:shadow-[2px_2px_0_0_#000] rounded-sm"
+              >
                 <X className="w-5 h-5" strokeWidth={3} />
               </button>
             </div>
           </div>
 
-          {/* Tab bar header switcher shown ONLY when collapsed/single column mode */}
-          {!isPanelExpanded && (
-            <div className="flex border-b-4 border-black font-black text-[10px] uppercase bg-neutral-100 select-none pl-4">
-              {['Seeds', "Eagle's Eye", 'Live Swarm'].map((tabName, index) => (
-                <button
-                  key={tabName}
-                  onClick={() => scrollToColumn(index)}
-                  className={`flex-1 py-2.5 text-center border-r-4 last:border-r-0 border-black cursor-pointer transition-all duration-200 ${
-                    activeColumnIndex === index 
-                      ? 'bg-brand text-black font-black' 
-                      : 'bg-neutral-100 text-black/60 hover:bg-neutral-200'
-                  }`}
-                >
-                  {tabName}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Horizontally scrollable panel layout if collapsed, side-by-side if expanded */}
+          {/* Content Area - Conditional Rendering or Side-by-Side */}
           <div 
-            ref={scrollRef}
-            onScroll={isPanelExpanded ? undefined : handleScroll}
-            className={`flex-1 flex flex-row divide-x-8 divide-black select-none ${
-              isPanelExpanded 
-                ? 'overflow-hidden' 
-                : 'overflow-x-auto scrollbar-thin select-text'
-            }`}
+            className={`flex-1 flex flex-row bg-white overflow-hidden`}
             onWheel={e => e.stopPropagation()}
           >
-            {/* Column 1: Controversy Seeds */}
-            <div className={`flex flex-col h-full bg-white pl-2 ${
-              isPanelExpanded ? 'flex-1 min-w-0' : 'w-full flex-shrink-0'
-            }`}>
-              <div className="bg-black text-white px-4 py-2 border-b-4 border-black flex items-center justify-between font-black text-xs uppercase tracking-widest select-none">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-brand" strokeWidth={3} />
-                  <span>Controversy Seeds ({seedPosts.length})</span>
+            {/* Controversy Seeds Column */}
+            {(isPanelExpanded || activeTab === 'seeds') && (
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
+                !isPanelExpanded ? 'w-full' : (isSeedsCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
+              }`}>
+                {isSeedsCollapsed && isPanelExpanded ? (
+                  <div 
+                    className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
+                    onClick={() => setIsSeedsCollapsed(false)}
+                    title="Expand Controversy Seeds"
+                  >
+                    <FileText className="w-5 h-5 text-brand mb-4 flex-none" strokeWidth={3} />
+                    <span className="font-black text-xs uppercase tracking-widest [writing-mode:vertical-lr] text-black">
+                      Controversy Seeds
+                    </span>
+                    <span className="mt-4 font-black text-brand">{"[+]"}</span>
+                  </div>
+                ) : (
+                  <>
+                    {isPanelExpanded && (
+                      <div className="flex items-center gap-2 p-4 font-black text-sm uppercase tracking-wide border-b-4 border-black bg-neutral-100">
+                        <FileText className="w-4 h-4 text-brand" strokeWidth={3} />
+                        <span className="truncate">Controversy Seeds ({seedPosts.length})</span>
+                        <button 
+                          onClick={() => setIsSeedsCollapsed(true)}
+                          className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
+                          title="Collapse Column"
+                        >
+                          {"[-]"}
+                        </button>
+                      </div>
+                    )}
+                <div className="flex-1 overflow-hidden p-4 flex flex-col">
+                  {debateSeedsBody}
                 </div>
+                </>
+                )}
               </div>
-              {debateSeedsBody}
-            </div>
+            )}
 
-            {/* Column 2: Eagle's Eye Insights */}
-            <div className={`flex flex-col h-full bg-white ${
-              isPanelExpanded ? 'flex-1 min-w-0' : 'w-full flex-shrink-0'
-            }`}>
-              <div className="bg-black text-white px-4 py-2 border-b-4 border-black flex items-center justify-between font-black text-xs uppercase tracking-widest select-none">
-                <div className="flex items-center gap-2">
-                  <Eye className="w-4 h-4 text-brand" strokeWidth={3} />
-                  <span>Eagle's Eye Insights ({eagleEyeResults.length})</span>
-                </div>
-                <button 
-                  onClick={() => setIsInterrogationModalOpen(true)}
-                  className="bg-brand text-black hover:bg-white px-2 py-1 font-bold text-[10px] transition-colors"
-                >
-                  INTERROGATE
-                </button>
+            {/* Eagle's Eye Column */}
+            {(isPanelExpanded || activeTab === 'eagle') && (
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
+                !isPanelExpanded ? 'w-full' : (isEagleCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
+              }`}>
+                {isEagleCollapsed && isPanelExpanded ? (
+                  <div 
+                    className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
+                    onClick={() => setIsEagleCollapsed(false)}
+                    title="Expand Eagle's Eye Insights"
+                  >
+                    <Eye className="w-5 h-5 text-brand mb-4 flex-none" strokeWidth={3} />
+                    <span className="font-black text-xs uppercase tracking-widest [writing-mode:vertical-lr] text-black">
+                      Eagle's Eye Insights
+                    </span>
+                    <span className="mt-4 font-black text-brand">{"[+]"}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between p-4 border-b-4 border-black bg-neutral-50">
+                      <div className="flex items-center gap-2 font-black text-sm uppercase tracking-wide">
+                        <Eye className="w-4 h-4 text-brand" strokeWidth={3} />
+                        <span className="truncate">Eagle's Eye Insights ({eagleEyeResults.length})</span>
+                      </div>
+                      {isPanelExpanded && (
+                        <button 
+                          onClick={() => setIsEagleCollapsed(true)}
+                          className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
+                          title="Collapse Column"
+                        >
+                          {"[-]"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-hidden p-4 flex flex-col">
+                      {eaglesEyeBody}
+                    </div>
+                    <div className="p-4 border-t-4 border-black bg-white z-10">
+                      <button 
+                        onClick={() => setIsInterrogationModalOpen(true)}
+                        className="w-full bg-brand text-black px-6 py-3 font-black text-xs uppercase tracking-widest border-2 border-black shadow-[4px_4px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] transition-all active:translate-x-[4px] active:translate-y-[4px] active:shadow-none"
+                      >
+                        Interrogate Agent
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
-              {eaglesEyeBody}
-            </div>
+            )}
 
-            {/* Column 3: Live Swarm Activity */}
-            <div className={`flex flex-col h-full bg-white ${
-              isPanelExpanded ? 'flex-1 min-w-0' : 'w-full flex-shrink-0'
-            }`}>
-              <div className="bg-black text-white px-4 py-2 border-b-4 border-black flex items-center justify-between font-black text-xs uppercase tracking-widest select-none">
-                <div className="flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-brand" strokeWidth={3} />
-                  <span>Live Swarm Activity ({actions.length})</span>
+            {/* Live Swarm Column */}
+            {(isPanelExpanded || activeTab === 'swarm') && (
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
+                !isPanelExpanded ? 'w-full' : (isSwarmCollapsed ? 'w-12 flex-none overflow-hidden' : 'flex-1 min-w-0')
+              }`}>
+                {isSwarmCollapsed && isPanelExpanded ? (
+                  <div 
+                    className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
+                    onClick={() => setIsSwarmCollapsed(false)}
+                    title="Expand Live Swarm"
+                  >
+                    <Zap className="w-5 h-5 text-brand mb-4 flex-none" strokeWidth={3} />
+                    <span className="font-black text-xs uppercase tracking-widest [writing-mode:vertical-lr] text-black">
+                      Live Swarm
+                    </span>
+                    <span className="mt-4 font-black text-brand">{"[+]"}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between p-3 border-b-4 border-black bg-neutral-50 gap-3">
+                      <div className="flex items-center gap-2 font-black text-sm uppercase tracking-wide">
+                        <Zap className="w-4 h-4 text-brand" strokeWidth={3} />
+                        <span className="truncate">Live Swarm ({actions.length})</span>
+                      </div>
+                      <div className="flex gap-2 w-full xl:w-auto items-center">
+                        <div className="flex gap-1">
+                          {(['combined', 'posts', 'comments'] as const).map(tab => {
+                            const labels = { 'combined': 'ALL', 'posts': 'POSTS', 'comments': 'COMMENTS' };
+                            return (
+                              <button
+                                key={tab}
+                                onClick={() => setActivityFilter(tab)}
+                                className={`px-2 py-1 text-[9px] font-black uppercase tracking-widest border-2 border-black transition-all ${
+                                  activityFilter === tab 
+                                    ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[1px] translate-y-[1px]' 
+                                    : 'bg-white text-black shadow-[3px_3px_0_0_#000] hover:bg-neutral-100 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[2px_2px_0_0_#000]'
+                                }`}
+                              >
+                                {labels[tab]}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {isPanelExpanded && (
+                          <button 
+                            onClick={() => setIsSwarmCollapsed(true)}
+                            className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
+                            title="Collapse Column"
+                          >
+                            {"[-]"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                <div className="flex-1 overflow-hidden flex flex-col">
+                  {liveSwarmBody}
                 </div>
+                <div className="p-4 border-t-4 border-black bg-white z-10">
+                  <button 
+                    onClick={() => setIsInterventionModalOpen(true)}
+                    className="w-full bg-red-500 text-white px-6 py-3 font-black text-xs uppercase tracking-widest border-2 border-black shadow-[4px_4px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] transition-all active:translate-x-[4px] active:translate-y-[4px] active:shadow-none"
+                  >
+                    Intervene Manually
+                  </button>
+                </div>
+                </>
+                )}
               </div>
-              {liveSwarmBody}
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -1424,6 +1672,13 @@ export default function OASIS3D() {
         onClose={() => setIsInterrogationModalOpen(false)} 
         initialAgentId={interrogationAgentId}
       />
+      {sessionId && (
+        <InterventionPanel
+          sessionId={sessionId}
+          isOpen={isInterventionModalOpen}
+          onClose={() => setIsInterventionModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

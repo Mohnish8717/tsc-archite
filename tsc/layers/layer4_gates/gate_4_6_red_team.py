@@ -9,6 +9,7 @@ from tsc.models.personas import FinalPersona
 from tsc.models.graph import KnowledgeGraph
 from tsc.models.chunks import ProblemContextBundle
 from tsc.models.gates import GateResult, GateVerdict
+from tsc.llm.temperatures import L4_RED_TEAM
 
 # Legacy Fallback
 from tsc.mesa.red_team import RunRedTeamSimulation
@@ -101,7 +102,7 @@ class RedTeamGate(BaseGate):
             response = await self._llm.analyze(
                 system_prompt="You are a senior red-team security and market strategist. Your goal is to find why this WILL FAIL.",
                 user_prompt=prompt,
-                temperature=0.7
+                temperature=L4_RED_TEAM
             )
             
             # Extract score and verdict using a helper or basic parsing

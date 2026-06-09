@@ -34,6 +34,12 @@ from typing import Any, Optional
 import numpy as np
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import (
+    L3_INTERNAL_STAKEHOLDER_SELECTION,
+    L3_EXTERNAL_STAKEHOLDER_SELECTION,
+    L3_INTERNAL_PERSONA_PROFILE,
+    L3_EXTERNAL_PERSONA_PROFILE,
+)
 from tsc.llm.prompts import (
     PERSONA_SYSTEM,
     PERSONA_SYSTEM_GROUNDED,
@@ -566,7 +572,7 @@ class PersonaGenerator:
             result = await self._llm.analyze(
                 system_prompt=STAKEHOLDER_SELECTION_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.5,
+                temperature=L3_INTERNAL_STAKEHOLDER_SELECTION,
                 max_tokens=2000,
             )
 
@@ -638,7 +644,7 @@ class PersonaGenerator:
             result = await self._llm.analyze(
                 system_prompt=EXTERNAL_STAKEHOLDER_SELECTION_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.6,
+                temperature=L3_EXTERNAL_STAKEHOLDER_SELECTION,
                 max_tokens=2000,
             )
             
@@ -1353,7 +1359,7 @@ MANDATORY WRITING RULES:
                 profile_text = await self._llm.generate(
                     system_prompt=EXTERNAL_PERSONA_SYSTEM,
                     user_prompt=user_prompt,
-                    temperature=0.35,   # slightly higher creativity for market personas
+                    temperature=L3_EXTERNAL_PERSONA_PROFILE,   # slightly higher creativity for market personas
                     max_tokens=3000,    # 14 sections need more room
                 )
             else:
@@ -1364,7 +1370,7 @@ MANDATORY WRITING RULES:
                 profile_text = await self._llm.generate(
                     system_prompt=PERSONA_SYSTEM_GROUNDED,
                     user_prompt=user_prompt,
-                    temperature=0.2,
+                    temperature=L3_INTERNAL_PERSONA_PROFILE,
                     max_tokens=2500,
                 )
 

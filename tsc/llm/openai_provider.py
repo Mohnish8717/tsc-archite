@@ -10,6 +10,7 @@ import openai
 
 from tsc.llm.base import LLMClient
 from tsc.llm.rate_limiter import get_groq_bucket
+from tsc.llm.temperatures import GATE_BASE_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,6 @@ class OpenAIClient(LLMClient):
         return await self.generate(
             system_prompt="You are a helpful assistant.",
             user_prompt=prompt,
-            temperature=0.2,
+            temperature=GATE_BASE_DEFAULT,
             max_tokens=2000,
         )

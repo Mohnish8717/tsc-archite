@@ -31,6 +31,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L2_GRAPH_CLASSIFIER, L2_GRAPH_ENRICHMENT
 from tsc.llm.prompts import (
     GROUNDED_NER_SYSTEM,
     GROUNDED_NER_USER,
@@ -174,7 +175,7 @@ class KnowledgeGraphBuilder:
                 response_text = await self._llm.generate(
                     system_prompt=GROUNDED_NER_SYSTEM,
                     user_prompt=prompt,
-                    temperature=0.1,
+                    temperature=L2_GRAPH_CLASSIFIER,
                 )
                 
                 # Clean up JSON response
@@ -548,7 +549,7 @@ class KnowledgeGraphBuilder:
                 response_text = await self._llm.generate(
                     system_prompt=GROUNDED_RELATIONSHIP_SYSTEM,
                     user_prompt=prompt,
-                    temperature=0.1,
+                    temperature=L2_GRAPH_CLASSIFIER,
                 )
                 
                 # Clean up JSON
@@ -667,7 +668,7 @@ class KnowledgeGraphBuilder:
                 response_text = await self._llm.generate(
                     system_prompt=GROUNDED_RELATIONSHIP_SYSTEM,
                     user_prompt=prompt,
-                    temperature=0.1,
+                    temperature=L2_GRAPH_CLASSIFIER,
                 )
                 
                 # Clean up JSON
@@ -784,7 +785,7 @@ class KnowledgeGraphBuilder:
                 result = await self._llm.analyze(
                     system_prompt=RELATIONSHIP_SYSTEM,
                     user_prompt=prompt,
-                    temperature=0.3,
+                    temperature=L2_GRAPH_ENRICHMENT,
                     max_tokens=1500,
                 )
 

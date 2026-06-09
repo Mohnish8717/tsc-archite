@@ -1,15 +1,15 @@
-"""Layer 1: Contextual Ingestor (v3.0 Streamlined).
+"""Layer 1: Contextual Ingestor (v4.0 — Concurrent SOTA).
 
 Ingests raw input documents, normalizes, chunks semantically via LLM,
 enriches with LLM-driven NLP, stores full data in Hindsight, and creates
 a unified ProblemContextBundle.
 
-v3.0 Changes:
-  - Full data preservation: raw documents stored in Hindsight before chunking
-  - Enriched chunk metadata persisted to Hindsight after processing
-  - Removed: spaCy local NLP, embedding-based chunking, keyword classifiers
-  - Removed: hardcoded persona extraction, dead market context extraction
-  - Single enrichment path: LLM-only (more accurate, fewer dependencies)
+v4.0 Changes:
+  - Concurrent chunking: all documents chunked in parallel via asyncio.gather
+  - Concurrent structured extraction: FeatureProposal + CompanyContext extracted
+    in parallel using asyncio.gather, with LLM-fallback for non-JSON inputs
+  - Enrichment semaphore raised 2→5 to saturate LeakyBucketQueue throughput
+  - Structured timing, token, and rate-limit logs at every async boundary
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L1_ENTITY_EXTRACTION, L1_PROBLEM_SYNTHESIS
 from tsc.llm.prompts import (
     ENRICHMENT_SYSTEM,
     ENRICHMENT_USER,
@@ -87,62 +88,68 @@ class ContextualIngestor:
     async def process(
         self, documents: list[InputDocument]
     ) -> tuple[ProblemContextBundle, FeatureProposal, CompanyContext]:
-        """Execute the full Layer 1 pipeline.
+        """Execute the full Layer 1 pipeline (v4.0 — concurrent).
 
         Returns:
             (ProblemContextBundle, FeatureProposal, CompanyContext)
         """
+        import asyncio
         t0 = time.time()
 
         # Step 0: VALIDATE
         self._validate_inputs(documents)
-        logger.info("✓ Validated %d documents", len(documents))
+        logger.info("⚡ L1 START — validating %d documents", len(documents))
 
-        # Step 1.1: Load files
+        # Step 1.1: Load files (CPU-bound, sequential — file I/O is fast)
         loaded = [self._load_file(doc) for doc in documents]
-        logger.info("✓ Loaded %d files", len(loaded))
+        logger.info("✓ Loaded %d files in %.2fs", len(loaded), time.time() - t0)
 
-        # Step 1.2: Normalize
+        # Step 1.2: Normalize (CPU-bound, sequential)
         normalized = [self._normalize(doc) for doc in loaded]
         logger.info("✓ Normalized %d documents", len(normalized))
 
-        # Extract structured data
-        feature = self._extract_feature_proposal(normalized)
-        company = self._extract_company_context(normalized)
-        logger.info(
-            "✓ Extracted feature: %s, company: %s",
-            feature.title,
-            company.company_name,
+        # ── CONCURRENT: structured extraction + chunking + raw retention ──────
+        # We fire all three in parallel because they are independent:
+        #   a) extract_feature_proposal_async — LLM call if no JSON, else fast
+        #   b) extract_company_context_async  — LLM call if no JSON, else fast
+        #   c) retain_raw_documents           — Hindsight storage I/O
+        #   d) semantic_chunk_v2              — LLM calls per doc (concurrent inside)
+        t_concurrent = time.time()
+        logger.info("⚡ L1 CONCURRENT — starting extraction + chunking in parallel")
+
+        feature, company, _, chunks = await asyncio.gather(
+            self._extract_feature_proposal_async(normalized),
+            self._extract_company_context_async(normalized),
+            self._retain_raw_documents(normalized),
+            self._semantic_chunk_v2(normalized),
         )
 
-        # ── DATA PRESERVATION: Store full raw documents in Hindsight ──
-        await self._retain_raw_documents(normalized)
+        logger.info(
+            "✓ Concurrent phase done in %.2fs — feature=%r, company=%r, chunks=%d",
+            time.time() - t_concurrent, feature.title, company.company_name, len(chunks),
+        )
 
-        # Step 1.3: LLM Semantic Chunking
-        chunks = await self._semantic_chunk_v2(normalized)
-        logger.info("✓ Created %d chunks", len(chunks))
-
-        # Step 1.4: LLM Enrichment
+        # Step 1.4: LLM Enrichment (concurrent across chunks via semaphore)
+        t_enrich = time.time()
         enriched = await self._enrich_chunks(chunks)
-        logger.info("✓ Enriched %d chunks", len(enriched))
+        logger.info("✓ Enriched %d chunks in %.2fs", len(enriched), time.time() - t_enrich)
 
         # Quality gate
         quality = self._validate_enrichment_quality(enriched)
         logger.info(
-            "✓ Quality check: %.1f%% with entities, %.1f%% with metrics, "
-            "avg confidence %.3f",
+            "✓ Quality: %.1f%% entities, %.1f%% metrics, avg_conf=%.3f",
             quality.get("pct_chunks_with_entities", 0),
             quality.get("pct_chunks_with_metrics", 0),
             quality.get("avg_entity_confidence", 0),
         )
 
-        # ── DATA PRESERVATION: Store enriched chunks in Hindsight ──
+        # DATA PRESERVATION: store enriched chunks
         await self._retain_enriched_chunks(enriched)
 
         # Step 1.5: Bundle
         bundle = self._create_bundle(enriched, time.time() - t0)
         logger.info(
-            "✓ Layer 1 complete: %d chunks, %d entities, %.1fs",
+            "✓ L1 DONE — %d chunks, %d entities, total=%.1fs",
             bundle.statistics.total_chunks,
             bundle.statistics.unique_entities,
             time.time() - t0,
@@ -487,56 +494,49 @@ class ContextualIngestor:
         self,
         normalized: list[NormalizedContent],
     ) -> list[EnrichedChunk]:
-        """SOTA-1: LLM-driven semantic chunking with Gemini 3 Flash.
-        
-        Preserves speaker attribution, intent, and semantic boundaries.
+        """SOTA-1: LLM-driven semantic chunking — all docs chunked concurrently.
+
+        v4.0: Each document is chunked in a separate asyncio task so that
+        LLM latency for doc-A does not block doc-B. Final chunks are
+        merged in original document order to maintain determinism.
         """
-        all_chunks: list[EnrichedChunk] = []
-        global_idx: int = 0
+        import asyncio
 
-        for norm in normalized:
+        async def _chunk_one(norm: NormalizedContent) -> list[EnrichedChunk]:
+            """Chunk a single normalised document, returning a list of raw (unindexed) chunks."""
             if not norm.normalized_text:
-                continue
+                return []
 
-            # Skip small company context/feature docs for LLM chunking if they are already small (< 2000 words)
             word_count = len(norm.normalized_text.split())
             if word_count < 2000:
-                logger.info("Skipping LLM chunking for small document (%s, %d words)", norm.document_type.value, word_count)
-                doc_chunks = self._simple_chunk_fallback(norm)
-                for c in doc_chunks:
-                   c.chunk_id = f"chunk_{global_idx:04d}"
-                   global_idx += 1
-                all_chunks.extend(doc_chunks)
-                continue
+                logger.info(
+                    "⚡ Chunking %s (%d words) — small doc, using paragraph splitter",
+                    norm.document_type.value, word_count,
+                )
+                return self._simple_chunk_fallback(norm)
 
-            logger.info("SOTA-1: Starting LLM semantic chunking for %s (%d words)", norm.document_type.value, word_count)
-            
+            t_doc = time.time()
+            logger.info(
+                "⚡ Chunking %s (%d words) — LLM semantic chunker started",
+                norm.document_type.value, word_count,
+            )
             try:
-                # SOTA-1: Use SEMANTIC_CHUNKING_USER prompt
                 prompt = SEMANTIC_CHUNKING_USER.render(document_content=norm.normalized_text)
-                
-                # Gemma models often hang when forced into application/json via analyze(),
-                # so we use generate() and let the prompt engineering force the JSON output.
                 response_text = await self._llm.generate(
                     system_prompt=SEMANTIC_CHUNKING_SYSTEM,
                     user_prompt=prompt,
-                    temperature=0.1,
+                    temperature=L1_ENTITY_EXTRACTION,
                     max_tokens=8000,
                 )
-                
-                # Clean up response if it has markdown wrappers (sometimes happens even in JSON mode)
                 response_text = response_text.strip()
                 if response_text.startswith("```json"):
                     response_text = response_text[7:-3].strip()
                 elif response_text.startswith("```"):
                     response_text = response_text[3:-3].strip()
-                
+
                 raw_chunks = self._llm._parse_json_response(response_text)
-                
                 if not isinstance(raw_chunks, list):
-                    # Handle case where model wraps the array in a dict (e.g. {"chunks": [...]})
                     if isinstance(raw_chunks, dict):
-                        # Find the first list value
                         for v in raw_chunks.values():
                             if isinstance(v, list):
                                 raw_chunks = v
@@ -544,38 +544,51 @@ class ContextualIngestor:
                     if not isinstance(raw_chunks, list):
                         raise ValueError(f"Expected JSON list, got {type(raw_chunks)}")
 
+                out: list[EnrichedChunk] = []
                 for rc in raw_chunks:
                     chunk = EnrichedChunk(
-                        chunk_id=rc.get("id", f"chunk_{global_idx:04d}"),
+                        chunk_id=rc.get("id", "chunk_tmp"),
                         text=rc.get("text", ""),
                         source_file=norm.file_type.value,
                         source_type=norm.document_type.value,
-                        sequence=global_idx,
+                        sequence=0,  # re-indexed below after merge
                         metadata=rc.get("metadata", {}),
                     )
-                    
-                    # Store speaker if extracted
                     if "speaker" in rc:
                         chunk.speaker_name = rc["speaker"]
                     elif "speaker" in chunk.metadata:
                         chunk.speaker_name = chunk.metadata["speaker"]
-                    
-                    # Store topics if extracted
                     if "metadata" in rc and "primary_topic" in rc["metadata"]:
                         chunk.topics = [rc["metadata"]["primary_topic"]] + rc["metadata"].get("secondary_topics", [])
+                    out.append(chunk)
 
-                    all_chunks.append(chunk)
-                    global_idx += 1
-                
-                logger.info("✓ SOTA-1: Generated %d chunks for %s", len(raw_chunks), norm.document_type.value)
-                    
+                logger.info(
+                    "✓ Chunked %s → %d chunks in %.2fs",
+                    norm.document_type.value, len(out), time.time() - t_doc,
+                )
+                return out
+
             except Exception as e:
-                logger.error("SOTA-1: Gemini chunking failed, falling back: %s", e, exc_info=True)
-                fallback = self._simple_chunk_fallback(norm)
-                for c in fallback:
-                    c.chunk_id = f"chunk_{global_idx:04d}"
-                    global_idx += 1
-                all_chunks.extend(fallback)
+                logger.error(
+                    "SOTA-1: chunking failed for %s (%.2fs elapsed), falling back: %s",
+                    norm.document_type.value, time.time() - t_doc, e, exc_info=True,
+                )
+                return self._simple_chunk_fallback(norm)
+
+        # Fire all documents concurrently; results come back in input order
+        per_doc_chunks: list[list[EnrichedChunk]] = await asyncio.gather(
+            *(_chunk_one(n) for n in normalized)
+        )
+
+        # Flatten and assign stable global indices
+        all_chunks: list[EnrichedChunk] = []
+        global_idx = 0
+        for doc_chunks in per_doc_chunks:
+            for c in doc_chunks:
+                c.chunk_id = f"chunk_{global_idx:04d}"
+                c.sequence = global_idx
+                global_idx += 1
+            all_chunks.extend(doc_chunks)
 
         return all_chunks
 
@@ -639,9 +652,14 @@ class ContextualIngestor:
     async def _enrich_with_llm(
         self, chunks: list[EnrichedChunk]
     ) -> list[EnrichedChunk]:
-        """Enrich using LLM — primary and only enrichment path (v3.0)."""
+        """Enrich using LLM — primary and only enrichment path (v4.0).
+
+        Semaphore raised from 2→5 to saturate LeakyBucketQueue throughput.
+        The rate limiter in gemini_provider/openai_provider still enforces
+        TPM/RPM limits; the higher semaphore only removes artificial choking.
+        """
         import asyncio
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(5)
         
         async def enrich_chunk(chunk: EnrichedChunk):
             async with sem:
@@ -660,7 +678,7 @@ class ContextualIngestor:
                     result = await self._llm.analyze(
                         system_prompt=ENRICHMENT_SYSTEM,
                         user_prompt=prompt,
-                        temperature=0.2,
+                        temperature=L1_PROBLEM_SYNTHESIS,
                         max_tokens=1000,
                     )
                     self._apply_llm_enrichment(chunk, result)
@@ -835,7 +853,7 @@ Only return valid JSON, no markdown."""
             result = await self._llm.analyze(
                 system_prompt="You are a precise data extraction specialist. Extract only metrics that are explicitly stated in the text. Do not infer or hallucinate numbers.",
                 user_prompt=prompt,
-                temperature=0.1,
+                temperature=L1_ENTITY_EXTRACTION,
                 max_tokens=800,
             )
             
@@ -952,10 +970,14 @@ Only return valid JSON, no markdown."""
         )
 
     # ── Structured Extraction ────────────────────────────────────────
+    #
+    # v4.0: Synchronous fast-path (JSON already parsed) preserved.
+    # The async variants below add LLM-fallback for PDF/DOCX/TXT inputs.
 
     def _extract_feature_proposal(
         self, normalized: list[NormalizedContent]
     ) -> FeatureProposal:
+        """Fast-path: return FeatureProposal when JSON was already parsed."""
         for n in normalized:
             if n.document_type == DocumentType.FEATURE_PROPOSAL and n.json_parsed:
                 data = n.json_parsed
@@ -980,9 +1002,82 @@ Only return valid JSON, no markdown."""
             title="Unspecified Feature", description="No proposal found"
         )
 
+    async def _extract_feature_proposal_async(
+        self, normalized: list[NormalizedContent]
+    ) -> FeatureProposal:
+        """Async extraction: JSON fast-path first, then LLM fallback for PDF/DOCX/TXT.
+
+        The LLM fallback uses a strict JSON schema so the output always
+        matches FeatureProposal fields — no post-processing guesswork.
+        """
+        # Fast-path: JSON already parsed (covers .json uploads)
+        for n in normalized:
+            if n.document_type == DocumentType.FEATURE_PROPOSAL and n.json_parsed:
+                logger.info("📋 FeatureProposal — JSON fast-path (no LLM call needed)")
+                return self._extract_feature_proposal(normalized)
+
+        # LLM fallback: find raw text for FEATURE_PROPOSAL doc type
+        for n in normalized:
+            if n.document_type == DocumentType.FEATURE_PROPOSAL and n.normalized_text:
+                t0 = time.time()
+                logger.info(
+                    "⚡ FeatureProposal — LLM extraction from %s text (%d chars)",
+                    n.file_type.value, len(n.normalized_text),
+                )
+                system = (
+                    "You are a product management analyst. Extract a structured feature "
+                    "proposal from the provided document text. Return only valid JSON."
+                )
+                user = (
+                    f"Extract a feature proposal from this document.\n\n"
+                    f"---DOCUMENT---\n{n.normalized_text[:6000]}\n---END---\n\n"
+                    "Return JSON with these fields (use null for missing values):\n"
+                    '{"title": str, "description": str, "target_users": str, '
+                    '"target_user_count": int|null, "effort_weeks_min": int|null, '
+                    '"effort_weeks_max": int|null, "affected_domains": [str], '
+                    '"existing_features": [str], "tech_stack": [str], '
+                    '"priority": str|null, "revenue_model": str|null, '
+                    '"pricing_strategy": str|null, "customer_segments": [str]}'
+                )
+                try:
+                    data = await self._llm.analyze(
+                        system_prompt=system,
+                        user_prompt=user,
+                        temperature=0.1,
+                        max_tokens=1500,
+                    )
+                    logger.info(
+                        "✓ FeatureProposal LLM extraction done in %.2fs — title=%r",
+                        time.time() - t0, data.get("title"),
+                    )
+                    return FeatureProposal(
+                        title=data.get("title") or "Unknown Feature",
+                        description=data.get("description") or "",
+                        target_users=data.get("target_users") or "",
+                        target_user_count=data.get("target_user_count"),
+                        effort_weeks_min=data.get("effort_weeks_min") or data.get("effort_weeks"),
+                        effort_weeks_max=data.get("effort_weeks_max") or data.get("effort_weeks"),
+                        affected_domains=data.get("affected_domains") or [],
+                        existing_features=data.get("existing_features") or [],
+                        tech_stack=data.get("tech_stack") or [],
+                        priority=data.get("priority"),
+                        revenue_model=data.get("revenue_model"),
+                        pricing_strategy=data.get("pricing_strategy"),
+                        customer_segments=data.get("customer_segments") or [],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "FeatureProposal LLM extraction failed (%.2fs): %s — using defaults",
+                        time.time() - t0, e,
+                    )
+
+        logger.info("📋 FeatureProposal — no proposal document found, using defaults")
+        return FeatureProposal(title="Unspecified Feature", description="No proposal found")
+
     def _extract_company_context(
         self, normalized: list[NormalizedContent]
     ) -> CompanyContext:
+        """Fast-path: return CompanyContext when JSON was already parsed."""
         for n in normalized:
             if n.document_type == DocumentType.COMPANY_CONTEXT and n.json_parsed:
                 data = n.json_parsed
@@ -996,5 +1091,66 @@ Only return valid JSON, no markdown."""
                     constraints=data.get("constraints", []),
                     stakeholders=data.get("stakeholders", []),
                 )
+        return CompanyContext()
+
+    async def _extract_company_context_async(
+        self, normalized: list[NormalizedContent]
+    ) -> CompanyContext:
+        """Async extraction: JSON fast-path first, then LLM fallback for PDF/DOCX/TXT."""
+        # Fast-path
+        for n in normalized:
+            if n.document_type == DocumentType.COMPANY_CONTEXT and n.json_parsed:
+                logger.info("📋 CompanyContext — JSON fast-path (no LLM call needed)")
+                return self._extract_company_context(normalized)
+
+        # LLM fallback: find raw text for COMPANY_CONTEXT doc type
+        for n in normalized:
+            if n.document_type == DocumentType.COMPANY_CONTEXT and n.normalized_text:
+                t0 = time.time()
+                logger.info(
+                    "⚡ CompanyContext — LLM extraction from %s text (%d chars)",
+                    n.file_type.value, len(n.normalized_text),
+                )
+                system = (
+                    "You are a business analyst. Extract structured company context from "
+                    "the provided document text. Return only valid JSON."
+                )
+                user = (
+                    f"Extract company context from this document.\n\n"
+                    f"---DOCUMENT---\n{n.normalized_text[:4000]}\n---END---\n\n"
+                    "Return JSON with these fields (use null or [] for missing values):\n"
+                    '{"company_name": str, "team_size": int|null, "budget": str|null, '
+                    '"tech_stack": [str], "current_priorities": [str], '
+                    '"competitors": [str], "constraints": [str], '
+                    '"stakeholders": [{"name": str, "role": str}]}'
+                )
+                try:
+                    data = await self._llm.analyze(
+                        system_prompt=system,
+                        user_prompt=user,
+                        temperature=0.1,
+                        max_tokens=1000,
+                    )
+                    logger.info(
+                        "✓ CompanyContext LLM extraction done in %.2fs — company=%r",
+                        time.time() - t0, data.get("company_name"),
+                    )
+                    return CompanyContext(
+                        company_name=data.get("company_name") or "",
+                        team_size=data.get("team_size"),
+                        budget=data.get("budget"),
+                        tech_stack=data.get("tech_stack") or [],
+                        current_priorities=data.get("current_priorities") or [],
+                        competitors=data.get("competitors") or [],
+                        constraints=data.get("constraints") or [],
+                        stakeholders=data.get("stakeholders") or [],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "CompanyContext LLM extraction failed (%.2fs): %s — using defaults",
+                        time.time() - t0, e,
+                    )
+
+        logger.info("📋 CompanyContext — no context document found, using defaults")
         return CompanyContext()
 

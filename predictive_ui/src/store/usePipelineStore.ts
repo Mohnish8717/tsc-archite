@@ -361,6 +361,8 @@ interface PipelineState {
   setSimulationReport: (report: SimulationReport) => void;
   resetForNewSimulation: (title: string) => void;
   startSimulationStage: (title: string) => void;
+  // Stop mid-run — resets lifecycle fields, preserves layer data
+  stopSimulation: () => void;
 
   // Layer 6: Boardroom Debate State
   debateMessages: BoardroomMessage[];
@@ -486,7 +488,8 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     let mappedType = action.action_type;
     const isLike = typeUpper.includes('LIKE') || typeUpper === 'UPVOTE';
     const isDislike = typeUpper.includes('DISLIKE') || typeUpper === 'DOWNVOTE';
-    const isComment = typeUpper.includes('COMMENT') || typeUpper.includes('POST');
+    const isPost = typeUpper.includes('POST') || typeUpper.includes('SPAWN');
+    const isComment = typeUpper.includes('COMMENT');
 
     if (isLike || isDislike) {
       // Determine the sentiment of the post they are reacting to
@@ -515,6 +518,8 @@ export const usePipelineStore = create<PipelineState>((set) => ({
         mappedType = 'upvote';
       } else if (sigType === 'negative') {
         mappedType = 'downvote';
+      } else if (isPost) {
+        mappedType = 'post';
       } else if (isComment) {
         mappedType = 'comment';
       }
@@ -587,12 +592,17 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     activeAgents: 0,
     hotScoreAvg: 5.0,
     tensionStatus: 'Normal',
-    spawnedAgents: {},
     simulationStatus: 'running',
     simulationTitle: title,
     simulationProgress: null,
     pipelineStages: { ...state.pipelineStages, layer5: 'running' },
   })),
+  // Stop mid-run: reset lifecycle only — layer data (agents, chunks, debate) stays visible
+  stopSimulation: () => set({
+    simulationStatus: 'idle',
+    simulationProgress: null,
+    simulationTitle: '',
+  }),
 
   // Boardroom
   debateMessages: [],

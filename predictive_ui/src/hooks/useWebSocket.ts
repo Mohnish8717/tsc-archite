@@ -52,6 +52,7 @@ export function useWebSocket(url: string = defaultUrl) {
     setSessionId,
     setIsBootstrapped,
     setKnowledgeGraph,
+    stopSimulation,
   } = usePipelineStore();
 
   useEffect(() => {
@@ -146,6 +147,11 @@ export function useWebSocket(url: string = defaultUrl) {
 
             case 'bootstrap_complete':
               setIsBootstrapped(true);
+              break;
+
+            // User-requested stop — backend cancelled the pipeline task
+            case 'simulation_stopped':
+              stopSimulation();
               break;
 
             // Layer 5: Agent spawn into graph

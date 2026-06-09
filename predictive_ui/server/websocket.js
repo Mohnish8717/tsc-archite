@@ -282,6 +282,7 @@ function startTailing(run) {
         dirWatcher.close();
         if (activeRun && activeRun.fallbackInterval) clearInterval(activeRun.fallbackInterval);
         startTailing(run); // retry now that the file exists
+        startTailingPipeline(run); // restart pipeline tailing too!
       }
     });
     const fallbackInterval = setInterval(() => {
@@ -289,6 +290,7 @@ function startTailing(run) {
         dirWatcher.close();
         clearInterval(fallbackInterval);
         startTailing(run);
+        startTailingPipeline(run); // restart pipeline tailing too!
       }
     }, 1000);
     activeRun = { ...run, watcher: dirWatcher, reportWatcher: null, fallbackInterval };
@@ -472,9 +474,13 @@ function startTailingPipeline(run) {
       const stats = fs.statSync(pipelineFile);
       if (stats.size <= lastSize) return;
 
+      const readStart = lastSize;
+      const readEnd = stats.size;
+      lastSize = readEnd;
+
       const stream = fs.createReadStream(pipelineFile, {
-        start: lastSize,
-        end: stats.size,
+        start: readStart,
+        end: readEnd,
         encoding: 'utf-8',
       });
 

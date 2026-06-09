@@ -77,6 +77,7 @@ class TSCPipeline:
         proposal: Optional[str] = None,
         num_simulations: Optional[int] = None,
         use_legacy_personas: bool = False,
+        boardroom_only: bool = False,
     ) -> FinalRecommendation:
         """Run the full Predictive Reality Engine pipeline.
 
@@ -90,6 +91,7 @@ class TSCPipeline:
             use_legacy_personas: If True, uses the full Layer 3 LLM-driven
                 PersonaGenerator pipeline instead of BoardroomPersonaFactory.
                 Default is False (static boardroom personas).
+            boardroom_only: If True, bypasses OASIS simulation and Feature Discovery.
 
         Returns:
             FinalRecommendation with verdict, spec, and monitoring plan.
@@ -106,6 +108,10 @@ class TSCPipeline:
         # ── Bootstrap WorldRAGEngine (Qdrant + Neo4j) ─────────────────────────
         try:
             await self._rag_engine.initialize(run_id=session_id)
+            
+            # CRITICAL FIX: Clear the persistent Neo4j graph to prevent bleeding state between case studies
+            await self._rag_engine.clear_graph()
+            
             _set_world_bank_engine(self._rag_engine)   # wire WorldDataBank façade
             logger.info("WorldRAGEngine ready (run_id=%s)", session_id)
         except Exception as _rag_exc:
@@ -219,124 +225,137 @@ class TSCPipeline:
         except Exception as e:
             logger.warning(f"Failed to fetch Neo4j graph for UI: {e}")
 
-        # Layer 2: OASIS Behavioral Analysis (Social Simulation)
-        self._emit_progress(2, "Behavioral Analysis (OASIS)", "running")
-        
-        # Generate product-user personas grounded in customer interview data
-        # FIX (Major): Persona generator uses world_bank (WorldDataBank/Qdrant).
-        # Hindsight is agent-memory-only; persona profiles are pipeline run data
-        # that must land in the persona_profiles Qdrant collection so downstream
-        # layers can retrieve them via world_bank.recall("personas", ...).
-        oasis_gen = OASISUserPersonaGenerator(self._llm, world_bank)
-        profiles = await oasis_gen.generate(
-            company=company,
-            num_agents=num_simulations or 10,
-            feature=feature if proposal else None,
-            raw_chunks=bundle.chunks,
-        )
-        logger.info("Generated %d OASIS user personas from customer data", len(profiles))
-        
-        # Log all created personas to ensure diversity is visible
-        logger.info("=" * 60)
-        logger.info("PERSONAS CREATED FOR SIMULATION")
-        logger.info("=" * 60)
-        persona_payload = []
-        for i, p in enumerate(profiles):
-            info = p.user_info_dict
-            other = info.get("profile", {}).get("other_info", {})
-            name = info.get('name', f'Agent-{p.agent_id}')
-            role = other.get('role', info.get('description', 'Simulation User'))
-            logger.info(f"[{i+1}/{len(profiles)}] Agent ID: {p.agent_id}")
-            logger.info(f"  Name: {name}")
-            logger.info(f"  Segment: {role}")
-            logger.info(f"  Description: {info.get('description', '')[:100]}...")
-            logger.info(f"  Influence: {p.influence_strength:.2f} | Receptiveness: {p.receptiveness:.2f}")
-            logger.info("-" * 40)
-            # ── Safely extract buyer_journey: stored as dict in other_info ──────
-            bj_raw = other.get("buyer_journey")
-            if isinstance(bj_raw, dict):
-                buyer_journey_stage = bj_raw.get("awareness_channel", "")
-                buyer_journey_detail = bj_raw
-            else:
-                buyer_journey_stage = bj_raw or ""
-                buyer_journey_detail = None
+        if boardroom_only:
+            logger.info("BOARDROOM ONLY: Skipping Layer 2 and Layer 3")
+            self._emit_progress(2, "Behavioral Analysis (OASIS)", "done", {"skipped": True})
+            
+            from tsc.oasis.models import MarketSentimentSeries
+            behavioral_results = MarketSentimentSeries(
+                simulation_id=session_id,
+                feature_proposal_id=getattr(feature, "title", "Skipped"),
+                consensus_verdict="SKIPPED"
+            )
+            
+            self._emit_progress(3, "Feature Discovery", "done", {"skipped": True})
+        else:
+            # Layer 2: OASIS Behavioral Analysis (Social Simulation)
+            self._emit_progress(2, "Behavioral Analysis (OASIS)", "running")
+            
+            # Generate product-user personas grounded in customer interview data
+            # FIX (Major): Persona generator uses world_bank (WorldDataBank/Qdrant).
+            # Hindsight is agent-memory-only; persona profiles are pipeline run data
+            # that must land in the persona_profiles Qdrant collection so downstream
+            # layers can retrieve them via world_bank.recall("personas", ...).
+            oasis_gen = OASISUserPersonaGenerator(self._llm, world_bank)
+            profiles = await oasis_gen.generate(
+                company=company,
+                num_agents=num_simulations or 10,
+                feature=feature if proposal else None,
+                raw_chunks=bundle.chunks,
+            )
+            logger.info("Generated %d OASIS user personas from customer data", len(profiles))
+            
+            # Log all created personas to ensure diversity is visible
+            logger.info("=" * 60)
+            logger.info("PERSONAS CREATED FOR SIMULATION")
+            logger.info("=" * 60)
+            persona_payload = []
+            for i, p in enumerate(profiles):
+                info = p.user_info_dict
+                other = info.get("profile", {}).get("other_info", {})
+                name = info.get('name', f'Agent-{p.agent_id}')
+                role = other.get('role', info.get('description', 'Simulation User'))
+                logger.info(f"[{i+1}/{len(profiles)}] Agent ID: {p.agent_id}")
+                logger.info(f"  Name: {name}")
+                logger.info(f"  Segment: {role}")
+                logger.info(f"  Description: {info.get('description', '')[:100]}...")
+                logger.info(f"  Influence: {p.influence_strength:.2f} | Receptiveness: {p.receptiveness:.2f}")
+                logger.info("-" * 40)
+                # ── Safely extract buyer_journey: stored as dict in other_info ──────
+                bj_raw = other.get("buyer_journey")
+                if isinstance(bj_raw, dict):
+                    buyer_journey_stage = bj_raw.get("awareness_channel", "")
+                    buyer_journey_detail = bj_raw
+                else:
+                    buyer_journey_stage = bj_raw or ""
+                    buyer_journey_detail = None
 
-            persona_payload.append({
-                "id": f"per_{p.agent_id}",
-                "name": name,
-                "role": role,
-                "traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
-                "impact": round(p.influence_strength * 100),
-                "bio": info.get("profile", {}).get("user_profile", "") or info.get("description", ""),
-                # ── Psychological Profile ─────────────────────────────────────
-                "mbti": other.get("mbti", ""),
-                "mbti_description": other.get("mbti_description", ""),
-                "key_traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
-                "emotional_triggers": other.get("emotional_triggers", {}),
-                "communication_style": other.get("communication_style", {}),
-                "decision_pattern": other.get("decision_pattern", {}),
-                "predicted_stance": other.get("predicted_stance", {}),
-                "questions_they_will_ask": other.get("questions_they_will_ask", []),
-                # ── FinalPersona metadata ─────────────────────────────────────
-                "domain_expertise": other.get("domain_expertise", []),
-                "profile_confidence": other.get("profile_confidence", 0.0),
-                "grounding_quality": other.get("grounding_quality", 1.0),
-                "persona_type": other.get("persona_type", "INTERNAL"),
-                "network_position_hint": other.get("network_position_hint", "peripheral"),
-                "influence_strength": p.influence_strength,
-                "receptiveness": p.receptiveness,
-                "evidence_sources": other.get("evidence_sources", []),
-                # ── Buyer Journey (external personas) ─────────────────────────
-                "buyer_journey": buyer_journey_stage,        # string for stage indicator
-                "buyer_journey_detail": buyer_journey_detail,  # full dict for detail panel
-                # ── Market Context (external personas) ───────────────────────
-                "market_context": other.get("market_context", None),
+                persona_payload.append({
+                    "id": f"per_{p.agent_id}",
+                    "name": name,
+                    "role": role,
+                    "traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
+                    "impact": round(p.influence_strength * 100),
+                    "bio": info.get("profile", {}).get("user_profile", "") or info.get("description", ""),
+                    # ── Psychological Profile ─────────────────────────────────────
+                    "mbti": other.get("mbti", ""),
+                    "mbti_description": other.get("mbti_description", ""),
+                    "key_traits": other.get("traits", []) if isinstance(other.get("traits"), list) else [],
+                    "emotional_triggers": other.get("emotional_triggers", {}),
+                    "communication_style": other.get("communication_style", {}),
+                    "decision_pattern": other.get("decision_pattern", {}),
+                    "predicted_stance": other.get("predicted_stance", {}),
+                    "questions_they_will_ask": other.get("questions_they_will_ask", []),
+                    # ── FinalPersona metadata ─────────────────────────────────────
+                    "domain_expertise": other.get("domain_expertise", []),
+                    "profile_confidence": other.get("profile_confidence", 0.0),
+                    "grounding_quality": other.get("grounding_quality", 1.0),
+                    "persona_type": other.get("persona_type", "INTERNAL"),
+                    "network_position_hint": other.get("network_position_hint", "peripheral"),
+                    "influence_strength": p.influence_strength,
+                    "receptiveness": p.receptiveness,
+                    "evidence_sources": other.get("evidence_sources", []),
+                    # ── Buyer Journey (external personas) ─────────────────────────
+                    "buyer_journey": buyer_journey_stage,        # string for stage indicator
+                    "buyer_journey_detail": buyer_journey_detail,  # full dict for detail panel
+                    # ── Market Context (external personas) ───────────────────────
+                    "market_context": other.get("market_context", None),
+                })
+
+            # ── Emit Layer 3 personas (real LLM-generated data) ────────────────────
+            self._write_jsonl_event({"type": "persona_sync", "personas": persona_payload})
+            
+            sim_config = OASISSimulationConfig(
+                simulation_name=session_id,
+                num_agents=len(profiles),
+                num_timesteps=10,
+            )
+            # FIX (Critical): Pass world_bank as the session for RunOASISSimulation.
+            # The simulation retains its output (agent traces, comments, prediction
+            # report summary) via session.retain("simulation", ...). This MUST write
+            # to WorldDataBank's simulation_data Qdrant collection so that:
+            #   - FeatureDiscoveryEngine (session=world_bank) can recall() it in Layer 3
+            #   - AG2DebateEngine (world_bank=world_bank) can query_simulation() in Layer 5
+            # The per-agent turn memory (HindsightOASISManager) remains internal to the
+            # simulation engine — it reads HINDSIGHT_URL from env and is NOT affected here.
+            behavioral_results = await RunOASISSimulation(
+                config=sim_config,
+                agent_profiles=profiles,
+                feature=feature if proposal else None,
+                context=company,
+                mode="behavioral",
+                session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
+                llm_client=self._llm,
+                interactive_cb=self._interactive_cb,
+            )
+            self._emit_progress(2, "Behavioral Analysis", "done", {
+                "agents": len(profiles),
+                "interactions": len(behavioral_results.agent_interactions),
             })
 
-        # ── Emit Layer 3 personas (real LLM-generated data) ────────────────────
-        self._write_jsonl_event({"type": "persona_sync", "personas": persona_payload})
-        
-        sim_config = OASISSimulationConfig(
-            simulation_name=session_id,
-            num_agents=len(profiles),
-            num_timesteps=10,
-        )
-        # FIX (Critical): Pass world_bank as the session for RunOASISSimulation.
-        # The simulation retains its output (agent traces, comments, prediction
-        # report summary) via session.retain("simulation", ...). This MUST write
-        # to WorldDataBank's simulation_data Qdrant collection so that:
-        #   - FeatureDiscoveryEngine (session=world_bank) can recall() it in Layer 3
-        #   - AG2DebateEngine (world_bank=world_bank) can query_simulation() in Layer 5
-        # The per-agent turn memory (HindsightOASISManager) remains internal to the
-        # simulation engine — it reads HINDSIGHT_URL from env and is NOT affected here.
-        behavioral_results = await RunOASISSimulation(
-            config=sim_config,
-            agent_profiles=profiles,
-            feature=feature if proposal else None,
-            context=company,
-            mode="behavioral",
-            session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
-            llm_client=self._llm,
-            interactive_cb=self._interactive_cb,
-        )
-        self._emit_progress(2, "Behavioral Analysis", "done", {
-            "agents": len(profiles),
-            "interactions": len(behavioral_results.agent_interactions),
-        })
-
-        # Layer 3: Feature Discovery Engine
-        self._emit_progress(3, "Feature Discovery", "running")
-        discovery = FeatureDiscoveryEngine(self._llm, session=world_bank)
-        discovered_features = await discovery.process(
-            company=company,
-            behavioral_results=behavioral_results,
-            existing_proposal=feature if proposal else None,
-            raw_chunks=bundle.chunks
-        )
-        feature = discovered_features[0]  # Take top ranked feature
-        self._emit_progress(3, "Feature Discovery", "done", {
-            "selected_feature": feature.title
-        })
+            # Layer 3: Feature Discovery Engine
+            self._emit_progress(3, "Feature Discovery", "running")
+            discovery = FeatureDiscoveryEngine(self._llm, session=world_bank)
+            discovered_features = await discovery.process(
+                company=company,
+                behavioral_results=behavioral_results,
+                existing_proposal=feature if proposal else None,
+                raw_chunks=bundle.chunks
+            )
+            feature = discovered_features[0]  # Take top ranked feature
+            self._emit_progress(3, "Feature Discovery", "done", {
+                "selected_feature": feature.title
+            })
 
         # Layer 4: Boardroom Personas
         self._emit_progress(4, "Boardroom Assembly", "running")

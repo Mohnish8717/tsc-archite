@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from tsc.models.inputs import FeatureProposal
 from tsc.selection.models import TensionVector
+from tsc.llm.temperatures import SELECTION_TENSION_VECTOR
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class FeatureTensionAnalyzer:
             result = await self._llm.analyze(
                 system_prompt=_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.0,
+                temperature=SELECTION_TENSION_VECTOR,
                 max_tokens=2000, # Increased to prevent JSON truncation
             )
             tv = self._parse(result)

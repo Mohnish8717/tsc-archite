@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional, Tuple
 from tsc.llm.rate_limiter import LeakyBucketQueue
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L3_EXTERNAL_STAKEHOLDER_SELECTION, L6_DEBATE_COMPROMISE
 from tsc.llm.prompts import (
     DEBATE_ROUND1_USER,
     DEBATE_ROUND2_USER,
@@ -160,7 +161,7 @@ class DebateEngine:
             return await self._llm.generate(
                 system_prompt=system_prompt,
                 user_prompt=context_prompt,
-                temperature=0.6,
+                temperature=L3_EXTERNAL_STAKEHOLDER_SELECTION,
                 max_tokens=600,
             )
 
@@ -1146,7 +1147,7 @@ class DebateEngine:
             response = await self._llm.generate(
                 system_prompt=SUB_QUERY_GEN_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.3, # Low temp for precise query generation
+                temperature=L6_DEBATE_COMPROMISE, # Low temp for precise query generation
             )
             
             # Robust JSON parsing

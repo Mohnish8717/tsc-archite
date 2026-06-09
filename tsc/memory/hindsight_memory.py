@@ -37,6 +37,7 @@ from concurrent.futures import Future
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
+from tsc.llm.temperatures import MEMORY_QUERY_EMBEDDED
 
 # Patch the event loop EARLY (module-level) to allow nested async calls.
 # Required because the Hindsight SDK uses asyncio internally, and AG2's
@@ -44,7 +45,7 @@ from datetime import datetime
 try:
     import nest_asyncio
     nest_asyncio.apply()
-except ImportError:
+except (ImportError, ValueError):
     pass
 
 # ─── Persistent Hindsight Thread (CRITICAL-2 fix) ─────────────────────────
@@ -622,7 +623,7 @@ class HindsightBoardroom:
                         {"role": "user", "content": question},
                     ],
                     max_tokens=1000,
-                    temperature=0.4,
+                    temperature=MEMORY_QUERY_EMBEDDED,
                 )
                 return resp.choices[0].message.content.strip()
             except Exception as e:

@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L8_COMPLIANCE_SUMMARY, L8_OUTPUT_CONSOLIDATION, L8_HANDOFF_NARRATIVE
 from tsc.llm.prompts import SUMMARY_SYSTEM, SUMMARY_USER
 from tsc.models.debate import ConsensusResult
 from tsc.models.inputs import CompanyContext, FeatureProposal
@@ -183,7 +184,7 @@ class HandoffGenerator:
             res = await self._llm.analyze(
                 system_prompt=system_prompt,
                 user_prompt=prompt,
-                temperature=0.2,
+                temperature=L8_COMPLIANCE_SUMMARY,
                 max_tokens=500
             )
             return res
@@ -278,7 +279,7 @@ class HandoffGenerator:
             res = await self._llm.analyze(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                temperature=0.3,
+                temperature=L8_OUTPUT_CONSOLIDATION,
                 max_tokens=1500
             )
             prometheus_alerts = res.get("prometheus_alerts_yaml", prometheus_alerts_fallback)
@@ -355,7 +356,7 @@ class HandoffGenerator:
             return await self._llm.generate(
                 system_prompt=SUMMARY_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.3,
+                temperature=L8_HANDOFF_NARRATIVE,
                 max_tokens=200,
             )
         except Exception as e:

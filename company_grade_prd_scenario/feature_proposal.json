@@ -1,0 +1,34 @@
+{
+  "title": "Autonomous Goal-Driven Personas, High-Fidelity Telemetry Modal, and Global Graphify Integration",
+  "description": "Overhaul the persona generation engine to replace rigid [CATALYST FOR CHANGE] blocks with dynamic [CORE GOALS & INCENTIVES]. This allows LLM agents to autonomously evaluate feature proposals against their specific incentives. Enforce realistic human name generation via fallback registries to eliminate role-based cognitive bias. Implement a neobrutalist three-tab UI details modal displaying real-time spawning telemetry (Agent ID, Parent ID, model badge, active thread), OCEAN progress bars, and an interactive horizontal Buyer Journey stepper. Finally, integrate the graphifyy package globally to enable assistant slash commands for codebase structure mapping.",
+  "target_users": "Software Architects, Product Managers, Security Compliance Auditors",
+  "target_user_count": 1250,
+  "effort_weeks_min": 4.0,
+  "effort_weeks_max": 6.0,
+  "affected_domains": [
+    "Persona Generation (Layer 3)",
+    "OASIS Simulation (Layer 5)",
+    "Boardroom Debate (Layer 6)",
+    "Frontend Assembly Matrix UI"
+  ],
+  "existing_features": [
+    "Deterministic Catalyst-for-Change triggers",
+    "Robotic Boardroom role naming (CTO, Compliance-Dev)",
+    "Plain-text simulation status logs"
+  ],
+  "tech_stack": [
+    "Python 3.10+",
+    "Pydantic v2",
+    "React 18+",
+    "Tailwind CSS / Vanilla CSS",
+    "graphifyy package"
+  ],
+  "priority": "High",
+  "revenue_model": "B2B SaaS subscription seat upgrade",
+  "pricing_strategy": "Value-based pricing for Enterprise Grid tier",
+  "customer_segments": [
+    "Enterprise Software Development teams",
+    "Product Management departments",
+    "Security & SOC2 Audit teams"
+  ]
+}

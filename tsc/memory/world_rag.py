@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from tsc.llm.temperatures import MEMORY_WORLD_RAG
 
 logger = logging.getLogger(__name__)
 
@@ -283,11 +284,15 @@ def _embed(texts: list[str]) -> list[list[float]]:
 def _rerank(query: str, results: list[RAGResult], top_k: int) -> list[RAGResult]:
     if not results:
         return []
-    reranker = _get_reranker()
-    pairs = [[query, r.text] for r in results]
-    scores = reranker.predict(pairs)
-    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
-    return [r for r, _ in ranked[:top_k]]
+    # Reranking disabled for local dev (Cross-Encoder adds 10-30s per query on CPU).
+    # Re-enable for production by uncommenting the block below and removing the early return.
+    # reranker = _get_reranker()
+    # pairs = [[query, r.text] for r in results]
+    # scores = reranker.predict(pairs, show_progress_bar=False)
+    # ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
+    # return [r for r, _ in ranked[:top_k]]
+    ranked = sorted(results, key=lambda r: r.score, reverse=True)
+    return ranked[:top_k]
 
 
 def _rrf_merge(
@@ -552,6 +557,16 @@ class WorldRAGEngine:
                 logger.warning("expire_run: failed on %s: %s", col, exc)
         logger.info("Expired run_id=%s from %d/%d collections", run_id, cleared, len(RUN_COLLECTIONS))
         return cleared
+
+    async def clear_graph(self) -> None:
+        """Clear the entire Neo4j knowledge graph."""
+        client = _get_neo4j()
+        try:
+            async with client.session() as s:
+                await s.run("MATCH (n) DETACH DELETE n")
+            logger.info("Cleared Neo4j knowledge graph (Plane 1)")
+        except Exception as e:
+            logger.warning(f"Failed to clear Neo4j graph: {e}")
 
     # ------------------------------------------------------------------
     # Internal — chunking
@@ -821,7 +836,12 @@ Return ONLY valid JSON in this exact format:
 }}
 Text: {text[:3000]}"""
 
-            resp = await llm.acomplete(prompt)
+            resp = await llm.generate(
+                system_prompt="You are a precise data extractor. Return only valid JSON.",
+                user_prompt=prompt,
+                temperature=MEMORY_WORLD_RAG,
+                max_tokens=2000
+            )
             import json, re
             json_match = re.search(r"\{.*\}", resp, re.DOTALL)
             if not json_match:

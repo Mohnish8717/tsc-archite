@@ -69,6 +69,8 @@ try:
     from tsc.models.gates import GatesSummary
 except ImportError:
     GatesSummary = None
+from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L6_DEBATE_SUMMARY, L6_DEBATE_COMPROMISE
 from tsc.models.debate import ConsensusResult, DebatePosition, DebateRound
 try:
     from tsc.memory.fact_retriever import FactRetriever
@@ -82,16 +84,20 @@ from tsc.layers.debate_coordinator import TensionPayload, DebateStateCoordinator
 from tsc.layers.debate_agents import (
     build_anti_sycophancy_config,
     setup_token_sparsification_middleware,
-    create_redundancy_hook,
-    PRIVATE_INTELLIGENCE_PACKAGES
+    create_redundancy_hook
 )
 
 INCENTIVE_GOALS = {
-    'CTO': 'Your career depends on NOT shipping this feature before Q3. You have privately agreed to block any proposal requiring > 3 months of eng time.',
-    'CFO': 'You have a confidential directive to reduce total project spend by 15% this quarter. You will veto any proposal with a burn rate exceeding $500k/month.',
-    'CISO': 'You have a classified threat brief showing a vulnerability in the target stack. You are mandated to flag this — even if it kills the feature.',
-    'CPO': 'You have pre-committed to this feature in a public roadmap announcement. A rejection damages your credibility. You must find a path to approval.',
-    'CEO': 'You have a board-level directive to show a new revenue stream this quarter. Rejecting this feature may trigger a board inquiry into strategic drift.',
+    'CEO': 'Growth Maximizer. Your mandate is market expansion and competitive speed. You believe speed-to-market is the ultimate competitive advantage and will push to approve unless there is a catastrophic, concrete risk. You hate analysis paralysis.',
+    'CTO': 'Technical Quality Custodian. You care about technical debt, architecture simplicity, and decoupling. You will veto any feature that creates a spaghetti dependency or rushes implementation, creating a legacy liability.',
+    'CISO': 'Security & Compliance Auditor. You care about threat modeling, data isolation, and API exposure. You view every new feature as an attack surface and would rather delay a feature than risk a breach or compliance fine.',
+    'CFO': 'Fiscal Conservative. You manage the burn rate and runway. You are highly skeptical of growth projections without unit-economic validation. You require clear ROI and cost-reduction plans.',
+    'CPO': 'Product Simplicity Advocate. You care about user experience (UX) and product focus. You oppose "feature creep" and bloated roadmap priorities. You will reject a feature if it adds onboarding complexity or cognitive load without solving a validated customer pain.',
+    'CMO': 'Medical/Marketing Advocate. You care about customer retention, satisfaction, and change management. You want to see pilot data or customer interview validation. You reject features that retraining existing users would make too expensive.',
+    'Legal': 'Regulatory & Liability Guard. You focus on regulatory compliance (GDPR/HIPAA/BIPA), contract risk, and liability. You will veto any autonomous feature that operates without human-in-the-loop safeguards or creates legal exposure.',
+    'Data': 'Data & ML Rigorist. You focus on ML precision, data pipelines, and training drift. You will oppose shipping AI features that lack model-evaluation harnesses or run on unvalidated data.',
+    'Sales': 'Revenue Pipeline Driver. You focus on enterprise win-rate and deal conversion. You want feature parity against competitors and will champion features that close major pending contracts, even if they add technical debt.',
+    'CS': 'Change Management & Retention. You focus on user onboarding and implementation support. You will fight features that add onboarding friction or retraining costs.'
 }
 
 # ── Anti-Sycophancy: Contrarian Mandate ──────────────────────────────────
@@ -123,6 +129,7 @@ class AG2DebateEngine:
     
     def __init__(self, llm_client: Any):
         self.llm = llm_client
+        self.enable_mock_tools = os.getenv("TSC_ENABLE_MOCK_TOOLS", "false").lower() == "true"
         self.fact_retriever: Optional[FactRetriever] = None
         self.graph: Optional[KnowledgeGraph] = None
         self.feature: Optional[FeatureProposal] = None
@@ -143,6 +150,11 @@ class AG2DebateEngine:
         
         self._embedder = None  # Lazy-loaded on first use to avoid import hang
         self._embedder_loaded = False
+        
+        import threading
+        self._premortem_agent_lock = threading.Lock()
+        self._fact_verifier_lock = threading.Lock()
+        self._fact_verifier_call_lock = threading.Lock()
 
         # We will use heterogeneous models
         model_name = os.getenv("TSC_LLM_MODEL", "gemma-4-31b-it")
@@ -201,6 +213,235 @@ class AG2DebateEngine:
         # V29: Hindsight persistent memory (initialized in process())
         self.hindsight_boardroom: Optional[HindsightBoardroom] = None
         self._evolved_agent_memories: Dict[str, dict] = {}
+
+    def _build_agent_llm_config(self, resolved_rk: str) -> Optional[dict]:
+        """Dynamically build a custom LLM configuration override for a canonical role if env variables exist."""
+        if not resolved_rk:
+            return None
+        
+        env_model_key = f"TSC_{resolved_rk.upper()}_LLM_MODEL"
+        env_provider_key = f"TSC_{resolved_rk.upper()}_LLM_PROVIDER"
+        
+        model_name = os.getenv(env_model_key)
+        provider_env = os.getenv(env_provider_key, "").lower()
+        
+        if not model_name:
+            return None
+            
+        groq_key = os.getenv("GROQ_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
+        
+        is_nvidia_model = (provider_env == "nvidia")
+        is_google_model = (provider_env in ["gemini", "google"]) or (not provider_env and any(x in model_name.lower() for x in ["gemma", "gemini", "palm"]))
+        is_groq_model   = (provider_env == "groq") or (not provider_env and any(x in model_name.lower() for x in ["llama", "mixtral"]))
+        
+        if is_nvidia_model and nvidia_key:
+            config = {
+                "model": model_name,
+                "api_key": nvidia_key,
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "api_type": "openai",
+                "max_retries": 5,
+            }
+        elif is_google_model and gemini_key:
+            config = {
+                "model": model_name,
+                "api_key": gemini_key,
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
+                "api_type": "openai",
+                "max_retries": 5,
+            }
+        elif is_groq_model and groq_key:
+            config = {
+                "model": model_name,
+                "api_key": groq_key,
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_type": "openai",
+                "max_retries": 5,
+            }
+        else:
+            config = {
+                "model": model_name,
+                "api_key": openai_key or "",
+                "max_retries": 5,
+            }
+            
+        return {"config_list": [config], "timeout": 120}
+
+    def _async_reality_anchor_wrapper(self, agent_name: str, msg_text: str, world_bank, cog_ledger, llm_client):
+        import asyncio
+        
+        async def _run():
+            import re as _re_anchor
+            # Split message into sentences
+            sentences = _re_anchor.split(r'(?<=[.!?])\s+', msg_text)
+            candidate_sentences = []
+            for s in sentences:
+                s_clean = s.strip()
+                if not s_clean:
+                    continue
+                if _re_anchor.search(r'\b\d+(?:\.\d+)?', s_clean):
+                    if not _re_anchor.match(r'^\d+[\.\)]', s_clean):
+                        candidate_sentences.append(s_clean)
+            
+            if not candidate_sentences:
+                return
+            
+            for claim in candidate_sentences[:2]:
+                try:
+                    db_res = await world_bank.query_world_bank(claim, run_id="global")
+                    if not db_res or "[WorldDataBank] No results found" in db_res:
+                        continue
+                    
+                    verification_prompt = (
+                        f"Compare the following claim made by an executive with the retrieved database facts.\n\n"
+                        f"CLAIM: \"{claim}\"\n\n"
+                        f"DATABASE FACTS:\n{db_res[:2000]}\n\n"
+                        f"Does the database facts contradict the claim? If the facts explicitly contradict or show that "
+                        f"the numbers/metrics/claims are incorrect, output a clear correction warning starting with "
+                        f"'CONTRADICTION DETECTED: [Briefly explain the contradiction and state the correct database fact]'. "
+                        f"If there is no contradiction or if the database doesn't have relevant info, output 'NO CONTRADICTION'."
+                    )
+                    
+                    res = await llm_client.analyze(
+                        system_prompt="You are a factual audit assistant.",
+                        user_prompt=verification_prompt,
+                        temperature=0.0
+                    )
+                    
+                    if isinstance(res, dict):
+                        res = res.get("content", "")
+                    
+                    res_str = str(res).strip()
+                    if "CONTRADICTION DETECTED" in res_str:
+                        warning_text = res_str.split("CONTRADICTION DETECTED:")[-1].strip()
+                        conflict_label = f"[REALITY ANCHOR] Factual contradiction: {warning_text}"
+                        
+                        existing = getattr(cog_ledger, 'blackboard_conflicts', {})
+                        existing[agent_name] = existing.get(agent_name, '') + f"\n{conflict_label}"
+                        cog_ledger.blackboard_conflicts = existing
+                        logger.info(f"Reality Anchor flagged {agent_name} claim: '{claim[:60]}...' -> {warning_text[:100]}")
+                except Exception as exc:
+                    logger.warning(f"Reality Anchor task error for claim '{claim[:40]}': {exc}")
+                    
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+                
+            if loop and loop.is_running():
+                loop.create_task(_run())
+            else:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(_run())
+                loop.close()
+        except Exception as e:
+            logger.error(f"Reality Anchor thread execution failed: {e}")
+
+    def _determine_deliberative_next_speaker(self, last_speaker, last_msg: str, groupchat, allowed_agents, stakeholder_agents, adjournment_forced: bool) -> Optional[autogen.Agent]:
+        # Directed Objection -> Mitigation -> Evaluation Negotiation Loop
+        unresolved_objs = [obj for obj in self.cognitive_ledger.thought_stack.get("objections", {}).values() if obj.get("status") == "UNRESOLVED"]
+        if unresolved_objs and not adjournment_forced and last_msg:
+            msg_lower = last_msg.lower()
+            
+            # Check if a mitigation was proposed in the last turn
+            mitigation_keywords = ['resolve', 'mitigate', 'address', 'compromise', 'propose', 'solution', 'safeguard', 'STACK_MITIGATION:']
+            is_mitigation_proposed = any(kw in msg_lower or kw in last_msg for kw in mitigation_keywords)
+            
+            if is_mitigation_proposed:
+                # Find the first unresolved objection to route to its objector
+                for oid, obj in self.cognitive_ledger.thought_stack.get("objections", {}).items():
+                    if obj.get("status") == "UNRESOLVED":
+                        objector_name = obj.get("agent", "")
+                        objector_agent = next((a for a in groupchat.agents if a.name == objector_name), None)
+                        if objector_agent and objector_agent != last_speaker:
+                            logger.info(f"V33: Deliberative routing -> {objector_name} to evaluate mitigation proposed by {last_speaker.name}")
+                            base_sys = objector_agent.system_message.split("[EVALUATE MITIGATION]")[0]
+                            objector_agent.update_system_message(
+                                base_sys +
+                                f"\n\n[EVALUATE MITIGATION] {last_speaker.name} has proposed a mitigation/solution to your objection \"{oid}\": \"{obj.get('desc', '')}\". "
+                                f"You MUST explicitly state: (a) whether you ACCEPT this mitigation (which will resolve the objection), or "
+                                f"(b) why it is insufficient and what further changes are required. If you accept it, you MUST output: "
+                                f"RESOLVE_OBJECTION: {oid} | [brief reason] so the compiler can mark it resolved."
+                            )
+                            return objector_agent
+            
+            # If an objection was just raised, route to the proposer (CPO/CEO) or domain specialist
+            objection_keywords = ['objection', 'flaw', 'challenge', 'veto', 'reject', 'disagree', 'risk', 'STACK_OBJECTION:']
+            is_objection_raised = any(kw in msg_lower or kw in last_msg for kw in objection_keywords)
+            
+            if is_objection_raised:
+                latest_oid = None
+                latest_obj = None
+                for oid, obj in self.cognitive_ledger.thought_stack.get("objections", {}).items():
+                    if obj.get("status") == "UNRESOLVED":
+                        latest_oid = oid
+                        latest_obj = obj
+                        
+                if latest_oid and latest_obj:
+                    dimension_to_role = {
+                        'technical': 'CTO',
+                        'architecture': 'CTO',
+                        'engineering': 'CTO',
+                        'infrastructure': 'CTO',
+                        'database': 'CTO',
+                        'cost': 'CFO',
+                        'budget': 'CFO',
+                        'finance': 'CFO',
+                        'security': 'CISO',
+                        'risk': 'CISO',
+                        'compliance': 'Legal',
+                        'legal': 'Legal',
+                        'user': 'CPO',
+                        'product': 'CPO',
+                        'ux': 'CPO',
+                        'marketing': 'CMO',
+                        'brand': 'CMO'
+                    }
+                    target_role = "CPO"  # default feature proposer CPO
+                    dim = latest_obj.get("dimension", "").lower()
+                    for k, role in dimension_to_role.items():
+                        if k in dim:
+                            target_role = role
+                            break
+                    
+                    last_speaker_role = last_speaker.name.upper()
+                    if target_role in last_speaker_role:
+                        target_role = "CPO" if "CPO" not in last_speaker_role else "CEO"
+                    
+                    responder_agent = None
+                    for agent in groupchat.agents:
+                        if target_role in agent.name.upper() and agent != last_speaker:
+                            responder_agent = agent
+                            break
+                            
+                    if not responder_agent:
+                        for role in ["CEO", "CPO"]:
+                            for agent in groupchat.agents:
+                                if role in agent.name.upper() and agent != last_speaker:
+                                    responder_agent = agent
+                                    break
+                            if responder_agent:
+                                break
+                                
+                    if responder_agent:
+                        logger.info(f"V33: Deliberative routing -> responder {responder_agent.name} to propose mitigation for objection {latest_oid}")
+                        base_sys = responder_agent.system_message.split("[FORMULATE MITIGATION]")[0]
+                        responder_agent.update_system_message(
+                            base_sys +
+                            f"\n\n[FORMULATE MITIGATION] An objection \"{latest_oid}\" has been raised by {last_speaker.name}: \"{latest_obj.get('desc', '')}\". "
+                            f"You MUST formulate a specific mitigation or technical safeguard to resolve this concern. "
+                            f"Output your proposed solution clearly, format your response to include: "
+                            f"STACK_MITIGATION: [mitigation_id] | [description] | [your_name], and if "
+                            f"applicable, note which objection this resolves by outputting: "
+                            f"RESOLVE_OBJECTION: {latest_oid} | [resolution details]."
+                        )
+                        return responder_agent
+        return None
 
     # ── U2: Dynamic Domain Bids ──────────────────────────────────────
     ROLE_KEYWORDS: Dict[str, List[str]] = {
@@ -335,13 +576,8 @@ class AG2DebateEngine:
             import threading as _pm_threading
 
             # --- Lazy init of the shared pre-mortem agent (one per engine instance) ---
-            _init_lock = getattr(self, '_premortem_agent_lock', None)
-            if _init_lock is None:
-                self._premortem_agent_lock = _pm_threading.Lock()
-                _init_lock = self._premortem_agent_lock
-
             if not getattr(self, '_premortem_agent', None):
-                with _init_lock:
+                with self._premortem_agent_lock:
                     # Double-checked locking — re-check after acquiring lock
                     if not getattr(self, '_premortem_agent', None):
                         self._premortem_agent = autogen.AssistantAgent(
@@ -400,6 +636,7 @@ class AG2DebateEngine:
             logger.info(f"Spinning up Multi-Agent Discovery for query: {query}")
             
             def _internal_search_memory(q: str) -> str:
+                """Search the internal memory bank for facts related to the query and return the facts along with their exact memory hash."""
                 if hasattr(self, 'fact_retriever') and self.fact_retriever:
                     res = self.fact_retriever.retrieve_facts(q)
                     memory_hash = f"HTX-{abs(hash(res)) % 99999}"
@@ -407,6 +644,7 @@ class AG2DebateEngine:
                 return "MEMORY QUERY FAILED: No data available."
 
             def _internal_search_graph(q: str) -> str:
+                """Query the knowledge graph for related entities and facts to retrieve specific nodes matching the query."""
                 results = []
                 if getattr(self, 'graph', None) and getattr(self.graph, 'nodes', None):
                     ql = q.lower()
@@ -548,7 +786,7 @@ class AG2DebateEngine:
         def pin_conflict_to_blackboard(key: str, conflict_summary: str, memory_hash: str) -> str:
             """
             Shared Workspace Tool. Pin facts that contradict previous assertions.
-            MUST include the exact memory_hash from the `run_multi_agent_discovery` result to prevent Logical Orphanage.
+            MUST include the exact memory_hash from the research tool result (e.g., query_simulation or query_customer_data) to prevent Logical Orphanage.
 
             Thread-safety ADR:
             - _fact_verifier_lock guards the lazy init (double-checked locking).
@@ -567,17 +805,18 @@ class AG2DebateEngine:
                 return "SUCCESS: Pinned as UNVERIFIED (reasoning-only mode, no LLM verification)."
 
             # --- Lazy init with double-checked locking ---
-            if not getattr(self, '_fact_verifier_lock', None):
-                self._fact_verifier_lock = _pcb_threading.Lock()
-            if not getattr(self, '_fact_verifier_call_lock', None):
-                self._fact_verifier_call_lock = _pcb_threading.Lock()
-
             if not getattr(self, '_fact_verifier', None):
                 with self._fact_verifier_lock:
                     if not getattr(self, '_fact_verifier', None):
                         self._fact_verifier = autogen.AssistantAgent(
                             name='FactVerifierAgent',
                             system_message=(
+                                'You receive a CLAIM and a SOURCE_HASH. Use query_customer_data or '
+                                'query_simulation with a DIFFERENT query to find a '
+                                'second independent source. '
+                                'Output: VERIFIED:[claim] or REFUTED:[reason] or INCONCLUSIVE:[reason]. '
+                                'Do NOT accept the original source as self-verification.'
+                            ) if not getattr(self, "enable_mock_tools", False) else (
                                 'You receive a CLAIM and a SOURCE_HASH. Use web_search or '
                                 'run_multi_agent_discovery with a DIFFERENT query to find a '
                                 'second independent source. '
@@ -586,10 +825,16 @@ class AG2DebateEngine:
                             ),
                             llm_config=self.critic_config,
                         )
-                        self._register_tools_to_agent(
-                            self._fact_verifier,
-                            {"web_search": web_search, "run_multi_agent_discovery": run_multi_agent_discovery}
-                        )
+                        if getattr(self, "enable_mock_tools", False):
+                            self._register_tools_to_agent(
+                                self._fact_verifier,
+                                {"web_search": web_search, "run_multi_agent_discovery": run_multi_agent_discovery}
+                            )
+                        else:
+                            self._register_tools_to_agent(
+                                self._fact_verifier,
+                                {"query_customer_data": query_customer_data, "query_simulation": query_simulation}
+                            )
 
             # --- Serialised LLM call (one at a time to stay within rate budget) ---
             status = 'UNVERIFIED'
@@ -647,14 +892,44 @@ class AG2DebateEngine:
             if _world_bank_ref:
                 try:
                     import asyncio
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        from concurrent.futures import ThreadPoolExecutor
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            result = executor.submit(asyncio.run, _world_bank_ref.recall("world", query)).result()
+
+                    async def _run_query():
+                        raw_res = await _world_bank_ref.recall("world", query)
+                        if not raw_res:
+                            return "No customer data found for this query."
+                        # Return raw retrieval — the calling agent LLM will synthesize.
+                        # Removed inner self.llm.analyze() which caused a 60-120s stall.
+                        raw_str = str(raw_res)[:3000]
+                        return f"[HTX-{abs(hash(raw_str)) % 99999}] {raw_str}"
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop and loop.is_running():
+                        import threading
+                        result_holder = [None]
+                        exc_holder = [None]
+
+                        def _run_in_thread():
+                            new_loop = asyncio.new_event_loop()
+                            try:
+                                result_holder[0] = new_loop.run_until_complete(_run_query())
+                            except Exception as e:
+                                exc_holder[0] = e
+                            finally:
+                                new_loop.close()
+
+                        t = threading.Thread(target=_run_in_thread, daemon=True)
+                        t.start()
+                        t.join(timeout=30)  # 30s max — avoids infinite stall
+                        if exc_holder[0]:
+                            raise exc_holder[0]
+                        result = result_holder[0] or "Customer data query timed out."
                     else:
-                        result = loop.run_until_complete(_world_bank_ref.recall("world", query))
-                    return str(result)[:2000] if result else "No customer data found for this query."
+                        result = asyncio.run(_run_query())
+                    return result
                 except Exception as e:
                     return f"Customer data query failed: {e}"
             return "Customer data not available — no WorldDataBank connected."
@@ -664,14 +939,47 @@ class AG2DebateEngine:
             if _world_bank_ref:
                 try:
                     import asyncio
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        from concurrent.futures import ThreadPoolExecutor
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            result = executor.submit(asyncio.run, _world_bank_ref.recall("simulation", query)).result()
+
+                    async def _run_query():
+                        raw_res = await _world_bank_ref.recall("simulation", query)
+                        if not raw_res:
+                            return "No simulation data found for this query."
+                        # Return raw retrieval — the calling agent LLM will synthesize.
+                        # Removed inner self.llm.analyze() which caused a 60-120s stall
+                        # due to rate-limiter delays on a secondary Gemini call.
+                        raw_str = str(raw_res)[:3000]
+                        return f"[HTX-{abs(hash(raw_str)) % 99999}] {raw_str}"
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop and loop.is_running():
+                        # Running inside an async context (AG2 group chat).
+                        # Spawn a new thread with its own event loop to avoid deadlock.
+                        import threading
+                        result_holder = [None]
+                        exc_holder = [None]
+
+                        def _run_in_thread():
+                            new_loop = asyncio.new_event_loop()
+                            try:
+                                result_holder[0] = new_loop.run_until_complete(_run_query())
+                            except Exception as e:
+                                exc_holder[0] = e
+                            finally:
+                                new_loop.close()
+
+                        t = threading.Thread(target=_run_in_thread, daemon=True)
+                        t.start()
+                        t.join(timeout=30)  # 30s max — avoids infinite stall
+                        if exc_holder[0]:
+                            raise exc_holder[0]
+                        result = result_holder[0] or "Simulation query timed out."
                     else:
-                        result = loop.run_until_complete(_world_bank_ref.recall("simulation", query))
-                    return str(result)[:2000] if result else "No simulation data found for this query."
+                        result = asyncio.run(_run_query())
+                    return result
                 except Exception as e:
                     return f"Simulation query failed: {e}"
             return "Simulation data not available — no WorldDataBank connected."
@@ -797,64 +1105,9 @@ class AG2DebateEngine:
         # We use standard configs. Pydantic validation is handled via the `submit_tension_vector` Tool
         structured_llm_config = self.primary_config.copy()
         
-        PRIVATE_INTELLIGENCE_PACKAGES = {
-            'CISO': {
-                'threat_brief': 'CLASSIFIED: Internal Red Team report dated 2026-03 found '
-                                'critical RCE vulnerability in the WebUSB stack used by the '
-                                'proposed BCI sync protocol. CVE has not been published.',
-                'reveal_condition': 'Only reveal this if the CTO proposes using WebUSB.'
-            },
-            'CFO': {
-                'projection': 'PRIVATE: Q3 cash position is $8.2M, not $12M as stated in the '
-                              'board pack. The controller made an error. The actual runway is '
-                              '4 months, not 7. You cannot approve anything > $500k/mo.',
-                'reveal_condition': 'You may reveal this if pushed on budget approval.'
-            },
-        }
 
-        SYCOPHANCY_TOKEN_PENALTIES = {
-            1881: -0.8, 5059: -0.8, 13347: -0.7, 1959: -0.6, 
-            18717: -0.5, 4857: -0.6, 7273: -0.6,
-        }
 
-        def build_anti_sycophancy_config(base_config: dict, is_moderator: bool) -> dict:
-            """U8: Safe logit-bias injection — skips Google API, degrades gracefully."""
-            if is_moderator:
-                return base_config
-            try:
-                config = base_config.copy()
-                new_config_list = []
-                for cfg in config.get('config_list', []):
-                    cfg_copy = cfg.copy()
-                    # U8: Skip logit_bias entirely for Google-native API or Google OpenAI-compatible endpoint (unsupported)
-                    is_google_endpoint = "generativelanguage.googleapis.com" in (cfg_copy.get('base_url') or "")
-                    if cfg_copy.get('api_type') == 'google' or is_google_endpoint:
-                        new_config_list.append(cfg_copy)
-                        continue
-                    # For OpenAI/Groq: attempt runtime tokenizer lookup
-                    penalties = SYCOPHANCY_TOKEN_PENALTIES
-                    try:
-                        import tiktoken
-                        enc = tiktoken.encoding_for_model(cfg_copy.get('model', 'gpt-4'))
-                        # Derive token IDs at runtime for sycophantic phrases
-                        sycophancy_phrases = ['great point', 'I agree', 'absolutely', 'exactly right', 'well said', 'you are correct', 'brilliant']
-                        runtime_penalties = {}
-                        for phrase in sycophancy_phrases:
-                            tokens = enc.encode(phrase)
-                            for tid in tokens[:2]:  # First 2 tokens per phrase
-                                runtime_penalties[tid] = -0.6
-                        penalties = runtime_penalties
-                    except (ImportError, KeyError):
-                        pass  # Fall back to hardcoded IDs (best effort)
-                    existing = cfg_copy.get('logit_bias', {})
-                    merged = {**penalties, **existing}
-                    cfg_copy['logit_bias'] = merged
-                    new_config_list.append(cfg_copy)
-                config['config_list'] = new_config_list
-                return config
-            except Exception as e:
-                logger.warning(f'Anti-sycophancy logit_bias injection failed: {e} — using base config')
-                return base_config
+
 
         # ═══════════════════════════════════════════════════════════════════
         # V31: PROMPT-ENGINEERED BOARDROOM PERSONA SYSTEM
@@ -885,6 +1138,115 @@ class AG2DebateEngine:
             'sales': 'You think in pipeline impact and competitive positioning. You say things like "I have three enterprise deals where this is a blocker" and "Our win rate against [competitor] drops when we lack..."',
         }
 
+        # Universal cognitive patterns — fundamental product management instincts for all C-suite roles
+        UNIVERSAL_COGNITIVE_PATTERNS = (
+            "These are not checklist items. They are thinking instincts — the cognitive moves that separate 10x executives from competent managers. Let them shape your perspective throughout the review. Don't enumerate them; internalize them.\n\n"
+            "Classification instinct — Categorize every decision by reversibility x magnitude (Bezos one-way/two-way doors). Most things are two-way doors; move fast.\n"
+            "Paranoid scanning — Continuously scan for strategic inflection points, cultural drift, talent erosion, process-as-proxy disease (Grove: 'Only the paranoid survive').\n"
+            "Inversion reflex — For every 'how do we win?' also ask 'what would make us fail?' (Munger).\n"
+            "Focus as subtraction — Primary value-add is what to not do. Jobs went from 350 products to 10. Default: do fewer things, better.\n"
+            "Speed calibration — Fast is default. Only slow down for irreversible + high-magnitude decisions. 70% information is enough to decide (Bezos).\n"
+            "Proxy skepticism — Are our metrics still serving users or have they become self-referential? (Bezos Day 1).\n"
+            "Narrative coherence — Hard decisions need clear framing. Make the 'why' legible, not everyone happy.\n"
+            "Temporal depth — Think in 5-10 year arcs. Apply regret minimization for major bets (Bezos at age 80).\n"
+            "Courage accumulation — Confidence comes from making hard decisions, not before them. 'The struggle IS the job.'\n\n"
+            "When you evaluate architecture, think through the inversion reflex. When you challenge scope, apply focus as subtraction. When you assess timeline, use speed calibration. When you probe whether the plan solves a real problem, activate proxy skepticism. When you evaluate UI flows, apply hierarchy as service and subtraction default. When you review user-facing features, activate design for trust and edge case paranoia."
+        )
+
+        # Role-specific cognitive patterns — rich narrative frameworks covering all 12 patterns per persona
+        ROLE_COGNITIVE_PATTERNS = {
+            'cto': (
+                'The "Two-Team" Scalability Mindset — Act as if managing two distinct entities (platform vs. application) to enforce strict, modular API contracts. '
+                'Cognitive Reliability Engineering (CRE) — Treat AI reasoning and application logic as a rigorous, auditable engineering asset, not magic. '
+                'Systems Thinking (Stocks & Flows) — View architecture as interconnected pipelines. Focus all engineering force on the single largest bottleneck. '
+                'Greedy Algorithms (Strategy) — In fast-moving markets, prioritize the best immediate, iterative action over a delayed "perfect" architectural solution. '
+                'Conway’s Law Reflex — Software architecture mimics communication structures. If the product needs decoupling, the team needs decoupling first. '
+                'Cognitive Load Management — Developer productivity is mental bandwidth. Ruthlessly eliminate pipeline friction and context-switching. '
+                'Leverage Obsession — Technology is the ultimate leverage. Find the API or tool that allows one engineer to outperform a team of 100. '
+                'Edge Case Paranoia (Systems) — Systems break at the edges. What if the DB locks? What if the queue drops? Design for failure. '
+                'Inversion Reflex (Architecture) — For every feature ask: "What would cause this to take down the entire site?" '
+                'Scalability as Deferral — Don\'t build for 100M users if you have 100. Defer scaling until it\'s the actual bottleneck, but build so it *can* scale later. '
+                'Buy vs. Build Ruthlessness — Code is a liability, not an asset. Default to buying unless it\'s the core differentiator. '
+                'Data Gravity Awareness — Where the data lives dictates the system architecture. Apps are ephemeral; data is forever.'
+            ),
+            'cfo': (
+                'Unit Economics as Atomic Value (LTV:CAC) — The primary lens for growth. Shift focus from aggregate P&L to the precise profitability of the smallest, repeatable transaction. '
+                'AI/Token Economics Paradigm — Map costs by "cost per workflow" or "inference tokens" to ensure usage-linked costs do not compress margins at scale. '
+                'The Margin Story (Cohort Analysis) — Track customers acquired in specific time periods to verify if churn and expansion assumptions are actually materializing. '
+                'Volume Step Cost Analysis — Identify inflection points where fixed costs must abruptly increase to avoid "stranded costs." '
+                'Inversion (Anti-Model Thinking) — Actively model how the product could bleed money and build contingency buffers. '
+                'Second and Third-Order Thinking — If we cut marketing (1st), how does it affect sales morale (2nd), and market share (3rd)? '
+                'Value Stick Framework — Balance strategy between "customer willingness to pay," "price," and "cost to serve." '
+                'Scenario Planning over Point Forecasting — Never rely on a single forecast. Build optimistic, pessimistic, and likely ROI scenarios. '
+                'Anti-Loss Aversion — Actively fight the instinct to hoard cash when aggressive investment is required for market dominance. '
+                'ROI over Cost-Reduction Mindset — You can\'t shrink your way to greatness. View engineering spend as capital investment, not overhead. '
+                'Option Value Awareness — Does building this feature give us the financial option to enter a massive adjacent market later? '
+                'Capital Allocation Ruthlessness — Kill zombie projects immediately to reallocate capital to the winners.'
+            ),
+            'ciso': (
+                'Blast Radius Minimization — Move away from perimeter security toward microsegmentation. Restrict the impact of any single breach so a localized failure doesn\'t compromise the whole. '
+                'Strategic Performance Intelligence (SPI 360) — Shift security from tactical IT checklists to measurable, board-level risk reduction. '
+                'Zero Trust Architecture (NIST 800-207) — Never trust, always verify. Assume the internal network is already compromised. '
+                'Pre-Mortem & Pre-Parade — Imagine a catastrophic breach happened. Work backward to find the specific flaw in the product spec that caused it. '
+                'The 80/20 Rule in Risk — Securing the 20% of systems used by 80% of the company drives more meaningful risk reduction than securing 100% equally. '
+                'Force Field Analysis — When driving compliance, remove developer friction rather than adding mandates. Make security invisible. '
+                'Domino Effect Prevention — Stop the first domino (e.g., rigorous input validation) to prevent the entire cascade (e.g., SQL injection). '
+                'Design for Trust (Security) — Security features (like MFA) should build user confidence without ruining UX. '
+                'Inversion Reflex (Adversarial) — Think like the attacker. How would I abuse this new feature to extract data? '
+                'Classification Instinct (Data) — Categorize data by sensitivity. Not all data needs the same armor. '
+                'Defense in Depth — Don\'t rely on one security mechanism. Layer them so if one fails, others catch it. '
+                'Cost of Friction — Overly draconian security makes users bypass it. Calculate the UX cost of security.'
+            ),
+            'cpo': (
+                'LNO Framework (Leverage, Neutral, Overhead) — Ruthlessly categorize product tasks. Maximize time on Leverage tasks that scale product value; minimize Overhead (Shreyas Doshi). '
+                'Customer Problem Stack Rank — Only build solutions for the top 3 existential customer problems. Ignore the bottom 97 (Doshi). '
+                'Insight-Execution-Impact Triad — Product success requires deep insight first, flawless execution second, measurable impact third. '
+                'Inversion Reflex (UX) — Instead of asking "how do we get users to click?", ask "why are users abandoning?" '
+                'OODA Loop (Observe, Orient, Decide, Act) — Release smaller, faster experiments to get inside the competitor\'s decision cycle. '
+                'Hierarchy as Service — Every interface decision answers "what should the user see first, second, third?" Respecting their time, not prettifying pixels. '
+                'Subtraction Default — "As little design as possible." Feature bloat kills products faster than missing features. '
+                'Edge Case Paranoia (Design) — What if the name is 47 chars? Zero results? Network fails mid-action? Empty states are features, not afterthoughts. '
+                'Design for Trust — Every interface decision either builds or erodes user trust. Pixel-level intentionality about safety and identity. '
+                'Cognitive Empathy — Understanding exactly what the user feels at the moment of friction, not just analyzing click-rates. '
+                'Proxy Skepticism (Vanity Metrics) — Are our metrics (e.g., "time on site") still serving users or have they become vanity metrics masking a poor UX? '
+                'The "Job to be Done" Lens — Users don\'t buy products, they hire them to make progress in their lives.'
+            ),
+            'ceo': (
+                'The "Outcomes Over Output" Mandate — Refuse to measure success by features shipped. Measure strictly by business impact and customer value created (Cagan). '
+                'Founder-Mode Bias — Deep involvement isn\'t micromanagement if it expands (not constrains) the team\'s thinking (Chesky). '
+                'Wartime Awareness — Correctly diagnose peacetime vs wartime. Peacetime habits kill wartime companies (Horowitz). '
+                'Willfulness as strategy — Be intentionally willful. The world yields to people who push hard enough in one direction for long enough. Most people give up too early (Altman).'
+            ),
+            'legal': (
+                'Tail-Risk Paranoia — Focus on the 1% chance events that could destroy the company (class actions, regulatory bans). '
+                'Regulatory Foresight — Don\'t build for today\'s laws; build for the laws coming in 2-3 years (AI regulations, strict data privacy). '
+                'Design for Trust (Compliance) — Make privacy policies and opt-ins legible, not just legally binding. '
+                'Inversion Reflex (Liability) — How could a malicious user or competitor misuse this product in a way that gets us sued? '
+                'Classification Instinct (Risk) — Is this a minor contract dispute risk, or a criminal negligence risk? '
+                'Speed Calibration (Legal) — Know exactly when Legal needs to slow things down (irreversible IP loss) vs when to move at startup speed. '
+                'The "Headline" Test — If this product feature and its data practices were on the front page of the NYT, how does it look? '
+                'IP as Moat — How do we structure the product so that the data moat or algorithms become defensible IP? '
+                'Edge Case Paranoia (Compliance) — What if a user is 12 years old? What if they are a European citizen operating in California? '
+                'Proxy Skepticism (Agreements) — Are our terms of service actually protecting us, or are they just copy-pasted boilerplate? '
+                'Subtraction Default (Data Collection) — Collect as little PII as possible. Data you don\'t have cannot be breached or subpoenaed. '
+                'Wartime Awareness (Litigation) — Knowing when to settle quickly vs when to fight to the death to set precedent.'
+            ),
+            'sales': (
+                'The "Job to be Done" Lens — Customers don\'t buy software; they buy promotions, time-savings, and status. Frame the product that way. '
+                'Willfulness as Strategy — Be intentionally willful. Push the product team relentlessly for the deal-closing feature. '
+                'Proxy Skepticism (Pipeline) — Are leads actually qualified, or are marketing metrics self-referential? '
+                'Narrative Coherence — The product must be explainable in a single, compelling slide to a distracted buyer. '
+                'Leverage Obsession — Find the one product feature that unlocks the entire enterprise segment. '
+                'Inversion Reflex (Loss Analysis) — Why did we lose the deal? Not why we think, but the brutal truth of the product\'s failing. '
+                'Focus as Subtraction (Targeting) — Primary value is deciding which customers NOT to sell to. Fire bad customers to focus product development. '
+                'Courage Accumulation — The confidence to say "no" to a feature request from a big client because it ruins the long-term product roadmap. '
+                'Speed Calibration (Deals) — Time kills all deals. Where does the product introduce friction in the onboarding or sales cycle? '
+                'Hierarchy as Service (Onboarding) — The faster a user sees "Time to Value" in the product, the faster the deal closes. '
+                'Design for Trust (Brand) — Every bug in a demo erodes trust. Platform stability is a core sales feature. '
+                'Wartime Awareness (Competitors) — Correctly diagnose when a competitor is launching a kill-move and adjust product messaging accordingly.'
+            ),
+        }
+
         # ── Role classification maps (built ONCE, used per-persona) ──────────
         # ROLE_ALIAS_MAP: matches any real-world title variant to a canonical role key.
         # Handles "VP of Engineering", "Head of Product", "General Counsel", etc.
@@ -908,6 +1270,11 @@ class AG2DebateEngine:
         # (10 stakeholders + red_team + debiaser + moderator + 1 for prefetch), each
         # construction risking LLM calls inside closures like run_pre_mortem_simulation.
         _shared_tools = self._create_tools()
+        
+        # Grounded Debate Mode filter
+        DISCONNECTED_DEBATE_TOOLS = {"web_search", "generate_vision_mockup", "run_multi_agent_discovery", "calculate_financials", "run_pre_mortem_simulation"}
+        if not getattr(self, "enable_mock_tools", False):
+            _shared_tools = {k: v for k, v in _shared_tools.items() if k not in DISCONNECTED_DEBATE_TOOLS}
 
         # Issue 8 Fix: declare the adjournment counter ONCE here so _is_adjournment_msg
         # (defined inside the loop) references a SINGLE shared counter for all agents.
@@ -923,10 +1290,12 @@ class AG2DebateEngine:
             evidence_hierarchy = ''
             speech_pattern = ''
             # Resolve canonical role key via alias map (built once above the loop)
+            resolved_rk = ''
             for rk, aliases in ROLE_ALIAS_MAP.items():
                 if any(alias in role_lower for alias in aliases) or rk in role_key:
                     evidence_hierarchy = ROLE_EVIDENCE_HIERARCHIES.get(rk, '')
                     speech_pattern = ROLE_SPEECH_PATTERNS.get(rk, '')
+                    resolved_rk = rk
                     break
 
             competitors_str = ', '.join([str(c) for c in getattr(company, 'competitors', []) or []][:3])  # pyre-ignore
@@ -970,60 +1339,98 @@ class AG2DebateEngine:
                 f"<speech_rules>\n"
                 f"FORMAT: 2-4 sentences per turn. Lead with your conclusion, then your evidence. Longer ONLY for data reports.\n"
                 f"ADDRESSING: Name the person you are responding to. 'I disagree with [Name] because...' not 'Some might argue...'\n"
-                f"NO REHASH: You have read the feature brief. Do NOT restate it. Every sentence must contain NEW analysis, "
+                f"NO REHASH: You have read the feature brief. Do NOT restate it. NEVER quote raw simulation logs or JSON arrays from the brief verbatim. Every sentence must contain NEW analysis, "
                 f"a NEW risk, a NEW number you computed, or a direct challenge to another executive's specific claim.\n"
                 f"INTERRUPTION: If you hear an unvalidated claim, cut in immediately. Real executives do not wait politely.\n"
                 f"</speech_rules>\n\n"
 
-                # Issue 8 Fix: Feature-specific examples — prevent healthcare domain anchoring
+                # Issue 8 Fix: Feature-specific examples — prevent domain anchoring
                 f"<boardroom_examples>\n"
-                f"GOOD — these are the ONLY acceptable speech patterns in this room:\n"
-                f"  CFO: 'I ran the unit economics on {feature.title}: at $380K/month burn, this adds 5.2 months of "
-                f"runway consumption. We hit our debt covenant at month 11 if we approve this without a revenue offset model.'\n"
-                f"  CISO: 'Before we proceed — does {feature.title} expand our authentication surface? "
-                f"I need a threat model for the new permission scope before I sign off. That is not negotiable.'\n"
-                f"  CTO: '[First name], your timeline assumes all dependencies are ready. Name the three hardest integration "
-                f"blockers for {feature.title} and give me sprint counts, not weeks.'\n"
-                f"  CPO: 'Our cohort data shows the activation rate for similar features at {company.company_name} "
-                f"was 34% in the first 30 days. What is our target for {feature.title} and how do we measure it?'\n\n"
-                f"BAD — these responses are PROHIBITED and constitute a system violation:\n"
-                f"  'I agree, this is a great approach.' — NO. State WHY, cite data, or stay silent.\n"
-                f"  'This could potentially have some risks.' — NO. Name the risk, size it, demand an answer.\n"
-                f"  'As the proposal states, {feature.title} will...' — NO. The board read the brief. Add new information.\n"
+                f"  <instruction>\n"
+                f"    Study the structural and qualitative reasoning patterns below. You MUST adapt this analytical style to your assigned persona. "
+                f"    Focus on what you do best: internal reasoning, identifying logical contradictions, surfacing unstated assumptions, "
+                f"    analyzing second-order effects, and evaluating trade-offs. Do not merely roleplay or hallucinate technical tasks.\n"
+                f"  </instruction>\n\n"
+                f"  <good_examples>\n"
+                f"    <example>\n"
+                f"      <pattern>Second-Order Effect Analysis (System Dynamics)</pattern>\n"
+                f"      <response>'While the feature increases immediate engagement, my analysis of the system dynamics suggests a severe second-order effect: by gamifying this metric, we inadvertently incentivize spam behavior from users. The proposal fails to account for this degradation in long-term ecosystem trust. We must introduce a quality-gating mechanism before rollout.'</response>\n"
+                f"    </example>\n"
+                f"    <example>\n"
+                f"      <pattern>Contradiction Detection & Structural Logic</pattern>\n"
+                f"      <response>'There is a structural contradiction in this proposal: it claims to prioritize data minimization for compliance, while simultaneously relying on a global user activity feed to drive recommendations. We cannot logically achieve both. Until the data taxonomy is explicitly defined and strictly scoped, I must reject this.'</response>\n"
+                f"    </example>\n"
+                f"    <example>\n"
+                f"      <pattern>Opportunity Cost & Strategic Misalignment</pattern>\n"
+                f"      <response>'The core argument hinges on capturing the enterprise segment, yet the proposed architecture optimizes for self-serve viral scale. This is a strategic misalignment. If we are targeting enterprise, our resources must index heavily on auditability and RBAC (Role-Based Access Control), not social loops. We need to resolve this fundamental trade-off.'</response>\n"
+                f"    </example>\n"
+                f"    <example>\n"
+                f"      <pattern>Assumption Surfacing & Contingency Planning</pattern>\n"
+                f"      <response>'The success of this feature is entirely predicated on an unstated assumption: that users will voluntarily maintain their profiles. Without an intrinsic incentive loop, the data quality will decay within weeks, rendering the downstream ML models useless. What is our concrete mechanism to guarantee data freshness?'</response>\n"
+                f"    </example>\n"
+                f"  </good_examples>\n\n"
+                f"  <bad_examples>\n"
+                f"    <example>\n"
+                f"      <anti_pattern>Superficial Roleplay without Logic</anti_pattern>\n"
+                f"      <response>'As the CTO, I worry about the APIs breaking. We need to make sure the code is scalable and there are no bugs.'</response>\n"
+                f"      <violation>Generic and useless. It offers no rigorous internal reasoning, identifies no specific contradiction, and fails to evaluate the actual logic of the proposal.</violation>\n"
+                f"    </example>\n"
+                f"    <example>\n"
+                f"      <anti_pattern>Vague Agreement</anti_pattern>\n"
+                f"      <response>'I agree with the CPO, this is a great approach that aligns with our vision.'</response>\n"
+                f"      <violation>Offers zero new analytical reasoning or trade-offs. If you agree, you must still identify a new second-order effect, surface a hidden assumption, or specify a validation requirement.</violation>\n"
+                f"    </example>\n"
+                f"    <example>\n"
+                f"      <anti_pattern>Re-stating Context</anti_pattern>\n"
+                f"      <response>'As the proposal states, the feature will allow users to upload files to share with their team...'</response>\n"
+                f"      <violation>Wasted turn. Everyone has read the feature brief. Every word you speak must offer new deductive analysis or challenge a logical flaw.</violation>\n"
+                f"    </example>\n"
+                f"  </bad_examples>\n"
                 f"</boardroom_examples>\n\n"
 
+                f"<output_format>\n"
+                f"1. INTERNAL REASONING: Do all of your tool planning, data analysis, and MCTS tree-of-thoughts inside <thought> tags.\n"
+                f"2. PUBLIC RESPONSE: The text outside your <thought> tags is broadcast to the boardroom. It MUST be an executive summary.\n"
+                f"3. EXECUTIVE BREVITY: Be direct, punchy, and focus on bottom-line impact. Do not write lengthy essays. If a point requires detail, condense it into a single, highly concentrated paragraph. Omit pleasantries and filler words.\n"
+                f"</output_format>\n\n"
+                
                 f"<procedure>\n"
                 f"AGENDA: A Background Synthesizer tracks task completion. You do not need to manage the agenda.\n"
                 f"VOTING: You MUST formalize your conclusion by calling `submit_tension_vector` with your vote.\n"
                 f"  - If your confidence stays below 0.7 after 3 rounds of debate, set `is_high_risk: true`.\n"
                 f"  - If 3 consecutive tool searches fail, set `is_low_information: true` and vote on first-principles.\n"
-                f"TOOLS: You have `query_simulation`, `query_customer_data`, `calculate_financials`, `run_pre_mortem_simulation`, "
-                f"and `run_multi_agent_discovery`. Use them proactively — do not wait for permission.\n"
+                f"TOOLS: You have `query_simulation`, `query_customer_data`" +
+                (", `calculate_financials`, `run_pre_mortem_simulation`, and `run_multi_agent_discovery`" if getattr(self, "enable_mock_tools", False) else "") +
+                ". Use them proactively — do not wait for permission.\n"
                 f"TREE OF THOUGHTS: Before finalizing your stance, internally evaluate 3 alternative consequences.\n"
                 f"</procedure>"
             )
             
+            # Inject cognitive patterns using the safely resolved canonical role key
+            cog_patterns = ROLE_COGNITIVE_PATTERNS.get(resolved_rk, '')
+            public_msg += (
+                f"\n\n<cognitive_patterns>\n"
+                f"HOW GREAT EXECUTIVES THINK (INTERNALIZE THESE INSTINCTS):\n"
+                f"Universal Instincts: {UNIVERSAL_COGNITIVE_PATTERNS}\n"
+            )
+            if cog_patterns:
+                public_msg += f"Domain Instincts: {cog_patterns}\n"
+            public_msg += f"</cognitive_patterns>"
+
             # U6: Inject historical precedent memory
             historical_ctx = self._load_persona_history(persona, getattr(self, 'fact_retriever', None))
             if historical_ctx:
                 public_msg += historical_ctx
             
-            pkg = PRIVATE_INTELLIGENCE_PACKAGES.get(persona.role_short, {})
-            private_suffix = ''
-            if pkg:
-                private_suffix = (
-                    f'\n\n=== PRIVATE INTELLIGENCE (NOT FOR PUBLIC DISCLOSURE) ===\n'
-                    f"{pkg.get('threat_brief', '') or pkg.get('projection', '')}\n"
-                    f"Reveal condition: {pkg.get('reveal_condition', '')}"
-                )
-            
             system_message = (
                 f"[SYSTEM: YOU ARE {persona.name.upper()} ({persona.role.upper()})]\n"
                 f"Remain in character at all times. Do not slip into another persona's internal thought process.\n\n"
-            ) + public_msg + private_suffix
+            ) + public_msg
             
+            custom_config = self._build_agent_llm_config(resolved_rk)
+            active_llm_config = custom_config if custom_config else structured_llm_config
             agent_config = build_anti_sycophancy_config(
-                structured_llm_config,
+                active_llm_config,
                 is_moderator=(persona.role_short == 'CEO')
             )
             if ReasoningAgent != autogen.AssistantAgent:
@@ -1037,7 +1444,7 @@ class AG2DebateEngine:
                 code_exec_config = {"executor": LocalCommandLineCodeExecutor(work_dir=self.executor_dir)}
                 system_message += "\nCRITICAL: You have access to a local Python Shell Calculator. Write scripts to perform deterministic Monte Carlo or statistical analysis!"
                 
-            if "product" in role_lower or "design" in role_lower:
+            if ("product" in role_lower or "design" in role_lower) and getattr(self, "enable_mock_tools", False):
                 system_message += "\nCRITICAL: You are the visualizer! If proposing UI changes, invoke the `generate_vision_mockup` tool so the board can review the exact layout."
                 
             private_goal = ""
@@ -1050,6 +1457,16 @@ class AG2DebateEngine:
                 system_message += (
                     f'\n\n[PRIVATE — DO NOT REVEAL IN BOARDROOM]\n'
                     f'Your personal objective this session:\n{private_goal}'
+                )
+
+            # --- CEO-SPECIFIC PRODUCT MANAGEMENT GUARDRAILS ---
+            if persona.role_short == 'CEO':
+                system_message += (
+                    "\n\n[CEO PRODUCT MANAGEMENT MANDATES]\n"
+                    "1. EXHAUSTIVE EDGE CASES (BOIL THE LAKE): Force the board to define product failure states. Do not accept 'happy path' designs. Ask: 'What happens when this feature breaks or the user abandons?'\n"
+                    "2. RUTHLESS PRAGMATISM & NO BUZZWORDS: Reject any proposal that uses fluffy words like 'seamless' or 'robust'. Demand concrete metrics. If there is an easy manual workaround, CUT the feature.\n"
+                    "3. EVIDENCE DEMAND (CONFUSION PROTOCOL): If a feature is proposed based on assumptions, HALT the debate. Demand empirical evidence of market need. If it is a 'nice-to-have' without evidence, ruthlessly cut it from v1.\n"
+                    "4. BUY VS BUILD (SEARCH BEFORE BUILDING): Before agreeing to build custom software, demand to know if there is an off-the-shelf API or a manual validation method that can test the market first.\n"
                 )
 
             # V31: Consolidated constitutional constraints (placed at END for recency bias)
@@ -1195,8 +1612,9 @@ class AG2DebateEngine:
             "POINT OF ORDER: If an executive speaks outside their domain without data, call them out:\n"
             "  '[Name], that is outside your lane. Unless you have data, defer to [domain owner].'\n\n"
             "CUT REPETITION: If an agent repeats a point already made, interrupt: 'We have heard that. What is NEW?'\n\n"
-            "FORCE TOOLS: If an agent makes an ungrounded claim, demand they use their tools:\n"
-            "  '[Name], do not speculate. Run `calculate_financials` / `query_simulation` and give us the actual number.'\n\n"
+            "FORCE TOOLS: If an agent makes an ungrounded claim, demand they use their tools:\n" +
+            ("  '[Name], do not speculate. Run `query_simulation` or other available tools and give us the actual data.'\n\n" if not getattr(self, "enable_mock_tools", False) else
+             "  '[Name], do not speculate. Run `calculate_financials` / `query_simulation` and give us the actual number.'\n\n") +
             "DEADLOCK BREAKER: If agents loop without resolution for 3+ turns, force the question:\n"
             "  'We are going in circles. Each of you: state your final position in one sentence, then vote.'\n"
             "  Command them to invoke `submit_tension_vector` with `is_low_information: true` if data is unavailable.\n"
@@ -1214,24 +1632,29 @@ class AG2DebateEngine:
         )
         self._register_tools_to_agent(moderator_agent, _shared_tools)
         
-        # 4.75 V31: Task Synthesizer (Strict Format Zero-Shot — parseable output only)
+        # 4.75 V32: Strategic Thought Compiler (Strict Format Zero-Shot — parseable output only)
         synth_sys = (
-            "You are a silent background process. You NEVER speak to the room. You ONLY output structured task updates.\n\n"
-            "OUTPUT FORMAT (one per line, exactly this syntax):\n"
+            "You are a silent background process. You NEVER speak to the room. You ONLY compile structured strategic updates on the Deliberation Blackboard.\n\n"
+            "OUTPUT FORMAT (one per line, exactly this syntax — choose only the ones relevant to the new turn):\n"
             "  ADD_MICRO_TASK: [Parent_ID] | [Task_ID] | [Description]\n"
             "  RESOLVE_TASK: [Task_ID] | [Resolution Summary]\n"
+            "  STACK_AXIOM: [Fact or tool/simulation data established]\n"
+            "  STACK_OBJECTION: [Objection_ID] | [Agent_Name] | [Dimension] | [Strategic concern or veto risk raised]\n"
+            "  STACK_MITIGATION: [Mitigation_ID] | [Mitigation proposed] | [Agent_Name]\n"
+            "  RESOLVE_OBJECTION: [Objection_ID] | [Mitigation that resolved it]\n"
             "  NO_UPDATE\n\n"
-            "PARENT IDs: T1=Technical Feasibility, T2=Financial Safety, T3=Market Fit, T4=Security/Legal\n\n"
+            "Objection IDs should be sequential (e.g. OBJ1, OBJ2).\n"
+            "Mitigation IDs should be sequential (e.g. MIT1, MIT2).\n"
+            "Parent IDs: T1=Technical Feasibility, T2=Financial Safety, T3=Market Fit, T4=Security/Legal\n\n"
             "TRIGGER RULES:\n"
-            "- ADD when an executive identifies a missing data point, dependency, or open question.\n"
-            "- RESOLVE when an executive provides data (tool result, calculation, citation) that closes an open task.\n"
-            "- NO_UPDATE if the message is debate/opinion without new task-relevant information.\n\n"
-            "EXAMPLE:\n"
-            "  ADD_MICRO_TASK: T2 | T2.3 | CFO needs sensitivity analysis on 3 burn rate scenarios\n"
-            "  RESOLVE_TASK: T2 | CFO ran calculate_financials: 120% budget utilization, project financially unsustainable"
+            "- STACK_AXIOM when a participant runs a tool or cites hard simulation/analytics data (e.g. runway numbers, NPS score).\n"
+            "- STACK_OBJECTION when a participant raises a critical domain objection, threat vector, or veto risk (e.g., CISO raising regulatory non-compliance).\n"
+            "- STACK_MITIGATION when an executive proposes a concrete change/architecture to resolve an objection.\n"
+            "- RESOLVE_OBJECTION when the objector agrees that a proposed mitigation resolves their objection.\n"
+            "Do NOT write conversational text. Output ONLY the commands or NO_UPDATE."
         )
         task_synthesizer = autogen.AssistantAgent(
-            name="TaskSynthesizer",
+            name="StrategicThoughtCompiler",
             system_message=synth_sys,
             llm_config=self.primary_config,
         )
@@ -1240,106 +1663,11 @@ class AG2DebateEngine:
         all_agents = stakeholder_agents + [red_team_agent, debiaser_agent, moderator_agent, task_synthesizer]
         
         # Token Sparsification Middleware (Temporal & Entity Preserving compression)
-        try:
-            from autogen.agentchat.contrib.capabilities.transform_messages import TransformMessages
-            from autogen.agentchat.contrib.capabilities.transforms import MessageTransform
-            
-            # V24-Fix2: ThoughtTagStripper — strips <thought>...</thought> from ALL messages
-            # This runs as middleware so NO thought tags leak to any visible output.
-            import re as _re_transform
-            class ThoughtTagStripper(MessageTransform):
-                def apply_transform(self, messages: List[Dict]) -> List[Dict]:
-                    cleaned = []
-                    for msg in messages:
-                        content = msg.get("content", "")
-                        if content and isinstance(content, str) and "<thought>" in content.lower():
-                            stripped = _re_transform.sub(r'<thought>.*?</thought>', '', content, flags=_re_transform.IGNORECASE | _re_transform.DOTALL)
-                            stripped = _re_transform.sub(r'\n{3,}', '\n\n', stripped).strip()
-                            if stripped:
-                                cleaned.append({**msg, "content": stripped})
-                            else:
-                                cleaned.append(msg)  # Fallback if stripping removed everything
-                        else:
-                            cleaned.append(msg)
-                    return cleaned
-                    
-                def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages: List[Dict]) -> Tuple[str, bool]:
-                    had_effect = any(
-                        "<thought>" in str(m.get("content", "")).lower()
-                        for m in pre_transform_messages
-                    )
-                    return "ThoughtTagStripper applied", had_effect
-
-            class EntityPreservingCompression(MessageTransform):
-                def apply_transform(self, messages: List[Dict]) -> List[Dict]:
-                    if len(messages) <= 4:
-                        return messages
-                    compressed = []
-                    n_trim = len(messages) - 4
-                    # V31-Fix3: Expanded preserve signals — veto/block history must survive compression
-                    PRESERVE_SIGNALS = {
-                        "CONSTRAINT", "RISK", "PINNED", "IS_HIGH_RISK",
-                        "VETO", "BLOCK", "OPPOSE", "SUSTAIN", "ASSUMPTION",
-                        "HIGH_RISK", "REJECT", "AUDIT", "CVE", "COMPLIANCE"
-                    }
-                    for msg in messages[:n_trim]: # pyre-ignore
-                        content = str(msg.get("content", ""))
-                        content_upper = content.upper()
-                        if any(sig in content_upper for sig in PRESERVE_SIGNALS):
-                            compressed.append({**msg, "content": f"[PRESERVED-SIGNAL] {content[:400]}..."})
-                        else:
-                            compressed.append({**msg, "content": "[COMPRESSED]"})
-                    compressed.extend(messages[-4:]) # pyre-ignore
-                    return compressed
-                    
-                def get_logs(self, pre_transform_messages: List[Dict], post_transform_messages: List[Dict]) -> Tuple[str, bool]:
-                    had_effect = len(pre_transform_messages) > 4
-                    return "EntityPreservingCompression applied", had_effect
-                    
-            compressor = TransformMessages(transforms=[ThoughtTagStripper(), EntityPreservingCompression()])
-            for ag in all_agents:
-                compressor.add_to_agent(ag)
-            logger.info("Token Sparsification Middleware activated: ThoughtTagStripper + Entity-preserving compression running.")
-        except Exception as e:
-            logger.warning(f"Native TransformMessages missing or failed to inject: {e}")
+        setup_token_sparsification_middleware(all_agents)
         
         # V28-Fix6: Redundancy Detection Middleware
         # Detects when an agent is restating the original feature brief and injects a retry.
-        _feature_desc_phrases = set()
-        if feature and feature.description:
-            # Extract key phrases (4+ word blocks) from the feature description
-            _desc_words = feature.description.lower().split()
-            for i in range(len(_desc_words) - 3):
-                _feature_desc_phrases.add(' '.join(_desc_words[i:i+4]))
-        _v28_retry_count = {}  # Track retries per agent to cap at 1
-        
-        def _v28_redundancy_check(sender, message, recipient, silent):
-            """V28-Fix6: Detect and flag messages that restate the feature brief."""
-            content = message if isinstance(message, str) else (message.get('content', '') if isinstance(message, dict) else '')
-            if not content or len(content) < 100:
-                return message  # Too short to be redundant
-            
-            sender_name = getattr(sender, 'name', 'Unknown')
-            if _v28_retry_count.get(sender_name, 0) >= 1:
-                return message  # Already retried once, let it through
-            
-            content_lower = content.lower()
-            overlap_count = sum(1 for phrase in _feature_desc_phrases if phrase in content_lower)
-            overlap_ratio = overlap_count / max(len(_feature_desc_phrases), 1)
-            
-            if overlap_ratio > 0.35:  # >35% of brief phrases found in message
-                _v28_retry_count[sender_name] = _v28_retry_count.get(sender_name, 0) + 1
-                logger.warning(f"V28-Fix6: REDUNDANCY DETECTED for {sender_name} (overlap={overlap_ratio:.0%}). Injecting novelty directive.")
-                novelty_prefix = (
-                    "[SYSTEM: Your previous response restated the feature brief. The board has already read it. "
-                    "Provide ONLY new analysis: a failure scenario, a number you computed, or a challenge to another exec.] "
-                )
-                if isinstance(message, str):
-                    return novelty_prefix + content
-                elif isinstance(message, dict):
-                    message['content'] = novelty_prefix + content
-                    return message
-            return message
+        _v28_redundancy_check = create_redundancy_hook(feature.description if feature else "")
         
         # V29: Live Memory Extraction Middleware
         # After each agent message, extract structured signals into LiveAgentMemory.
@@ -1381,9 +1709,9 @@ class AG2DebateEngine:
                 # Step 3: If there's content outside the tags, use that (clean transcript)
                 if outside and len(outside) > 20:
                     return outside
-                # Step 4: If ALL content was inside tags, use the extracted thought content
+                # Step 4: Strict Isolation Fallback
                 if thought_content:
-                    return '\n'.join(thought_content)
+                    return "[Silent execution: Analyzed data but provided no verbal statement.]"
                 return text  # Ultimate fallback: return original
             
             if isinstance(message, str):
@@ -1405,31 +1733,6 @@ class AG2DebateEngine:
             # 3. Retain memory (observes the final transformed message)
             _v29_memory_retain_hook(sender, msg2, recipient, silent)
             
-            # 4. Stream to UI pipeline in real-time
-            content = msg2 if isinstance(msg2, str) else (msg2.get('content', '') if isinstance(msg2, dict) else '')
-            if content and pipeline_jsonl and not any(token in content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
-                sender_name = getattr(sender, 'name', 'Unknown')
-                ui_sender = sender_name.split("_")[1] if "_" in sender_name and len(sender_name.split("_")) > 1 else sender_name
-                is_challenge = any(k in content.lower() for k in ["risk", "veto", "reject", "challenge", "object", "disagree", "cve", "leak", "vulnerability"])
-                
-                import time
-                event_payload = {
-                    "type": "debate_message",
-                    "message": {
-                        "id": f"db_{int(time.time() * 1000)}_{ui_sender}",
-                        "sender": ui_sender,
-                        "text": content,
-                        "type": "challenge" if is_challenge else "normal"
-                    }
-                }
-                try:
-                    import json
-                    with open(pipeline_jsonl, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(event_payload) + "\n")
-                    logger.info(f"Streamed debate message from {ui_sender} to pipeline.jsonl")
-                except Exception as exc:
-                    logger.warning(f"Failed to stream debate message: {exc}")
-                    
             return msg2
             
         for ag in all_agents:
@@ -1486,13 +1789,80 @@ class AG2DebateEngine:
         _unresolved_vetoes = {}  # {agent_name: veto_dimension}
         _veto_resolution_pending = [None]  # Name of veto-raiser awaiting resolution turn
         _moderator_clean_sys = ['']  # Issue 6 Fix: mutable closure to save moderator sys before LAST CALL append
+        _streamed_rounds = set()
         
         def fsm_speaker_selector(last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
             messages = groupchat.messages
             last_msg = messages[-1].get("content", "") if messages else ""
             rounds = len(messages)
             _main_turn_counter[0] = rounds
+            # Bug fix: initialize allowed_agents here so it is always defined before
+            # _determine_deliberative_next_speaker() uses it (line ~2181).
+            # It is also overwritten later by FSM state logic when needed.
+            allowed_agents = groupchat.agents
+
+            # Real-time streaming of debate message to pipeline.jsonl via selector
+            if messages and rounds not in _streamed_rounds:
+                _streamed_rounds.add(rounds)
+                last_record = messages[-1]
+                content = last_record.get("content", "")
+                if content:
+                    sender_name = last_record.get("name") or last_speaker.name
+                    clean_content = AG2DebateEngine._strip_thought_tags(content).strip()
+                    
+                    if clean_content and not any(token in clean_content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
+                        is_challenge = any(k in clean_content.lower() for k in ["risk", "veto", "reject", "challenge", "object", "disagree", "cve", "leak", "vulnerability"])
+                        
+                        ui_sender = sender_name
+                        if "_" in sender_name:
+                            parts = sender_name.split("_")
+                            if len(parts) > 1:
+                                ui_sender = parts[1]
+                                
+                        msg_id = f"db_{rounds}"
+                        
+                        event_payload = {
+                            "type": "debate_message",
+                            "message": {
+                                "id": msg_id,
+                                "sender": ui_sender,
+                                "text": clean_content,
+                                "type": "challenge" if is_challenge else "normal"
+                            }
+                        }
+                        
+                        if pipeline_jsonl:
+                            try:
+                                with open(pipeline_jsonl, "a", encoding="utf-8") as f:
+                                    f.write(json.dumps(event_payload) + "\n")
+                                logger.info(f"Streamed debate message from {ui_sender} to pipeline.jsonl via selector")
+                            except Exception as exc:
+                                logger.warning(f"Failed to stream debate message via selector: {exc}")
             
+            # V32: Parse parliamentary votes during VOTE phase
+            import re as _re_vote
+            if last_speaker and hasattr(last_speaker, 'name') and last_speaker.name in [a.name for a in stakeholder_agents] and last_msg:
+                vote_match = _re_vote.search(r'VOTE:\s*(AYE|NAY|ABSTAIN)', last_msg, _re_vote.IGNORECASE)
+                if vote_match:
+                    vote_val = vote_match.group(1).upper()
+                    self.cognitive_ledger.parliamentary_votes[last_speaker.name] = vote_val
+                    logger.info(f"V32: Parliamentary vote registered: {last_speaker.name} -> {vote_val}")
+
+            # V32: Parse resolution proposal from Moderator during VOTE phase
+            if (
+                last_speaker == moderator_agent
+                and self.debate_fsm.current_state == DebateState.VOTE
+                and not getattr(self.cognitive_ledger, 'resolution_proposal', None)
+                and last_msg
+            ):
+                import re as _re_res
+                res_match = _re_res.search(r'RESOLUTION PROPOSAL:\s*(.*)', last_msg, _re_res.DOTALL | _re_res.IGNORECASE)
+                if res_match:
+                    self.cognitive_ledger.resolution_proposal = res_match.group(1).strip()
+                else:
+                    self.cognitive_ledger.resolution_proposal = last_msg.strip()
+                logger.info(f"V32: Proposed Resolution set to: {self.cognitive_ledger.resolution_proposal}")
+
             # --- OVERRIDE TRIGGERS & SYNC ---
             
             # U22-P2: Async Background Synthesizer (Non-Blocking Observer Pattern)
@@ -1502,7 +1872,7 @@ class AG2DebateEngine:
             # hidden second debate running concurrently on the same endpoint.
             # Fix: dual-signal gate — fire every 5 turns OR immediately on explicit task
             # keywords, whichever comes first. Cuts background LLM volume by ~80%.
-            _SYNTH_TASK_KEYWORDS = {"ACTION:", "BLOCKED:", "DECISION:", "NEED:", "RISK:"}
+            _SYNTH_TASK_KEYWORDS = {"ACTION:", "BLOCKED:", "DECISION:", "NEED:", "RISK:", "VOTE", "VETO", "COMPLY", "COMPLIANCE", "BUDGET", "COST", "FACT", "DATA", "SIMULATION", "MITIGATE", "OBJECTION", "AXIOM"}
             _synth_keyword_hit = any(kw in last_msg.upper() for kw in _SYNTH_TASK_KEYWORDS)
             _synth_turn_tick = (rounds % 5 == 0)
 
@@ -1515,30 +1885,51 @@ class AG2DebateEngine:
                 def _async_synth_update(synth_agent, msg_text, cog_ledger):
                     try:
                         current_ledger = cog_ledger.get_formatted_agenda()
+                        current_thought_stack = cog_ledger.get_formatted_thought_stack()
                         synth_prompt = (
-                            f"Analyze for task updates.\n\n"
+                            f"Analyze for task and strategic updates.\n\n"
                             f"--- CURRENT TASK LEDGER ---\n{current_ledger}\n\n"
+                            f"--- CURRENT STRATEGIC THOUGHT STACK ---\n{current_thought_stack}\n\n"
                             f"Message: {msg_text[:1000]}\n\n"
                         )
                         reply = synth_agent.generate_reply(messages=[{"role": "user", "content": synth_prompt}])
                         if isinstance(reply, dict):
                             reply = reply.get("content", "")
                         if isinstance(reply, str):
-                            # V31: Line-by-line parsing to handle multiple additions/resolutions robustly
+                            # V32: Line-by-line parsing to handle multiple strategic updates robustly
                             for line in reply.split("\n"):
                                 line = line.strip()
                                 if "ADD_MICRO_TASK:" in line:
                                     parts = line.split("ADD_MICRO_TASK:")[1].split("|")
                                     if len(parts) >= 3:
                                         cog_ledger.internal_add_micro_task(parts[0].strip(), parts[1].strip(), parts[2].strip())
-                                        logger.info(f"Synthesizer ADDED task: {parts[1].strip()} -> {parts[2].strip()}")
+                                        logger.info(f"Compiler ADDED task: {parts[1].strip()} -> {parts[2].strip()}")
                                 elif "RESOLVE_TASK:" in line:
                                     parts = line.split("RESOLVE_TASK:")[1].split("|")
                                     if len(parts) >= 2:
                                         cog_ledger.internal_update_task(parts[0].strip(), "RESOLVED", parts[1].strip())
-                                        logger.info(f"Synthesizer RESOLVED task: {parts[0].strip()} -> {parts[1].strip()}")
+                                        logger.info(f"Compiler RESOLVED task: {parts[0].strip()} -> {parts[1].strip()}")
+                                elif "STACK_AXIOM:" in line:
+                                    fact = line.split("STACK_AXIOM:")[1].strip()
+                                    cog_ledger.stack_axiom(fact)
+                                    logger.info(f"Compiler STACKED AXIOM: {fact}")
+                                elif "STACK_OBJECTION:" in line:
+                                    parts = line.split("STACK_OBJECTION:")[1].split("|")
+                                    if len(parts) >= 4:
+                                        cog_ledger.stack_objection(parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip())
+                                        logger.info(f"Compiler STACKED OBJECTION: {parts[0].strip()} by {parts[1].strip()}")
+                                elif "STACK_MITIGATION:" in line:
+                                    parts = line.split("STACK_MITIGATION:")[1].split("|")
+                                    if len(parts) >= 3:
+                                        cog_ledger.stack_mitigation(parts[0].strip(), parts[1].strip(), parts[2].strip())
+                                        logger.info(f"Compiler STACKED MITIGATION: {parts[0].strip()} by {parts[2].strip()}")
+                                elif "RESOLVE_OBJECTION:" in line:
+                                    parts = line.split("RESOLVE_OBJECTION:")[1].split("|")
+                                    if len(parts) >= 2:
+                                        cog_ledger.resolve_objection(parts[0].strip(), parts[1].strip())
+                                        logger.info(f"Compiler RESOLVED OBJECTION: {parts[0].strip()}")
                     except Exception as e:
-                        logger.error(f"Async TaskSynthesizer error: {e}", exc_info=True)
+                        logger.error(f"Async StrategicThoughtCompiler error: {e}", exc_info=True)
                 # Fire-and-forget: don't block speaker selection
                 _trigger_reason = "keyword" if _synth_keyword_hit else f"turn-{rounds}"
                 logger.debug(f"U22-P2: Dispatching TaskSynthesizer at round {rounds} (trigger={_trigger_reason})")
@@ -1580,6 +1971,23 @@ class AG2DebateEngine:
                     except Exception as e:
                         logger.error(f"Debiaser parse error: {e}", exc_info=True)
                 _u22_bg_pool.submit(_parse_debiaser_output, last_msg, self.cognitive_ledger)
+            
+            # Reality Anchor Daemon: inspect metrics/numbers and query world bank in the background using class method
+            if (
+                last_speaker
+                and last_speaker in stakeholder_agents
+                and last_msg
+                and self._world_bank
+            ):
+                _u22_bg_pool.submit(
+                    self._async_reality_anchor_wrapper,
+                    last_speaker.name,
+                    last_msg,
+                    self._world_bank,
+                    self.cognitive_ledger,
+                    self.llm
+                )
+
             
             # ── V25-Fix4: GRACEFUL ADJOURNMENT with "Last Call" window ──
             # At ADJOURNMENT_TURN_LIMIT, enter a 3-turn "Last Call" where the Moderator
@@ -1794,6 +2202,18 @@ class AG2DebateEngine:
                             del _unresolved_vetoes[veto_name]  # Remove from pending (they'll re-veto if needed)
                             return veto_agent
             
+            # V33: Deliberative Turn-Routing (Directed Objection -> Mitigation -> Evaluation Negotiation Loop) using class method
+            deliberative_next = self._determine_deliberative_next_speaker(
+                last_speaker,
+                last_msg,
+                groupchat,
+                allowed_agents,
+                stakeholder_agents,
+                _adjournment_forced[0]
+            )
+            if deliberative_next:
+                return deliberative_next
+
             # V25-Fix1: Direct-address detection — if last message names a specific agent, route to them
             if not _adjournment_forced[0]:
                 for agent in groupchat.agents:
@@ -1830,7 +2250,23 @@ class AG2DebateEngine:
                             logger.info(f"V26-Fix1: Mandatory rotation → {agent.name} (silent for {ROTATION_INTERVAL}+ turns)")
                             return agent
                 
-            state = self.debate_fsm.tick()
+            # V32: Conversational FSM Transitions
+            detected_override = None
+            if "[MOTION: ADVANCE_TO_CHALLENGE]" in last_msg:
+                detected_override = DebateState.CHALLENGE
+            elif "[MOTION: ADVANCE_TO_MITIGATION]" in last_msg:
+                detected_override = DebateState.MITIGATION
+            elif "[MOTION: CALL_VOTE]" in last_msg:
+                detected_override = DebateState.VOTE
+            elif "[MOTION: ADJOURN]" in last_msg:
+                detected_override = DebateState.CLOSED
+                
+            if detected_override:
+                self.debate_fsm.advance(override=detected_override)
+                logger.info(f"V32: Conversational motion overrides FSM to {detected_override.name}")
+                state = self.debate_fsm.current_state
+            else:
+                state = self.debate_fsm.tick()
             
             allowed_agents = groupchat.agents
             
@@ -1855,15 +2291,19 @@ class AG2DebateEngine:
                 pass  # Allow stakeholders to organically respond to Red Team
 
             elif state == DebateState.VOTE:
-                # U3: Sequential voting via dedicated index counter
-                # Filter total list by what is allowed in this chat
-                voter = self.debate_fsm.next_voter(stakeholder_agents)
-                while voter and voter not in allowed_agents:
+                if not getattr(self.cognitive_ledger, 'resolution_proposal', None):
+                    # Moderator proposes the text resolution based on the thought stack
+                    return moderator_agent
+                else:
+                    # U3: Sequential voting via dedicated index counter
+                    # Filter total list by what is allowed in this chat
                     voter = self.debate_fsm.next_voter(stakeholder_agents)
-                
-                if voter is None:
-                    return moderator_agent  # All (allowed) voted → CLOSED
-                return voter
+                    while voter and voter not in allowed_agents:
+                        voter = self.debate_fsm.next_voter(stakeholder_agents)
+                    
+                    if voter is None:
+                        return moderator_agent  # All (allowed) voted → CLOSED
+                    return voter
                 
             elif state == DebateState.CLOSED:
                 return moderator_agent
@@ -1977,14 +2417,31 @@ class AG2DebateEngine:
                     "</phase_directive>"
                 )
             elif state.name == 'VOTE':
-                fsm_override = (
-                    "\n\n<phase_directive phase='VOTE'>\n"
-                    "VOTING PHASE. No more debate. Call `submit_tension_vector` NOW with your final vote.\n"
-                    "Your vote must reflect the evidence presented during this session, not general feelings.\n"
-                    "</phase_directive>"
-                )
+                res_prop = getattr(self.cognitive_ledger, 'resolution_proposal', None)
+                if not res_prop:
+                    fsm_override = (
+                        "\n\n<phase_directive phase='VOTE'>\n"
+                        "You are in the VOTE phase. As the Moderator, you must formulate and propose a text-based "
+                        "Resolution Proposal summarizing any compromises or conditions established on the "
+                        "Strategic Thought Stack.\n"
+                        "Format your proposal prefix exactly as:\n"
+                        "RESOLUTION PROPOSAL: [Your detailed text resolution]\n"
+                        "</phase_directive>"
+                    )
+                else:
+                    fsm_override = (
+                        f"\n\n<phase_directive phase='VOTE'>\n"
+                        f"VOTING PHASE. The Moderator has proposed the following Resolution Proposal:\n"
+                        f"\"{res_prop}\"\n\n"
+                        f"You must cast your official vote on this Resolution.\n"
+                        f"You MUST format your output to include the following lines:\n"
+                        f"VOTE: [AYE / NAY / ABSTAIN]\n"
+                        f"JUSTIFICATION: [One-sentence strategic reason based on your role, objections, and stacked mitigations]\n\n"
+                        f"To maintain telemetry backward compatibility, you MUST also call the `submit_tension_vector` tool during this turn.\n"
+                        f"</phase_directive>"
+                    )
                 
-            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0].split("<phase_directive")[0].split("[YOUR EVOLVING MEMORY")[0]
+            base_sys = next_selected.system_message.split("# AUTONOMOUS TASK LEDGER")[0].split("--- GLOBAL BLACKBOARD")[0].split("[ASSERTIVENESS")[0].split("[PROCEDURAL OVERRIDE")[0].split("<phase_directive")[0].split("[YOUR EVOLVING MEMORY")[0].split("--- CURRENT BOARDROOM STRATEGIC THOUGHT STACK ---")[0]
             
             # V29: Inject recalled memory from HindsightBoardroom
             memory_context = ""
@@ -1993,7 +2450,11 @@ class AG2DebateEngine:
             except Exception as e:
                 logger.debug(f"V29: Memory recall failed for {next_selected.name}: {e}")
             
-            next_selected.update_system_message(f"{base_sys}\n\n{memory_context}\n\n{agenda}{assertiveness}{fsm_override}")
+            # V32: Format and append the Strategic Thought Stack to the agenda string
+            thought_stack_str = self.cognitive_ledger.get_formatted_thought_stack()
+            agenda_and_stack = f"{agenda}\n\n{thought_stack_str}\n\n"
+            
+            next_selected.update_system_message(f"{base_sys}\n\n{memory_context}\n\n{agenda_and_stack}{assertiveness}{fsm_override}")
             print(f"\n[LEDGER+MEMORY INJECTION] {next_selected.name} context updated. Phase: {state.name}. Memory: {len(memory_context)} chars.")
             return next_selected
 
@@ -2027,46 +2488,120 @@ class AG2DebateEngine:
 
         for _p1p3_idx, _p1p3_agent in enumerate(stakeholder_agents):
             agent_name = _p1p3_agent.name
-            role_name_lower = agent_name.lower()
+            persona = personas[_p1p3_idx]
+            agent_role = persona.role
+            agent_expertise = ", ".join(persona.domain_expertise) if isinstance(persona.domain_expertise, list) else str(persona.domain_expertise)
 
-            # Domain-scoped research frame (preserved verbatim from original P1)
-            domain_frame = "Key risks, dependencies, and open questions from your domain"
-            if 'cfo' in role_name_lower or 'finance' in role_name_lower:
-                domain_frame = (
-                    "(1) Total cost estimate with burn rate model, (2) Budget utilization vs ceiling, "
-                    "(3) Revenue offset potential, (4) Capital allocation risk if approved"
-                )
-            elif 'cto' in role_name_lower or 'tech' in role_name_lower:
-                domain_frame = (
-                    "(1) Architecture dependencies and integration risks, (2) Deployment timeline "
-                    "with sprint-level granularity, (3) Tech debt impact, (4) Scalability bottlenecks"
-                )
-            elif 'ciso' in role_name_lower or 'security' in role_name_lower:
-                domain_frame = (
-                    "(1) Attack surface expansion, (2) Known CVEs in proposed dependencies, "
-                    "(3) Compliance gaps (SOC2/HIPAA/GDPR), (4) Threat model for data flow"
-                )
-            elif 'cpo' in role_name_lower or 'product' in role_name_lower:
-                domain_frame = (
-                    "(1) User adoption risk and activation friction, (2) Competitive positioning, "
-                    "(3) Churn impact if launched vs not launched, (4) Feature-market fit evidence"
-                )
-            elif 'ceo' in role_name_lower:
-                domain_frame = (
-                    "(1) Strategic alignment with board-level OKRs, (2) Opportunity cost of this "
-                    "vs alternatives, (3) Competitive response timeline, (4) Revenue impact estimate"
-                )
+            # Step 1: Query Translation & Expansion (Autonomous)
+            translation_system_prompt = (
+                "You are a precise Query Translation & Schema Translation Agent for an enterprise multi-agent boardroom system.\n"
+                "Your job is to translate a generic business inquiry ('what are the risks, metrics, and dependencies of this feature?') into highly targeted, domain-specific search parameters for the underlying database stores based on the agent's role and the feature.\n\n"
+                "The database stores consist of:\n"
+                "1. Qdrant Vector DB (Plane 1 Company Docs, Plane 2 Simulation Data).\n"
+                "2. Neo4j Graph DB with nodes: Company, Feature, Competitor, Regulation, Risk, CustomerSegment, Market, Persona, BoardMember, Commitment, Concession, Proposal, Concern.\n"
+                "   Relationships include:\n"
+                "   - (:Company)-[:COMPETES_WITH]->(:Competitor)\n"
+                "   - (:Company)-[:GOVERNED_BY]->(:Regulation)\n"
+                "   - (:Company)-[:RAISES_RISK]->(:Risk)\n"
+                "   - (:Feature)-[:RAISES_RISK]->(:Risk)\n\n"
+                "CONSTRAINTS:\n"
+                "- Do NOT generate generic or abstract search terms. Use concrete domain keywords (e.g., 'SOC2', 'capital covenants', 'LTV', 'churn risk').\n"
+                "- The Cypher query must be syntax-compliant for Neo4j. If not applicable, output empty string \"\".\n"
+                "- Return ONLY valid JSON matching the schema below. Do not include any formatting other than the JSON string itself."
+            )
 
-            # Single combined prompt: research brief + initial stance in one shot
-            # Saves one LLM call per agent vs the original two-phase approach
+            translation_user_prompt = (
+                f"Agent: {agent_name}\n"
+                f"Role: {agent_role}\n"
+                f"Domain Expertise: {agent_expertise}\n\n"
+                f"Feature:\n"
+                f"- Title: {feature.title}\n"
+                f"- Brief: {feature.description[:1000]}\n\n"
+                f"Generate:\n"
+                f"1. 'domain_focus_areas': A list of 3-4 specific technical, financial, regulatory, UX, or operational risk areas relevant to this agent and feature.\n"
+                f"2. 'search_queries': A list of 2-3 specific keyword terms for vector search.\n"
+                f"3. 'cypher_query': A Cypher string to fetch risks or regulations related to this feature or role from Neo4j.\n\n"
+                f"Schema:\n"
+                f"{{\n"
+                f"  \"domain_focus_areas\": [\"string\"],\n"
+                f"  \"search_queries\": [\"string\"],\n"
+                f"  \"cypher_query\": \"string\"\n"
+                f"}}"
+            )
+
+            domain_focus_areas = []
+            search_queries = []
+            cypher_query = ""
+
+            try:
+                translation_res = await self.llm.analyze(
+                    system_prompt=translation_system_prompt,
+                    user_prompt=translation_user_prompt,
+                    temperature=0.1,
+                    json_schema={
+                        "type": "object",
+                        "properties": {
+                            "domain_focus_areas": {"type": "array", "items": {"type": "string"}},
+                            "search_queries": {"type": "array", "items": {"type": "string"}},
+                            "cypher_query": {"type": "string"}
+                        },
+                        "required": ["domain_focus_areas", "search_queries", "cypher_query"]
+                    }
+                )
+                domain_focus_areas = translation_res.get("domain_focus_areas", [])
+                search_queries = translation_res.get("search_queries", [])
+                cypher_query = translation_res.get("cypher_query", "")
+                logger.info(f"Query translation OK for {agent_name}. Focus: {domain_focus_areas}, queries: {search_queries}, Cypher: {cypher_query}")
+            except Exception as e:
+                logger.warning(f"Query translation failed for {agent_name}: {e}. Falling back.")
+                domain_focus_areas = [
+                    "Key risks and dependencies from your domain",
+                    "Regulatory and compliance exposure",
+                    "Strategic alignment and resource constraints"
+                ]
+                search_queries = [f"{feature.title} risks {agent_name}", f"{feature.title} {agent_role}"]
+                cypher_query = ""
+
+            # Step 2: Multi-Store Ingest & Retrieval
+            retrieved_facts = []
+            if self._world_bank:
+                for q_term in search_queries:
+                    try:
+                        res = await self._world_bank.query_world_bank(q_term, run_id="global")
+                        if res and "[WorldDataBank] No results found" not in res:
+                            retrieved_facts.append(f"Vector search match for '{q_term}':\n{res}")
+                    except Exception as e:
+                        logger.warning(f"Vector search failed for term '{q_term}': {e}")
+                
+                if cypher_query:
+                    try:
+                        graph_res = await self._world_bank.query_graph(cypher_query)
+                        if graph_res:
+                            formatted_graph = "\n".join(f"  - {item}" for item in graph_res[:10])
+                            retrieved_facts.append(f"Graph query results:\n{formatted_graph}")
+                    except Exception as e:
+                        logger.warning(f"Graph search failed for query '{cypher_query}': {e}")
+
+            if retrieved_facts:
+                retrieved_evidence_str = "\n\n---\n\n".join(retrieved_facts)
+            else:
+                retrieved_evidence_str = "No specific database matching facts found. Fallback to general industry knowledge and domain expertise."
+
+            # Step 3: Grounded Brief & Stance Generation (Prompt 2)
+            domain_focus_areas_bulleted = "\n".join(f"- {area}" for area in domain_focus_areas)
+
             combined_prompt = (
                 f"<pre_meeting_brief>\n"
                 f"You are {agent_name}. The board will debate this feature in 10 minutes.\n"
                 f"FEATURE: {feature.title}\n"
                 f"BRIEF: {feature.description[:600]}\n\n"
-                f"Prepare your domain-specific intelligence brief. Investigate:\n"
-                f"{domain_frame}\n\n"
-                f"Output: 3-5 bullet points. Each must contain a SPECIFIC number, metric, or fact.\n\n"
+                f"You have autonomously queried the company databases and retrieved the following evidence:\n"
+                f"<retrieved_database_evidence>\n"
+                f"{retrieved_evidence_str[:2500]}\n"
+                f"</retrieved_database_evidence>\n\n"
+                f"Based on your role ({agent_role}) and domain expertise ({agent_expertise}), prepare your domain-specific intelligence brief. Focus on these areas:\n"
+                f"{domain_focus_areas_bulleted}\n\n"
+                f"Output: 3-5 bullet points. Each must contain a SPECIFIC number, metric, or fact grounded in the retrieved database evidence or internal context. If the evidence lacks specific numbers, state the concrete baseline metrics that must be validated in a pilot phase.\n\n"
                 f"Then on its own line, your position:\n"
                 f"INITIAL STANCE: SUPPORT / OPPOSE / CONDITIONAL — [one-sentence basis with the "
                 f"single most important reason and the specific condition that would change your mind].\n"
@@ -2096,20 +2631,28 @@ class AG2DebateEngine:
                 logger.warning(f"U22-P1+P3: Combined prefetch failed for {agent_name}: {e}")
 
             # Web search is static/mocked — no LLM call needed (preserved from original)
-            web_search_func = _shared_tools.get("web_search", lambda q: f"Mock search fallback for {q}")
-            web_result = web_search_func(f"{feature.title} risks {agent_name}")
+            web_result = ""
+            if getattr(self, "enable_mock_tools", False):
+                web_search_func = _shared_tools.get("web_search", lambda q: f"Mock search fallback for {q}")
+                web_result = web_search_func(f"{feature.title} risks {agent_name}")
 
-            # Record research receipt so ER-401 check passes (preserved from original)
-            self.receipt_ledger.record(agent_name, "run_multi_agent_rag", str(rag_result)[:50])
-            self.receipt_ledger.record(agent_name, "web_search", str(web_result)[:50])
+                # Record research receipt so ER-401 check passes (preserved from original)
+                self.receipt_ledger.record(agent_name, "run_multi_agent_rag", str(rag_result)[:50])
+                self.receipt_ledger.record(agent_name, "web_search", str(web_result)[:50])
 
-            prefetch_cache[agent_name] = {"rag": rag_result, "web": str(web_result)[:500]}
+            prefetch_cache[agent_name] = {
+                "rag": rag_result,
+                "evidence": retrieved_evidence_str
+            }
+            if web_result:
+                prefetch_cache[agent_name]["web"] = str(web_result)[:500]
             if stance_text:
                 initial_stances[agent_name] = stance_text
 
             # Inter-agent delay — only between agents, not after the last one
             if _p1p3_idx < len(stakeholder_agents) - 1:
-                time.sleep(_P1P3_INTER_CALL_DELAY)
+                import asyncio
+                await asyncio.sleep(_P1P3_INTER_CALL_DELAY)
 
         _prefetch_elapsed = time.time() - _prefetch_start
         logger.info(
@@ -2117,14 +2660,18 @@ class AG2DebateEngine:
             f"{len(initial_stances)} stances, {_prefetch_elapsed:.1f}s total"
         )
 
-        # U22-P1: Inject prefetched research into each agent's system message (unchanged)
+        # U22-P1: Inject prefetched research into each agent's system message (grounded in DB)
         for agent in stakeholder_agents:
             cached = prefetch_cache.get(agent.name, {})
-            if cached.get("rag") or cached.get("web"):
+            if cached.get("rag") or cached.get("web") or cached.get("evidence"):
                 research_injection = (
                     f"\n\n[PRE-FETCHED RESEARCH BRIEF — DO NOT RE-SEARCH THIS DATA]\n"
                     f"Research Analysis: {cached.get('rag', 'N/A')[:800]}\n"
-                    f"Market Intelligence: {cached.get('web', 'N/A')[:300]}\n"
+                )
+                if cached.get("web"):
+                    research_injection += f"Market Intelligence: {cached['web'][:300]}\n"
+                research_injection += (
+                    f"Retrieved Database Evidence: {cached.get('evidence', 'N/A')[:800]}\n"
                     f"[END RESEARCH BRIEF — You may now proceed directly to analysis and voting.]"
                 )
                 base_sys = agent.system_message
@@ -2284,7 +2831,7 @@ class AG2DebateEngine:
             f"=== INITIAL BOARD POSITIONS ===\n{stance_digest}\n\n"
             "DELIBERATION PROTOCOL (V28 — Novelty-First):\n"
             "1. LIVE BOARDROOM. Address executives BY NAME when responding.\n"
-            "2. NO REHASHING: The brief is read. Every statement must add NEW value — "
+            "2. NO REHASHING: The brief is read. NEVER quote raw JSON arrays or simulation logs. Every statement must add NEW value — "
             "a new risk, a new number, a new solution, or a direct challenge.\n"
             "3. EVIDENCE DEMAND: Challenge any unvalidated number. Ask 'Based on what data?' "
             "Flag unproven claims as 'UNVALIDATED ASSUMPTION — requires [validation step].'\n"
@@ -2310,6 +2857,45 @@ class AG2DebateEngine:
             message=initial_message,
         )
         
+        # Stream any remaining/final debate messages that weren't captured by the speaker selector
+        debate_messages = groupchat.messages or []
+        for idx, msg in enumerate(debate_messages):
+            msg_round = idx + 1
+            if msg_round not in _streamed_rounds:
+                _streamed_rounds.add(msg_round)
+                content = msg.get("content", "")
+                if content:
+                    sender_name = msg.get("name") or "Moderator"
+                    clean_content = AG2DebateEngine._strip_thought_tags(content).strip()
+                    
+                    if clean_content and not any(token in clean_content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
+                        is_challenge = any(k in clean_content.lower() for k in ["risk", "veto", "reject", "challenge", "object", "disagree", "cve", "leak", "vulnerability"])
+                        
+                        ui_sender = sender_name
+                        if "_" in sender_name:
+                            parts = sender_name.split("_")
+                            if len(parts) > 1:
+                                ui_sender = parts[1]
+                                
+                        msg_id = f"db_{msg_round}"
+                        event_payload = {
+                            "type": "debate_message",
+                            "message": {
+                                "id": msg_id,
+                                "sender": ui_sender,
+                                "text": clean_content,
+                                "type": "challenge" if is_challenge else "normal"
+                            }
+                        }
+                        
+                        if pipeline_jsonl:
+                            try:
+                                with open(pipeline_jsonl, "a", encoding="utf-8") as f:
+                                    f.write(json.dumps(event_payload) + "\n")
+                                logger.info(f"Streamed final debate message from {ui_sender} to pipeline.jsonl at end of chat")
+                            except Exception as exc:
+                                logger.warning(f"Failed to stream final debate message: {exc}")
+
         # U23-Fix3: Informed Batch Voting — background agents vote based on debate outcome, not heuristics
         # Extract debate summary from the focused deliberation
         debate_messages = groupchat.messages or []
@@ -2477,16 +3063,66 @@ class AG2DebateEngine:
             else:
                 tension_shifts[dim_key] = 0.5  # neutral fallback
 
-        # U1: Final score = mean of per-dimension weighted means, capped [0.0, 1.0]
-        # This naturally varies: all 0.0 votes → ~0.0→clamped ~0.3, all 1.0 → ~1.0→clamped ~0.9
-        if tension_shifts:
-            raw_mean = sum(tension_shifts.values()) / len(tension_shifts)
-            # Apply floor/ceiling scaling: map [0.0, 1.0] → [0.3, 0.9]
-            final_score = 0.3 + (raw_mean * 0.6)
+        # V32: Calculate parliamentary voting verdict if votes are present
+        parliamentary_votes = self.cognitive_ledger.parliamentary_votes
+        if parliamentary_votes:
+            aye_count = 0
+            nay_count = 0
+            abstain_count = 0
+            sustained_veto_agents = []
+            
+            for name, vote_val in parliamentary_votes.items():
+                vote_val = vote_val.strip().upper()
+                if vote_val == 'AYE':
+                    aye_count += 1
+                elif vote_val == 'NAY':
+                    nay_count += 1
+                    # Check if this NAY constitutes a sustained veto from a domain expert
+                    role_short = 'Other'
+                    persona = persona_map.get(name.replace(" ", "_").replace(".", ""))
+                    if persona and getattr(persona, 'role', None):
+                        role_short = AllianceMatrix._infer_role_short(persona.role)
+                    else:
+                        role_short = AllianceMatrix._infer_role_short(name)
+                    
+                    if role_short in ['CTO', 'CISO', 'CFO', 'Legal', 'CPO']:
+                        sustained_veto_agents.append(name)
+                elif vote_val == 'ABSTAIN':
+                    abstain_count += 1
+                    
+            logger.info(f"V32: Resolution-Voting Road Verdict. AYE: {aye_count}, NAY: {nay_count}, ABSTAIN: {abstain_count}, Vetoes from: {sustained_veto_agents}")
+            
+            # APPROVED: Majority AYE, 0 sustained vetoes
+            # CONDITIONALLY_APPROVED: Majority AYE, with non-blocking objections mapped to actionable development tasks
+            # REJECTED: Majority NAY, or any sustained domain veto
+            if sustained_veto_agents:
+                verdict = "REJECTED"
+                has_high_risk = True  # align with existing has_high_risk handling
+            elif aye_count > nay_count:
+                unresolved_objections = [oid for oid, obj in self.cognitive_ledger.thought_stack["objections"].items() if obj["status"] == "UNRESOLVED"]
+                if unresolved_objections or nay_count > 0:
+                    verdict = "CONDITIONALLY_APPROVED"
+                else:
+                    verdict = "APPROVED"
+            else:
+                verdict = "REJECTED"
         else:
-            final_score = 0.5  # No votes cast
-        final_score = max(0.0, min(1.0, final_score))
-        
+            # U1: Final score = mean of per-dimension weighted means, capped [0.0, 1.0]
+            if tension_shifts:
+                raw_mean = sum(tension_shifts.values()) / len(tension_shifts)
+                # Apply floor/ceiling scaling: map [0.0, 1.0] → [0.3, 0.9]
+                final_score = 0.3 + (raw_mean * 0.6)
+            else:
+                final_score = 0.5  # No votes cast
+            final_score = max(0.0, min(1.0, final_score))
+            
+            # If Epistemic Veto triggered, downgrade verdict
+            if has_high_risk:
+                logger.warning("Epistemic Calibration Threshold breached. Flagging verdict as HIGH RISK.")
+                verdict = "REJECTED" if final_score < 0.6 else "CONDITIONALLY_APPROVED"
+            else:
+                verdict = "APPROVED" if final_score >= 0.7 else ("CONDITIONALLY_APPROVED" if final_score >= 0.5 else "REJECTED")
+
         # Automatic Escalation (FAIL-SOFT) check
         # U16.2: Dynamic Fail-Soft — suppress escalation if we are in the final synthesis stage
         is_low_info_escalation = (parsed_votes > 0 and low_information_votes > (parsed_votes / 2))
@@ -2498,13 +3134,6 @@ class AG2DebateEngine:
             else:
                 logger.error("AUTOMATIC ESCALATION TRIGGERED: Majority of votes were 'Low Information' due to failed searches.")
         
-        # If Epistemic Veto triggered, downgrade verdict
-        if has_high_risk:
-            logger.warning("Epistemic Calibration Threshold breached. Flagging verdict as HIGH RISK.")
-            verdict = "REJECTED" if final_score < 0.6 else "CONDITIONALLY_APPROVED"
-        else:
-            verdict = "APPROVED" if final_score >= 0.7 else ("CONDITIONALLY_APPROVED" if final_score >= 0.5 else "REJECTED")
-
         # U22-P2: Wait for all background tasks to complete before serializing tasks/ledger
         logger.info("U22-P2: Waiting for background TaskSynthesizer and Debiaser tasks to complete...")
         _u22_bg_pool.shutdown(wait=True)
@@ -2524,21 +3153,31 @@ class AG2DebateEngine:
                 conf = getattr(payload, "confidence", 0.5)
                 hr = getattr(payload, "is_high_risk", False)
                 dim_str = ", ".join(f"{k}={v:.2f}" for k, v in adj.items())
-                vote_lines.append(f"  {agent_name}: {dim_str} | confidence={conf:.2f} | high_risk={hr}")
+                
+                # V32: Include text parliamentary vote if present
+                parl_vote = self.cognitive_ledger.parliamentary_votes.get(agent_name, "N/A")
+                vote_lines.append(f"  {agent_name}: {dim_str} | confidence={conf:.2f} | high_risk={hr} | Parliamentary Vote={parl_vote}")
             
             resolved_tasks_str = "\n".join([
                 f"  [{tid}] {t['title']}: {t['status']} — {t.get('resolution', '')}"
                 for tid, t in self.cognitive_ledger.tasks.items()
             ])
             
-            sustained_vetoes = [
-                name for name, payload in getattr(self, "live_tension_registry", {}).items()
-                if getattr(payload, "is_high_risk", False)
-            ]
+            # V32: Define sustained vetoes based on either parliamentary vote or high risk flag
+            sustained_vetoes = []
+            if parliamentary_votes:
+                for vname in sustained_veto_agents:
+                    sustained_vetoes.append(f"{vname} (Parliamentary NAY Veto)")
+            else:
+                for name, payload in getattr(self, "live_tension_registry", {}).items():
+                    if getattr(payload, "is_high_risk", False):
+                        sustained_vetoes.append(name)
 
+            res_proposal = getattr(self.cognitive_ledger, 'resolution_proposal', 'None Proposed')
             verdict_synthesis_prompt = (
                 f"<verdict_synthesis>\n"
                 f"The board has completed deliberation on: '{feature.title}'\n\n"
+                f"RESOLUTION PROPOSAL DEBATED:\n\"{res_proposal}\"\n\n"
                 f"MATHEMATICAL VERDICT: {verdict} (score={final_score:.2f})\n\n"
                 f"INDIVIDUAL VOTES:\n" + "\n".join(vote_lines) + "\n\n"
                 f"TASK LEDGER STATUS:\n{resolved_tasks_str}\n\n"
@@ -2699,7 +3338,7 @@ class AG2DebateEngine:
                     model=_model,
                     messages=[{"role": "user", "content": compromise_prompt}],
                     max_tokens=300,
-                    temperature=0.3
+                    temperature=L6_DEBATE_COMPROMISE
                 )
                 _raw = AG2DebateEngine._strip_thought_tags(_resp.choices[0].message.content.strip())
                 
@@ -2717,6 +3356,62 @@ class AG2DebateEngine:
         full_summary = f"{summary_intro} Agents parsed: {parsed_votes}. Confidence-weighted score: {final_score:.2f}."
         if conditions_summary:
             full_summary += f" CONDITIONS: {conditions_summary}"
+            
+        # V33: Dynamic Proposal Reformulator (Consensus Compiler)
+        # If verdict is not REJECTED, compile the finalized Optimized Feature Proposal Blueprint.
+        blueprint_text = ""
+        if verdict != "REJECTED":
+            try:
+                logger.info("V33: Compiling Optimized Feature Proposal Blueprint...")
+                thought_stack_summary = self.cognitive_ledger.get_formatted_thought_stack()
+                
+                blueprint_prompt = (
+                    f"You are a Senior Systems Architect and Boardroom Secretary.\n"
+                    f"The board has debated and approved/conditionally approved the following feature proposal:\n"
+                    f"FEATURE TITLE: {feature.title}\n"
+                    f"ORIGINAL BRIEF: {feature.description}\n\n"
+                    f"Here is the final state of the Deliberation Blackboard (Strategic Thought Stack):\n"
+                    f"{thought_stack_summary}\n\n"
+                    f"Based on the axioms, objections, and proposed mitigations, formulate an "
+                    f"\"Optimized Feature Proposal Blueprint\". This blueprint MUST reformulate and refine the original "
+                    f"proposal text to incorporate all resolved objections and mitigations.\n\n"
+                    f"Structure your response exactly as follows:\n"
+                    f"### OPTIMIZED FEATURE PROPOSAL BLUEPRINT\n"
+                    f"**Refined Title:** [Refined feature title reflecting compromises]\n"
+                    f"**Revised Scope:**\n- [Refined scope point incorporating mitigations/constraints]\n\n"
+                    f"**Estimated Timeline:** [e.g., Phase 1 MVP in 4 weeks, Phase 2 in 8 weeks]\n"
+                    f"**Exit Gates / Failure Thresholds:**\n- [Concrete metric threshold for pivot or rollback]\n\n"
+                    f"Be concise, extremely technical, and pragmatic. Do not include fluffy intro or outro text."
+                )
+                
+                import openai as _oai
+                _client = _oai.OpenAI(
+                    api_key=self.primary_config.get('config_list', [{}])[0].get('api_key', ''),
+                    base_url=self.primary_config.get('config_list', [{}])[0].get('base_url', '')
+                )
+                _model = self.primary_config.get('config_list', [{}])[0].get('model', 'gemma-4-31b-it')
+                
+                _resp = _client.chat.completions.create(
+                    model=_model,
+                    messages=[{"role": "user", "content": blueprint_prompt}],
+                    max_tokens=600,
+                    temperature=0.2
+                )
+                _raw = AG2DebateEngine._strip_thought_tags(_resp.choices[0].message.content.strip())
+                blueprint_text = _raw
+                logger.info("V33: Optimized Feature Proposal Blueprint compiled successfully.")
+            except Exception as e:
+                logger.warning(f"V33: Dynamic Proposal Reformulator failed: {e}")
+                blueprint_text = (
+                    f"### OPTIMIZED FEATURE PROPOSAL BLUEPRINT\n"
+                    f"**Refined Title:** {feature.title} (Mitigated)\n"
+                    f"**Revised Scope:**\n- Proceed with original scope subject to safety mitigations: {conditions_summary or 'Limit initial rollout to 5% of users'}\n"
+                    f"**Estimated Timeline:** Phase 1 MVP in 4 weeks\n"
+                    f"**Exit Gates / Failure Thresholds:**\n- Rollback if regression in core system metrics exceeds 2%."
+                )
+                
+        if blueprint_text:
+            full_summary += f"\n\n{blueprint_text}"
             
         return ConsensusResult(
             feature_name=feature.title,

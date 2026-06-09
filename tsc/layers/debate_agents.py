@@ -5,21 +5,6 @@ from typing import Dict, Any, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
-# Private intelligence packets to inject during debate setup
-PRIVATE_INTELLIGENCE_PACKAGES = {
-    'CISO': {
-        'threat_brief': 'CLASSIFIED: Internal Red Team report dated 2026-03 found '
-                        'critical RCE vulnerability in the WebUSB stack used by the '
-                        'proposed BCI sync protocol. CVE has not been published.',
-        'reveal_condition': 'Only reveal this if the CTO proposes using WebUSB.'
-    },
-    'CFO': {
-        'projection': 'PRIVATE: Q3 cash position is $8.2M, not $12M as stated in the '
-                      'board pack. The controller made an error. The actual runway is '
-                      '4 months, not 7. You cannot approve anything > $500k/mo.',
-        'reveal_condition': 'You may reveal this if pushed on budget approval.'
-    },
-}
 
 SYCOPHANCY_TOKEN_PENALTIES = {
     1881: -0.8, 5059: -0.8, 13347: -0.7, 1959: -0.6, 
@@ -151,10 +136,10 @@ def create_redundancy_hook(feature_description: str):
     _v28_retry_count = {}  # Track retries per agent to cap at 1
 
     def _v28_redundancy_check(sender, message, recipient, silent):
-        """Detect and flag messages that restate the feature brief."""
+        """V28-Fix6: Detect and flag messages that restate the feature brief."""
         content = message if isinstance(message, str) else (message.get('content', '') if isinstance(message, dict) else '')
         if not content or len(content) < 100:
-            return message
+            return message  # Too short to be redundant
         
         sender_name = getattr(sender, 'name', 'Unknown')
         if _v28_retry_count.get(sender_name, 0) >= 1:
@@ -164,16 +149,18 @@ def create_redundancy_hook(feature_description: str):
         overlap_count = sum(1 for phrase in _feature_desc_phrases if phrase in content_lower)
         overlap_ratio = overlap_count / max(len(_feature_desc_phrases), 1)
         
-        if overlap_ratio > 0.4:
-            _v28_retry_count[sender_name] = 1
-            logger.info("Redundancy check triggered for agent: %s (overlap ratio: %.2f)", sender_name, overlap_ratio)
-            # Injecting a corrective instruction as a system retry
-            return {
-                "content": (
-                    "[SYSTEM RETRY REQUEST] Your response contains high structural redundancy with the original proposal description. "
-                    "Do NOT restate the description. Focus on original critique, technical challenges, or economic impact."
-                )
-            }
+        if overlap_ratio > 0.35:  # >35% of brief phrases found in message
+            _v28_retry_count[sender_name] = _v28_retry_count.get(sender_name, 0) + 1
+            logger.warning(f"V28-Fix6: REDUNDANCY DETECTED for {sender_name} (overlap={overlap_ratio:.0%}). Injecting novelty directive.")
+            novelty_prefix = (
+                "[SYSTEM: Your previous response restated the feature brief. The board has already read it. "
+                "Provide ONLY new analysis: a failure scenario, a number you computed, or a challenge to another exec.] "
+            )
+            if isinstance(message, str):
+                return novelty_prefix + content
+            elif isinstance(message, dict):
+                message['content'] = novelty_prefix + content
+                return message
         return message
 
     return _v28_redundancy_check

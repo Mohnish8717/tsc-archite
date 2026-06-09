@@ -746,7 +746,7 @@ function Boardroom3D() {
       setAssignments((prev) => {
         const next = [...prev];
         const occupied = new Set(next);
-        
+
         // Find all currently unoccupied POIs (including seats and standing spots)
         const vacantIndices: number[] = [];
         for (let i = 0; i < BOARDROOM_POIS.length; i++) {
@@ -799,7 +799,7 @@ function Boardroom3D() {
     return list.map((p, index) => {
       const assignedPoiIdx = assignments[index] !== undefined ? assignments[index] : index;
       const targetPos = BOARDROOM_POIS[assignedPoiIdx].pos.toArray() as [number, number, number];
-      
+
       return {
         ...p,
         color: colors[index % colors.length],
@@ -871,6 +871,70 @@ function DebateChat() {
     : consensusResult?.overall_verdict === 'REJECT'
       ? { bg: 'bg-red-500', text: 'text-red-600', border: 'border-red-500' }
       : { bg: 'bg-yellow-400', text: 'text-yellow-600', border: 'border-yellow-400' };
+
+  const QABlock = ({ part, type }: { part: string, type: 'Q' | 'A' }) => {
+    const [expanded, setExpanded] = React.useState(false);
+    const cleanText = part.replace(/^[QA]:\s*/, '').trim();
+    // Only allow answers to be collapsible, and only if they are long
+    const isLong = cleanText.length > 150 && type === 'A';
+
+    return (
+      <div
+        className={`p-3 shadow-[4px_4px_0_0_#000] relative mt-3 ${type === 'Q'
+            ? 'bg-[#FAF9F6] border-[3px] border-black mt-4'
+            : `bg-white border-[3px] border-black ml-6 ${isLong ? 'cursor-pointer hover:bg-neutral-50' : ''}`
+          }`}
+        onClick={(e) => {
+          if (isLong) {
+            e.stopPropagation();
+            setExpanded(!expanded);
+          }
+        }}
+      >
+        <div className={`absolute -top-3 left-2 text-white text-[10px] font-black uppercase px-2 py-0.5 border-2 border-black ${type === 'Q' ? 'bg-[#FF4500]' : 'bg-[#10B981]'}`}>
+          {type === 'Q' ? 'Interrogation' : 'Response'}
+        </div>
+        <span className="text-black font-bold block pt-1 text-[13px] whitespace-pre-wrap leading-relaxed">
+          {(expanded || !isLong) ? cleanText : `${cleanText.slice(0, 150)}...`}
+        </span>
+        {isLong && (
+          <div className="mt-2 text-right">
+            <span className="text-[10px] font-black uppercase text-[#10B981] hover:underline">
+              {expanded ? 'Collapse' : 'Expand'}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const InterrogationContent = ({ content }: { content: string }) => {
+    if (!content.includes('Q:') && !content.includes('A:')) {
+      return <span className="text-black/80 font-mono whitespace-pre-wrap">{content}</span>;
+    }
+
+    // Split only on Q: or A: at the START of a line to avoid splitting inside responses
+    const parts = content.split(/(?=^Q:|^A:)/m);
+
+    return (
+      <div className="flex flex-col gap-4 my-2 font-mono">
+        {parts.map((part, index) => {
+          if (part.startsWith('Q:')) {
+            return <QABlock key={index} part={part} type="Q" />;
+          } else if (part.startsWith('A:')) {
+            return <QABlock key={index} part={part} type="A" />;
+          } else if (part.trim()) {
+            return (
+              <span key={index} className="text-black/80 font-mono whitespace-pre-wrap text-[13px] leading-relaxed">
+                {part.trim()}
+              </span>
+            );
+          }
+          return null;
+        })}
+      </div>
+    );
+  };
 
   return (
     <div className="w-full h-full flex flex-col bg-white border-l-8 border-black font-mono">
@@ -946,15 +1010,17 @@ function DebateChat() {
         ) : debateMessages.map((msg) => (
           <div
             key={msg.id}
-            className={`p-3 border-4 ${msg.type === 'challenge' ? 'border-[#FF4500] bg-[#FF4500]/10' : 'border-black bg-white'}`}
+            className={`p-4 border-4 transition-colors ${msg.type === 'challenge' ? 'border-[#FF4500] bg-[#FF4500]/5 hover:bg-[#FF4500]/10' : 'border-black bg-white hover:bg-neutral-50'}`}
           >
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-3 pb-2 border-b-2 border-black/10">
               <span className={`text-xs font-black uppercase tracking-widest ${msg.type === 'challenge' ? 'text-[#FF4500]' : 'text-black'}`}>
                 {msg.sender}
               </span>
-              {msg.type === 'challenge' && <ShieldAlert className="w-3 h-3 text-[#FF4500]" strokeWidth={3} />}
+              {msg.type === 'challenge' && <ShieldAlert className="w-3.5 h-3.5 text-[#FF4500]" strokeWidth={3} />}
             </div>
-            <p className="text-sm font-bold text-black/80">{msg.text}</p>
+            <div className="text-[13px] font-bold text-black/90">
+              <InterrogationContent content={msg.text} />
+            </div>
           </div>
         ))}
       </div>

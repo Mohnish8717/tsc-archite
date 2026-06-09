@@ -11,6 +11,7 @@ import json
 import re
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L7_SPEC_GENERATION
 from tsc.models.debate import ConsensusResult
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.spec import DevelopmentTask, FeatureSpecification
@@ -95,7 +96,7 @@ class SpecGenerator:
         spec_json_str = await self._llm.generate(
             system_prompt=SPEC_SYSTEM_PROMPT,
             user_prompt=prompt,
-            temperature=0.5,
+            temperature=L7_SPEC_GENERATION,
             max_tokens=6000,
         )
 

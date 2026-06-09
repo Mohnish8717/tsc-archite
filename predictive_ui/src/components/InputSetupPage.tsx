@@ -1,91 +1,133 @@
-import React, { useState } from 'react';
-import { Activity, Play, Plus, X, FileText, Upload } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { Activity, Play, Plus, X, FileText, Upload, File as FileIcon } from 'lucide-react';
 
 interface InputSetupPageProps {
-  onStartSimulation: (inputs: any) => Promise<void>;
+  onStartSimulation: (filePaths: Record<string, string>, boardroomOnly: boolean) => Promise<void>;
   onSkip?: () => void;
 }
 
 interface DocumentInput {
   id: string;
   title: string;
-  content: string;
+  // Either a File (binary-safe) or raw text — never both active at once.
+  file: File | null;
+  text: string;
 }
+
+// Map a document title to the field name expected by /api/upload
+function titleToFieldName(title: string): 'proposal' | 'context' | 'interviews' | 'support' | 'analytics' {
+  const t = title.toLowerCase();
+  if (t.includes('proposal') || t.includes('spec') || t.includes('feature')) return 'proposal';
+  if (t.includes('interview') || t.includes('research') || t.includes('user')) return 'interviews';
+  if (t.includes('support') || t.includes('ticket') || t.includes('complaint')) return 'support';
+  if (t.includes('analytic') || t.includes('data')) return 'analytics';
+  return 'context'; // Company Context + everything else
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const ACCEPTED_TYPES = '.txt,.md,.pdf,.docx,.json,.csv';
 
 export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetupPageProps) {
   const [documents, setDocuments] = useState<DocumentInput[]>([
-    { id: '1', title: 'Feature Proposal', content: '' }
+    { id: '1', title: 'Feature Proposal', file: null, text: '' }
   ]);
+  const [boardroomOnly, setBoardroomOnly] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const addDocument = (title: string = 'New Document') => {
     const isRecommended = ['Company Context', 'Feature Proposal', 'Customer Interviews', 'Support Tickets', 'Analytics JSON'].includes(title);
     if (isRecommended && documents.some(d => d.title.toLowerCase() === title.toLowerCase())) {
-      return; // Already exists
+      return;
     }
-    setDocuments([...documents, { id: Math.random().toString(), title, content: '' }]);
+    setDocuments(prev => [...prev, { id: Math.random().toString(), title, file: null, text: '' }]);
   };
 
   const removeDocument = (id: string) => {
-    setDocuments(documents.filter(d => d.id !== id));
+    setDocuments(prev => prev.filter(d => d.id !== id));
   };
 
-  const updateDocument = (id: string, field: 'title' | 'content', value: string) => {
-    setDocuments(documents.map(d => d.id === id ? { ...d, [field]: value } : d));
+  const updateTitle = (id: string, value: string) => {
+    setDocuments(prev => prev.map(d => d.id === id ? { ...d, title: value } : d));
   };
 
-  const handleFileUpload = (id: string, event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const updateText = (id: string, value: string) => {
+    setDocuments(prev => prev.map(d => d.id === id ? { ...d, text: value, file: null } : d));
+  };
+
+  const handleFileChange = (id: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
     if (!file) return;
+    // Store the File object directly — no FileReader, no corruption
+    setDocuments(prev => prev.map(d =>
+      d.id === id
+        ? { ...d, file, text: '' }
+        : d
+    ));
+  };
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result;
-      if (typeof text === 'string') {
-        setDocuments(docs => docs.map(d => 
-          d.id === id ? { ...d, content: text, title: file.name.replace(/\.[^/.]+$/, "") } : d
-        ));
-      }
-    };
-    reader.onerror = () => {
-      console.error("Failed to read file");
-      alert("Failed to read file");
-    };
-    reader.readAsText(file);
+  const clearFile = (id: string) => {
+    setDocuments(prev => prev.map(d => d.id === id ? { ...d, file: null, text: '' } : d));
+    // Reset the hidden input so the same file can be re-selected
+    if (fileInputRefs.current[id]) {
+      fileInputRefs.current[id]!.value = '';
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     setLoading(true);
 
-    // Map the dynamic documents into the backend's expected 5 categories
-    const payload = {
-      feature_proposal: '',
-      company_context: '',
-      support_tickets: '',
-      customer_interviews: '',
-      analytics: ''
-    };
-
-    documents.forEach(doc => {
-      const t = doc.title.toLowerCase();
-      if (t.includes('proposal') || t.includes('spec') || t.includes('feature')) {
-        payload.feature_proposal += `\n\n--- ${doc.title} ---\n${doc.content}`;
-      } else if (t.includes('support') || t.includes('ticket') || t.includes('complaint')) {
-        payload.support_tickets += `\n\n--- ${doc.title} ---\n${doc.content}`;
-      } else if (t.includes('interview') || t.includes('research') || t.includes('user')) {
-        payload.customer_interviews += `\n\n--- ${doc.title} ---\n${doc.content}`;
-      } else if (t.includes('analytic') || t.includes('data')) {
-        payload.analytics += `\n\n--- ${doc.title} ---\n${doc.content}`;
-      } else {
-        payload.company_context += `\n\n--- ${doc.title} ---\n${doc.content}`;
-      }
-    });
-
     try {
-      await onStartSimulation(payload);
-    } catch (err) {
-      console.error(err);
+      const form = new FormData();
+      // Track which fields have been populated to avoid double-overwriting
+      const populated: Record<string, boolean> = {};
+
+      for (const doc of documents) {
+        const field = titleToFieldName(doc.title);
+
+        if (doc.file) {
+          // Binary-safe upload — preserve original filename so backend detects extension
+          form.append(field, doc.file, doc.file.name);
+          populated[field] = true;
+        } else if (doc.text.trim()) {
+          // Text-only — create a plain-text Blob, use .txt extension
+          const safeName = `${field}_${Date.now()}.txt`;
+          form.append(field, new Blob([doc.text], { type: 'text/plain' }), safeName);
+          populated[field] = true;
+        }
+      }
+
+      if (Object.keys(populated).length === 0) {
+        setError('Add content to at least one document before starting.');
+        setLoading(false);
+        return;
+      }
+
+      const response = await fetch('http://localhost:8000/api/upload', {
+        method: 'POST',
+        body: form,
+      });
+
+      if (!response.ok) {
+        const msg = await response.text();
+        throw new Error(`Upload failed (${response.status}): ${msg}`);
+      }
+
+      const data = await response.json();
+      // Pass the server-returned file paths to App.tsx
+      await onStartSimulation(data.files, boardroomOnly);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
       setLoading(false);
     }
   };
@@ -113,11 +155,12 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
               return (
                 <button
                   key={preset}
+                  type="button"
                   onClick={() => addDocument(preset)}
                   disabled={exists}
                   className={`px-4 py-2 border-4 border-black font-black text-sm uppercase tracking-widest transition-all flex items-center gap-2 ${
-                    exists 
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none opacity-60' 
+                    exists
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none opacity-60'
                       : 'bg-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 hover:translate-x-1 hover:shadow-none'
                   }`}
                 >
@@ -126,6 +169,7 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
               );
             })}
             <button
+              type="button"
               onClick={() => addDocument('Custom Document')}
               className="px-4 py-2 bg-black text-white border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] font-black text-sm uppercase tracking-widest hover:-translate-y-1 hover:translate-x-1 hover:shadow-none transition-all flex items-center gap-2"
             >
@@ -134,48 +178,79 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
           </div>
         </div>
 
+        {error && (
+          <div className="mb-6 px-5 py-4 bg-[#FF4500] border-4 border-black font-black text-sm uppercase tracking-widest">
+            ⚠ {error}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-8">
-          {documents.map((doc, index) => (
+          {documents.map((doc) => (
             <div key={doc.id} className="bg-white border-4 border-black shadow-neo-black p-6 relative">
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => removeDocument(doc.id)}
                 className="absolute -top-4 -right-4 bg-[#FF4500] text-black border-4 border-black w-10 h-10 flex items-center justify-center hover:scale-110 transition-transform z-10"
               >
                 <X strokeWidth={3} />
               </button>
-              
+
               <div className="flex items-center gap-4 mb-4 border-b-4 border-black pb-4 justify-between">
                 <div className="flex items-center gap-4 flex-1">
                   <FileText strokeWidth={3} size={32} />
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={doc.title}
-                    onChange={(e) => updateDocument(doc.id, 'title', e.target.value)}
+                    onChange={(e) => updateTitle(doc.id, e.target.value)}
                     className="text-2xl font-black uppercase tracking-tighter w-full outline-none bg-transparent placeholder-gray-400"
                     placeholder="Document Title..."
                     required
                   />
                 </div>
                 <div>
-                  <label htmlFor={`file-upload-${doc.id}`} className="cursor-pointer flex items-center gap-2 px-3 py-1 bg-white border-4 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] font-black text-xs uppercase hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-none transition-all">
-                    <Upload size={14} strokeWidth={3} /> Upload File
+                  <label
+                    htmlFor={`file-upload-${doc.id}`}
+                    className="cursor-pointer flex items-center gap-2 px-3 py-1 bg-white border-4 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] font-black text-xs uppercase hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-none transition-all"
+                  >
+                    <Upload size={14} strokeWidth={3} />
+                    {doc.file ? 'Replace' : 'Upload File'}
                   </label>
-                  <input 
+                  <input
                     id={`file-upload-${doc.id}`}
-                    type="file" 
-                    className="hidden" 
-                    onChange={(e) => handleFileUpload(doc.id, e)} 
+                    ref={el => { fileInputRefs.current[doc.id] = el; }}
+                    type="file"
+                    accept={ACCEPTED_TYPES}
+                    className="hidden"
+                    onChange={(e) => handleFileChange(doc.id, e)}
                   />
                 </div>
               </div>
-              <textarea 
-                required
-                className="w-full h-40 outline-none text-sm font-mono font-bold resize-y text-black placeholder-gray-400 bg-transparent"
-                placeholder="Paste raw text, context, or JSON here..."
-                value={doc.content}
-                onChange={e => updateDocument(doc.id, 'content', e.target.value)}
-              />
+
+              {/* File badge when a file is attached */}
+              {doc.file ? (
+                <div className="flex items-center gap-3 p-4 bg-black text-white border-4 border-black">
+                  <FileIcon size={24} strokeWidth={2.5} className="shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-black text-sm uppercase tracking-widest truncate">{doc.file.name}</p>
+                    <p className="text-xs font-mono opacity-70">{formatBytes(doc.file.size)}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => clearFile(doc.id)}
+                    className="shrink-0 text-white hover:text-[#FF4500] transition-colors"
+                    title="Remove file"
+                  >
+                    <X strokeWidth={3} size={18} />
+                  </button>
+                </div>
+              ) : (
+                <textarea
+                  className="w-full h-40 outline-none text-sm font-mono font-bold resize-y text-black placeholder-gray-400 bg-transparent"
+                  placeholder="Paste raw text, JSON, or CSV here — or upload a file above (PDF, DOCX, TXT, JSON, CSV)..."
+                  value={doc.text}
+                  onChange={e => updateText(doc.id, e.target.value)}
+                />
+              )}
             </div>
           ))}
 
@@ -185,22 +260,30 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
             </div>
           )}
 
-          {/* Submit Button */}
           <div className="flex flex-col gap-4 mt-8">
-            <button 
-              type="submit" 
+            <label className="flex items-center gap-2 font-black uppercase tracking-widest text-sm cursor-pointer mb-2">
+              <input 
+                type="checkbox" 
+                checked={boardroomOnly}
+                onChange={(e) => setBoardroomOnly(e.target.checked)}
+                className="w-5 h-5 accent-black cursor-pointer border-2 border-black"
+              />
+              Skip Social Simulation (Boardroom Only)
+            </label>
+            <button
+              type="submit"
               disabled={loading || documents.length === 0}
               className="w-full py-6 bg-black text-white border-4 border-black shadow-neo-white font-black uppercase tracking-[0.2em] text-2xl flex items-center justify-center gap-4 transition-all hover:translate-x-1 hover:-translate-y-1 disabled:opacity-50"
             >
               {loading ? (
-                <span className="animate-pulse">Starting Engine...</span>
+                <span className="animate-pulse">Uploading & Starting...</span>
               ) : (
                 <>
                   <Play fill="currentColor" size={28} /> Start Simulation
                 </>
               )}
             </button>
-            
+
             {onSkip && (
               <button
                 type="button"

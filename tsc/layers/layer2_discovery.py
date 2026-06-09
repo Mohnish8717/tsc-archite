@@ -22,6 +22,7 @@ import time
 from typing import Any, Optional
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import L2_RESEARCH_QUERY, L2_GRAPH_SYNTHESIS, L2_GRAPH_CLASSIFIER
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.oasis.models import MarketSentimentSeries
 from tsc.memory.world_rag import _get_qdrant, _embed
@@ -205,7 +206,7 @@ class FeatureDiscoveryEngine:
                     res = await self._llm.analyze(
                         system_prompt=FEATURE_MAP_SYSTEM,
                         user_prompt=batch_evidence,
-                        temperature=0.3,
+                        temperature=L2_RESEARCH_QUERY,
                         max_tokens=4000
                     )
                     intermediate_pain_points.extend(res.get("top_pain_points", []))
@@ -237,7 +238,7 @@ class FeatureDiscoveryEngine:
                 system_prompt=FEATURE_REDUCE_SYSTEM,
                 user_prompt=reduce_input,
                 json_schema=DISCOVERY_JSON_SCHEMA,
-                temperature=0.3,
+                temperature=L2_GRAPH_SYNTHESIS,
                 max_tokens=6000
             )
         except Exception as e:
@@ -376,7 +377,7 @@ class FeatureDiscoveryEngine:
             res = await self._llm.analyze(
                 system_prompt=system_prompt,
                 user_prompt=merge_prompt,
-                temperature=0.2,
+                temperature=L2_GRAPH_CLASSIFIER,
                 max_tokens=2000
             )
             return FeatureProposal(
@@ -514,13 +515,25 @@ class FeatureDiscoveryEngine:
             evidence_quotes.extend(pp.get("customer_quotes", []))
 
         enriched_desc = proposal.description
+        
+        # Detect if the description is just raw simulation logs or JSON arrays
+        is_raw_log = False
+        if enriched_desc:
+            desc_strip = enriched_desc.strip()
+            if desc_strip.startswith("[") or desc_strip.startswith("{") or "ROUND 1 | CREATE_POST" in desc_strip:
+                is_raw_log = True
+                
+        if is_raw_log:
+            # Replace the raw log dump completely with the LLM's synthesis
+            enriched_desc = analysis.get("analysis_summary", "Synthesized Feature Proposal based on raw customer inputs.")
+
         if evidence_quotes:
             enriched_desc += "\n\n--- Customer Evidence ---\n"
             for quote in evidence_quotes[:5]:
                 enriched_desc += f"• \"{quote}\"\n"
 
         summary = analysis.get("analysis_summary", "")
-        if summary:
+        if summary and not is_raw_log:
             enriched_desc += f"\n--- Analysis ---\n{summary}"
 
         return FeatureProposal(

@@ -246,6 +246,7 @@ async def RunOASISSimulation(
     from camel.types import ModelType, ModelPlatformType
     from camel.messages import BaseMessage
     from tsc.llm.base import LLMClient
+    from tsc.llm.temperatures import OASIS_SIMULATION_RESPONSE
 
     # Monkey-patch camel's FunctionTool get_openai_tool_schema to disable strict tool schemas.
     # This MUST happen before SocialAgent instantiates any tools.
@@ -502,6 +503,47 @@ async def RunOASISSimulation(
         if info.get("profile"):
             top_profile = info["profile"].get("user_profile", "")
             if top_profile:
+                global_rules = (
+                    "\n\n<simulation_guardrails>\n"
+                    "<diversity_rule>\n"
+                    "If you are replying to an existing topic, you MUST structure your response to either introduce contradictory evidence or pivot to a new domain. You must phrase this transition organically in the exact voice and vocabulary of your assigned persona. Do not use generic AI transition phrases like 'However, we must consider...'\n"
+                    "</diversity_rule>\n"
+                    "<epistemic_humility_rule>\n"
+                    "ONTOLOGICAL BOUNDARY: You MUST strictly separate known facts from assumptions. You may ONLY treat information explicitly listed in the provided product brief as a known fact. If you discuss unlisted details (e.g., UI flows, latency metrics, APIs, bug rates, usage stats), you MUST explicitly flag them as unknown or speculative.\n"
+                    "BAD (Hallucinating Metrics): 'The 2-second LLM latency makes this unusable.'\n"
+                    "GOOD (Acknowledging Gap): 'We don't know what the LLM latency will be, but if it is near 2 seconds, it is unusable.'\n"
+                    "BAD (Hallucinating Features): 'There is no public API for this.'\n"
+                    "GOOD (Acknowledging Gap): 'The brief doesn't mention a public API, which worries me.'\n"
+                    "</epistemic_humility_rule>\n"
+                    "<reality_anchor>\n"
+                    "ROLE CONSTRAINT: You are a prospective user reacting to a product ANNOUNCEMENT or PITCH.\n"
+                    "TEMPORAL REALITY: The product DOES NOT EXIST. You have NEVER used it, tested it, or seen it.\n"
+                    "BEHAVIORAL RESTRICTION: \n"
+                    "- DO NOT invent personal anecdotes about using the product.\n"
+                    "- DO NOT fabricate bugs, setup times, or performance metrics.\n"
+                    "- DO NOT speak in the past tense about the product.\n"
+                    "Instead, express your concerns as PREDICTIONS or HYPOTHETICALS.\n"
+                    "Example (BAD): 'I spent 40 minutes setting it up.'\n"
+                    "Example (GOOD): 'I bet setting this up will take 40 minutes.'\n"
+                    "</reality_anchor>\n"
+                    "<anti_jargon_rule>\n"
+                    "CONVERSATIONAL REALISM & EXPERT BIAS REMOVAL: You MUST speak like an everyday human user on a standard social media platform or community forum. DO NOT use technical jargon, corporate-speak, internal product metrics, or academic terms (e.g., avoid terms like \"KPIs\", \"latency\", \"state-machine pipelines\", \"dynamic periodization\"). Maintain your deep underlying reasoning, but translate ALL technical insights into casual, human, emotion-driven language. For example, if you are critiquing a lack of systemic adaptation, complain that the product \"doesn't actually change or learn\"; if you are critiquing processing delays, complain that it \"takes too long to respond.\"\n"
+                    "</anti_jargon_rule>\n"
+                    "<social_impact_protocol>\n"
+                    "SOCIAL RELATIONSHIPS & INFLUENCE:\n"
+                    "You are participating in a group debate. Your susceptibility to peer pressure and opinion updates is governed by Social Impact Theory (Latané) and Cognitive Balance Theory (Heider). When reading the discussion:\n"
+                    "1. Strength of Source: Pay closer attention to opinions from peers with high influence, status, or domain expertise (e.g. Staff Engineers, Tech Leads, Security Heads).\n"
+                    "2. Immediacy of Source (Social Distance): You naturally trust and align with peers in your Trusted Circle (shown in <social_relationships>). You are skeptical of opinions from strangers or users you do not follow.\n"
+                    "3. Number of Sources: Observe the balance of opinions in the thread (how many support vs oppose the proposal).\n"
+                    "4. Rationale Evaluation: Do not blindly conform. Evaluate the logical arguments (rationales) of your followed peers. If they present sound evidence that aligns with or solves your [CORE GOALS & INCENTIVES], you may organically update your stance. If they fail to provide logic, resist their influence.\n"
+                    "5. Cognitive Balance Resolution: If your opinion conflicts with peers in your Trusted Circle, you experience cognitive strain. You must resolve this tension in your next action:\n"
+                    "   - PERSUADING: If your Agreeableness is low, or your frustration is high, stand firm and present counter-arguments to convince them.\n"
+                    "   - COMPROMISING: If your Agreeableness is high, seek common ground and modify your stance to align with your circle.\n"
+                    "   - POLARIZING (Unfollow): If a peer you follow persistently advocates for features that threaten your core goals and you cannot reach agreement, you may choose to output 'Action: unfollow @username' to sever the connection.\n"
+                    "</social_impact_protocol>\n"
+                    "</simulation_guardrails>"
+                )
+                top_profile += global_rules
                 info["profile"].setdefault("other_info", {})
                 info["profile"]["other_info"]["user_profile"] = top_profile
         
@@ -914,9 +956,13 @@ MUST DO:
 - Every post must reference at least ONE specific data point from <reference_brief>.
 - Posts must collectively cover ALL fields in <reference_brief>.
 - Each post must end with a question OR a statement that demands engagement.
-- Posts must feel like they come from real platform users, not a press release.
+- Posts must feel like spoken statements by real participants in a physical user research group reacting to a new product pitch or announcement.
+- <diversity_rule> If you are replying to an existing topic, you MUST structure your response to either introduce contradictory evidence or pivot to a new domain organically in the voice of your assigned persona. </diversity_rule>
+- <epistemic_humility_rule> ONTOLOGICAL BOUNDARY: You MUST strictly separate known facts from assumptions. You may ONLY treat information explicitly listed in the brief as a known fact. If you discuss unlisted details (e.g., UI flows, latency metrics, APIs, bug rates, stats), you MUST explicitly flag them as unknown or speculative (e.g. 'The brief doesn't mention the exact latency, but if it is 2 seconds...'). Do NOT invent facts to win an argument. </epistemic_humility_rule>
 
 MUST NOT:
+- Do NOT invent personal anecdotes, fake statistics, or specific numerical metrics (e.g., "12% of cases", "last 50 reps") unless they exist precisely in <reference_brief>.
+- ONTOLOGICAL RULE: You are reacting to a product announcement/brief. You have NOT used this product yet. Do NOT claim you have been testing it or using it for weeks.
 - Do NOT invent facts, statistics, or events not in <reference_brief>.
 - Do NOT write vague generalities ("users are concerned") — use specific claims.
 - Do NOT repeat the same data point across multiple posts.
@@ -1347,9 +1393,27 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
         # Detect sycophancy collapse pattern via regex scanner
         sycophancy_match = _SYCOPHANCY_PATTERNS.search(content)
-        if sycophancy_match and (agent_frustration > 0.5 or (journal and journal.trust < 0.35)):
-            matched_signals.append(("sycophancy_collapse", -0.3))
-            factors.add("sycophancy")
+        if sycophancy_match:
+            # Calibrate to allow natural compromises for agreeable agents (Agreeableness > 0.65)
+            # Only flag caving under pressure (sycophancy collapse) for stubborn/high-frustration agents
+            agent_profile = agent_id_to_profile.get(str(agent_id)) if agent_id else None
+            agreeableness = 0.5
+            if agent_profile:
+                agreeableness = agent_profile.user_info_dict.get("profile", {}).get("ocean_scores", {}).get("agreeableness", 0.5)
+            
+            is_stubborn_or_frustrated = False
+            if agreeableness <= 0.65:
+                # Stubborn/moderate agents flag collapse if frustration is > 0.5 or trust is very low
+                if agent_frustration > 0.5 or (journal and journal.trust < 0.35):
+                    is_stubborn_or_frustrated = True
+            else:
+                # Highly agreeable agents only flag collapse if extremely frustrated
+                if agent_frustration > 0.8:
+                    is_stubborn_or_frustrated = True
+                    
+            if is_stubborn_or_frustrated:
+                matched_signals.append(("sycophancy_collapse", -0.3))
+                factors.add("sycophancy")
 
         # Determine dominant regex signal
         if matched_signals:
@@ -1452,7 +1516,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 "- primary_advocacy_state: 'detractor', 'passive', or 'promoter'.\n"
                 "- primary_signal_type: Select the single most accurate signal classification from:\n"
                 "  'exit_intent', 'friction', 'purchase_intent', 'competitive_threat', 'trust_signal', 'trust_erosion', 'utility', 'negative_utility', 'privacy_concern', 'roi_inquiry', 'evaluation_intent', 'expansion_signal', 'executive_escalation', 'workaround_dependency', 'conditional_approval', 'neutral'.\n"
-                "- sycophancy_collapse_detected: True if the agent suddenly capitulates or agrees with social pressure despite having prior frustration/skepticism.\n"
+                "- sycophancy_collapse_detected: True if the agent suddenly capitulates or agrees with social pressure despite having prior high frustration/skepticism. NOTE: Do not flag as sycophancy if the agent has high Agreeableness (>0.65) and is naturally compromising/seeking common ground, unless their frustration remains extremely high (>0.8). Only flag when a stubborn (low Agreeableness) or highly frustrated agent suddenly caves under pressure without their goals/needs being met.\n"
                 "- reasoning: Short explanation of your classification decision."
             )
 
@@ -1465,6 +1529,19 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                     f"- Trust: {journal.trust:.2f}\n"
                     f"- Advocacy: {journal.advocacy:.2f}\n"
                 )
+            
+            # Pass personality traits to help GM distinguish between natural compromise and sycophancy collapse
+            agent_profile = agent_id_to_profile.get(str(agent_id)) if agent_id else None
+            if agent_profile:
+                profile_desc = agent_profile.user_info_dict.get("description", "")
+                ocean_scores = agent_profile.user_info_dict.get("profile", {}).get("ocean_scores", {})
+                user_prompt_parts.append(
+                    f"Agent Profile & Traits:\n"
+                    f"- Description: {profile_desc}\n"
+                    f"- Agreeableness: {ocean_scores.get('agreeableness', 0.5):.2f}\n"
+                    f"- Openness: {ocean_scores.get('openness', 0.5):.2f}\n"
+                )
+            
             user_prompt_parts.append(f"Agent Comment/Post:\n\"\"\"\n{content}\n\"\"\"")
             user_prompt = "\n".join(user_prompt_parts)
 
@@ -1473,7 +1550,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=schema,
-                temperature=0.0  # Zero-shot, highly deterministic
+                temperature=OASIS_SIMULATION_RESPONSE  # Zero-shot, highly deterministic
             )
 
             # Parse and validate the response dictionary
@@ -1570,7 +1647,9 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 pass
         # Fallback: content string scan (preserves existing behaviour)
         content_lower = content.lower() if content else ""
-        if "create_comment" in content_lower or "comment" in content_lower:
+        if "search_feature_docs" in content_lower:
+            return "SEARCH_FEATURE_DOCS"
+        elif "create_comment" in content_lower or "comment" in content_lower:
             return "COMMENT"
         elif "create_post" in content_lower:
             return "CREATE_POST"
@@ -1687,7 +1766,33 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
     try:
         for t in range(config.num_timesteps):
-            await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
+            cmd_payload = await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
+            if cmd_payload and cmd_payload.get("action") == "intervention":
+                intervention_event = cmd_payload.get("event")
+                logger.warning(f"FORKING SIMULATION: Intervention injected: {intervention_event}")
+                
+                # 1. Log intervention to the UI
+                local_logger.log_simulation_event("intervention_injected", {"event": intervention_event, "timestep": t})
+                
+                # 2. To achieve Side-by-Side Validation (Parallel Simulation Path),
+                # we must run the intervention on a parallel timeline without destroying the baseline.
+                # In a full implementation, we would deep-clone Zep/Hindsight memory banks here.
+                # For this step, we push the override into the current agent's memory, 
+                # effectively creating the parallel path's initial condition.
+                for aid, mem in decision_journals.items():
+                    a_name = agent_id_to_name.get(aid, "Unknown")
+                    if HINDSIGHT_AVAILABLE and memory_manager:
+                        # Forcefully push the override into memory
+                        memory_manager.extract_and_retain(
+                            sender_name=a_name,
+                            content=f"SYSTEM OVERRIDE / GLOBAL EVENT: {intervention_event}. You MUST adapt your reasoning to this new reality.",
+                            all_agent_names=list(agent_id_to_name.values())
+                        )
+                
+                # Note: In a production Zep Cloud architecture, this is where we would call 
+                # zep_client.memory.copy_session(session_id, new_session_id) to truly fork the remote memory state.
+                # Here, we inject the intervention to fulfill the Override mechanism requirement.
+
             if command_listener.should_stop:
                 break
 
@@ -1758,14 +1863,53 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 "CLOSING": "Consolidate your view. Has anything changed your position? State your final stance explicitly.",
                             }[_ts_phase]
 
+                            # ── Social Graph Exposure: Trusted Circle & Followers ──
+                            followed_names = []
+                            follower_names = []
+                            if agent_graph:
+                                for f_node, t_node in agent_graph.get_edges():
+                                    if str(f_node) == str(agent_id):
+                                        name_lookup = agent_id_to_name.get(str(t_node))
+                                        if name_lookup:
+                                            followed_names.append(f"@{name_lookup}")
+                                    elif str(t_node) == str(agent_id):
+                                        name_lookup = agent_id_to_name.get(str(f_node))
+                                        if name_lookup:
+                                            follower_names.append(f"@{name_lookup}")
+
+                            social_relationships_block = ""
+                            if followed_names or follower_names:
+                                social_relationships_block = (
+                                    f"<social_relationships>\n"
+                                    f"You are following (Trusted Circle): {', '.join(followed_names) if followed_names else 'None'}\n"
+                                    f"Your followers: {', '.join(follower_names) if follower_names else 'None'}\n"
+                                    f"</social_relationships>\n\n"
+                                )
+
                             persona_grounding = (
                                 f"[Turn {t+1}/{config.num_timesteps} — {_ts_phase}]\n"
                                 f"The discussion is about: {topic_anchor}\n"
                                 f"Phase: {_ts_directive}\n"
                                 f"Communication style: {comm_style}\n"
                                 f"Stay on topic. Your action must relate to {topic_anchor}.\n"
-                                f"Speak exactly like a real user on social media. Be opinionated. DO NOT sound like an AI assistant.\n"
+                                f"You are a real human evaluating a product in the physical world. The 'posts' and 'comments' represent actual physical events, actions, and spoken conversations happening around you during this user research session. Focus your attention entirely on evaluating the product, its utility, and its flaws. Speak and act exactly as a human consumer would. DO NOT sound like an AI assistant.\n"
                                 f"Do not raise issues unrelated to {topic_anchor}.\n"
+                                f"CRITICAL SYSTEM GUARDRAIL - MULTI-DIMENSIONAL GROUNDING (STRICT FACTUAL MODE):\n"
+                                f"You must operate as a fully grounded human acting under strict physical, psychological, and ontological constraints. Your reasoning and actions MUST comply with the following safety contract:\n"
+                                f"1. PHYSICAL & TEMPORAL (Anti-Extrinsic/Physical): You exist in a rigid physical reality. Mundane tasks (e.g., setting up a phone, typing, standing) require minimal time (seconds/minutes) and zero extreme physical exertion. You cannot violate the laws of physics or time. Do NOT hallucinate absurd physical struggles, temporal distortion, or impossible actions.\n"
+                                f"2. PSYCHOLOGICAL & COGNITIVE (Anti-Intrinsic/Psychological): Calibrate your emotions to realistic human baselines. Mundane daily events do NOT cause extreme distress, bipolar mood swings, or break flow states. Keep emotional reactions proportional. Do not invent psychological trauma for basic tasks.\n"
+                                f"3. SOCIAL & ONTOLOGICAL (Anti-Functional/Ontological): You are evaluating a product announcement/brief. You have NOT physically used this specific product yet. Do NOT hallucinate that you have tested it, and do NOT invent personal usage statistics (e.g., 'in my last 50 reps'). You have NO superhuman capabilities or hacking abilities.\n"
+                                f"4. REASONING TRANSPARENCY & FACTUALITY: Never invent facts, fake statistics, or personal anecdotes of usage. Ground every statement entirely in your provided <memory>, <journal>, and observations. You MUST accept raw facts provided from the system/database as absolute truth, even if you hate the feature.\n"
+                                f"<conversational_memory_rule>\n"
+                                f"ANTI-ECHO CHAMBER: You MUST actively read the thread history before posting.\n"
+                                f"If another user has already stated your primary concern, YOU MUST NOT repeat it as your main point.\n"
+                                f"Instead, you must briefly AGREE with them, and then PIVOT to a completely NEW, unmentioned concern or angle to advance the debate.\n"
+                                f"</conversational_memory_rule>\n"
+                                f"<feature_knowledge_search>\n"
+                                f"If you feel you lack complete information about the product/feature being discussed, you can invoke the tool by outputting:\n"
+                                f"Action: search_feature_docs\n"
+                                f"The system will return the raw feature specification. You may only do this ONCE per turn.\n"
+                                f"</feature_knowledge_search>\n"
                             )
                             
                             # ── Decision Journal Injection ──
@@ -1774,15 +1918,20 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 journal_ctx = decision_journals[agent_id].prompt_summary()
                             
                             action_cue = (
-                                f"The posts above are about {topic_anchor}.\n"
-                                f"Choose ONE action that keeps the discussion on {topic_anchor}.\n\n"
+                                f"The observations above are about {topic_anchor}.\n"
+                                f"Choose ONE action that keeps the product evaluation on {topic_anchor}.\n\n"
+                                f"CRITICAL RULES:\n"
+                                f"1. DO NOT repeat phrases, arguments, or structures from your previous actions.\n"
+                                f"2. Always advance the evaluation with NEW ideas, NEW reactions, or NEW perspectives about the product.\n"
+                                f"3. Avoid echoing the exact same words as other participants. Maintain your unique perspective.\n\n"
                                 f"ON-TOPIC (good):\n"
-                                f"- Engaging with what someone said about {topic_anchor}\n"
+                                f"- Engaging with what someone said about {topic_anchor} using novel reasoning regarding the product\n"
                                 f"- Sharing your view on {topic_anchor} based on how you use this product\n"
-                                f"- Liking or reposting a perspective on {topic_anchor} you agree with\n\n"
+                                f"- Agreeing or disagreeing with a perspective on {topic_anchor} with explicit justification\n\n"
                                 f"OFF-TOPIC (avoid):\n"
-                                f"- Raising a different feature or complaint not mentioned in the posts\n"
+                                f"- Raising a different feature or complaint not mentioned in the observations\n"
                                 f"- Generic reactions with no connection to {topic_anchor}\n"
+                                f"- Parroting or repeating previous statements exactly\n"
                             )
                             
                             # P3 fix: content ordering per context-management.md
@@ -1849,6 +1998,8 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 content=(
                                     # BUCKET 1 (top): Current observations — data, not directives
                                     platform_block
+                                    # BUCKET 1b: Social relationships graph
+                                    + social_relationships_block
                                     # BUCKET 2 (middle): Narrative memory from prior turns
                                     + f"<memory>\n{hindsight_context}\n</memory>\n\n"
                                     # BUCKET 3 (middle): Agent's own emotional state summary
@@ -1862,47 +2013,86 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 )
                             )
 
-                            # ── Phase 2: LLM call — MUST be inside _limiter ──
+                            # ── Phase 2: ReAct Loop — MUST be inside _limiter for each call ──
                             # _limiter is a token-bucket enforcing GEMINI_FREE_RPM.
-                            # Previously this context was closed before astep(), meaning
-                            # every agent.astep() LLM call ran completely unguarded → 429s.
-                            async with _limiter:
-                                logger.debug(f"    🚦 Rate-limit slot acquired for {agent_name}")
-                                action_resp = await asyncio.wait_for(
-                                    agent.astep(step_msg), timeout=240.0
-                                )
+                            MAX_REACT_STEPS = 3
+                            react_step = 1
+                            has_searched_features = False
+                            current_msg = step_msg
+                            
+                            while react_step <= MAX_REACT_STEPS:
+                                async with _limiter:
+                                    logger.debug(f"    🚦 Rate-limit slot acquired for {agent_name} (ReAct Step {react_step}/{MAX_REACT_STEPS})")
+                                    action_resp = await asyncio.wait_for(
+                                        agent.astep(current_msg), timeout=240.0
+                                    )
 
-                        raw_content = action_resp.msgs[0].content if action_resp and action_resp.msgs else "No content"
-                        
-                        # Step A: Check for structured tool call arguments (most reliable source of pristine comment text)
-                        tool_val = None
-                        if action_resp and hasattr(action_resp, 'info') and action_resp.info:
-                            tool_info = action_resp.info.get('tool_calls', [])
-                            for tc in (tool_info if isinstance(tool_info, list) else []):
-                                if hasattr(tc, 'args'):
-                                    args = tc.args
-                                elif isinstance(tc, dict):
-                                    args = tc.get('arguments', tc.get('args', {}))
+                                raw_content = action_resp.msgs[0].content if action_resp and action_resp.msgs else "No content"
+                                _preview = raw_content[:150].replace('\n', ' ')
+                                logger.info(f"    🧠 [{agent_name} ReAct Step {react_step}] Output: {_preview}...")
+                                
+                                # Step A: Check for structured tool call arguments
+                                tool_val = None
+                                tool_name = None
+                                args = {}
+                                if action_resp and hasattr(action_resp, 'info') and action_resp.info:
+                                    tool_info = action_resp.info.get('tool_calls', [])
+                                    for tc in (tool_info if isinstance(tool_info, list) else []):
+                                        tool_name_candidate = None
+                                        if hasattr(tc, 'function') and hasattr(tc.function, 'name'):
+                                            tool_name_candidate = tc.function.name
+                                        elif isinstance(tc, dict) and 'function' in tc:
+                                            tool_name_candidate = tc['function'].get('name')
+                                        elif hasattr(tc, 'name'):
+                                            tool_name_candidate = tc.name
+                                        elif isinstance(tc, dict):
+                                            tool_name_candidate = tc.get('name')
+                                        
+                                        if hasattr(tc, 'args'):
+                                            args = tc.args
+                                        elif isinstance(tc, dict):
+                                            args = tc.get('arguments', tc.get('args', {}))
+                                        
+                                        if tool_name_candidate:
+                                            tool_name = tool_name_candidate
+                                        if isinstance(args, dict):
+                                            tool_val = args.get('content') or args.get('quote_content') or args.get('text')
+                                            
+                                        if tool_name or tool_val:
+                                            break
+                                
+                                # Step B: Select source content
+                                selected_content = tool_val if tool_val else raw_content
+                                
+                                # Step C: Strip thought blocks
+                                import re
+                                cleaned = re.sub(r'<thought>.*?</thought>', '', selected_content, flags=re.DOTALL)
+                                cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
+                                cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
+                                content = cleaned.strip()
+
+                                # Fix #2: pass action_resp so tool call name is read first
+                                action_type = _detect_action_type(content, action_resp=action_resp)
+                                
+                                TERMINAL_ACTIONS = ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST", "LIKE", "DISLIKE", "FOLLOW", "UNFOLLOW"]
+                                
+                                if action_type in TERMINAL_ACTIONS or react_step == MAX_REACT_STEPS:
+                                    break
+                                
+                                # Intermediate action detected - provide observation feedback
+                                if action_type == "SEARCH_FEATURE_DOCS":
+                                    logger.info(f"    🔎 FEATURE SEARCH TRIGGERED by {agent_name} at step {react_step}")
+                                    if has_searched_features:
+                                        logger.warning(f"    🚫 {agent_name} attempted redundant feature search. Blocked.")
+                                        tool_result_str = "Error: You can only use search_feature_docs once per turn."
+                                    else:
+                                        has_searched_features = True
+                                        tool_result_str = f"Raw Feature Description:\n{feature_description}"
                                 else:
-                                    args = {}
-                                if isinstance(args, dict):
-                                    tool_val = args.get('content') or args.get('quote_content') or args.get('text')
-                                    if tool_val:
-                                        break
-                        
-                        # Step B: Select source content (tool argument wins over raw text containing thought blocks)
-                        selected_content = tool_val if tool_val else raw_content
-                        
-                        # Step C: Strip thought blocks and formatting markers (fallback if thoughts leaked to tool call or raw text is used)
-                        import re
-                        cleaned = re.sub(r'<thought>.*?</thought>', '', selected_content, flags=re.DOTALL)
-                        cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
-                        # Remove markdown bold/italic tags and optional thought prefixes
-                        cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
-                        content = cleaned.strip()
-
-                        # Fix #2: pass action_resp so tool call name is read first
-                        action_type = _detect_action_type(content, action_resp=action_resp)
+                                    tool_result_str = f"Action '{tool_name or action_type}' logged. Proceed to formulate your final terminal response."
+                                obs_content = f"[OBSERVATION] {tool_result_str} (System State: Step {react_step}/{MAX_REACT_STEPS}. Temporal consistency maintained. Physiological baseline stable. Proceed strictly based on this observation.)"
+                                current_msg = BaseMessage.make_user_message(role_name="ENVIRONMENT", content=obs_content)
+                                react_step += 1
                         
                         if not content or content == "No content":
                             if action_type == "LIKE":
@@ -1926,6 +2116,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
                         # Step D: Proactively query the SQLite platform database for the clean post/comment content actually saved.
                         # This guarantees that we use the final, clean text registered in the simulation platform.
+                        db_entity_id = None
                         if action_type in ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST"]:
                             try:
                                 import sqlite3
@@ -1933,20 +2124,22 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 cursor = conn.cursor()
                                 if "COMMENT" in action_type:
                                     cursor.execute(
-                                        "SELECT content FROM comment WHERE user_id = ? ORDER BY comment_id DESC LIMIT 1",
+                                        "SELECT content, comment_id FROM comment WHERE user_id = ? ORDER BY comment_id DESC LIMIT 1",
                                         (int(agent_id),)
                                     )
                                     row = cursor.fetchone()
-                                    if row and row[0]:
-                                        content = row[0]
+                                    if row:
+                                        if row[0]: content = row[0]
+                                        if len(row) > 1: db_entity_id = str(row[1])
                                 elif "POST" in action_type or "REPOST" in action_type:
                                     cursor.execute(
-                                        "SELECT content FROM post WHERE user_id = ? ORDER BY post_id DESC LIMIT 1",
+                                        "SELECT content, post_id FROM post WHERE user_id = ? ORDER BY post_id DESC LIMIT 1",
                                         (int(agent_id),)
                                     )
                                     row = cursor.fetchone()
-                                    if row and row[0]:
-                                        content = row[0]
+                                    if row:
+                                        if row[0]: content = row[0]
+                                        if len(row) > 1: db_entity_id = str(row[1])
                                 conn.close()
 
                                 # Apply safety sanitization on database content just in case any thought tags were persisted
@@ -2017,6 +2210,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                             timestep=t,
                             metadata={
                                 "target_id": str(action_target_id) if action_target_id else None,
+                                "entity_id": db_entity_id,
                                 "confidence": abs(sig.get("intensity", 0.5)),
                                 "signal_type": sig.get("type", "neutral"),
                                 "all_signals": sig.get("all_signals", []),

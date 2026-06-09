@@ -869,17 +869,25 @@ const renderTriggersTab = (persona: any) => {
 function OceanBars({ scores }: { scores: Record<string, number> }) {
   const keys = Object.keys(scores);
   if (keys.length === 0) return null;
+
+  let maxScore = -1;
+  keys.forEach(k => {
+    const val = scores[k] ?? 0;
+    if (val > maxScore) maxScore = val;
+  });
+
   return (
     <div className="space-y-1.5 mt-3">
       <div className="text-xs font-black uppercase tracking-widest text-black/40 mb-2">OCEAN Profile</div>
       {keys.map((k) => {
         const label = OCEAN_LABELS[k] ?? k[0].toUpperCase();
-        const color = OCEAN_COLORS[k] ?? '#888';
         const pct = Math.min(100, Math.max(0, (scores[k] ?? 0) * 100));
+        const isMax = (scores[k] ?? 0) === maxScore;
+        const color = isMax ? '#F59E0B' : '#000000';
         return (
           <div key={k} className="flex items-center gap-2">
             <span className="font-black text-xs w-4 text-black/50">{label}</span>
-            <div className="flex-1 h-2 bg-black/10 border border-black overflow-hidden">
+            <div className="flex-1 h-2 bg-white border border-black overflow-hidden">
               <div
                 className="h-full transition-all duration-700"
                 style={{ width: `${pct}%`, backgroundColor: color }}
@@ -1060,7 +1068,7 @@ export default function AssemblyMatrix() {
   }, [boardroomPersonas]);
 
   return (
-    <div className="w-full h-full flex flex-col bg-white overflow-y-auto" style={{ paddingTop: '72px' }}>
+    <div className="w-full h-full flex flex-col bg-white overflow-y-auto invisible-scroll" style={{ paddingTop: '72px' }}>
 
       {/* ── Simulation Config Band ──────────────────────── */}
       <SimConfigPanel />
@@ -1271,7 +1279,7 @@ export default function AssemblyMatrix() {
             </div>
 
             {/* Modal Body */}
-            <div className="p-8 overflow-y-auto flex flex-col gap-6 text-black flex-1">
+            <div className="p-8 overflow-y-auto invisible-scroll flex flex-col gap-6 text-black flex-1">
               {/* Profile Intro Banner */}
               <div className="flex flex-col sm:flex-row gap-6 items-start pb-6 border-b-4 border-black">
                 <div className={`w-20 h-20 flex-none border-4 border-black flex items-center justify-center shadow-neo-black ${selectedPersona.accent || 'bg-brand'}`}>

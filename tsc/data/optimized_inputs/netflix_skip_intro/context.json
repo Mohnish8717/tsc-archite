@@ -1,0 +1,54 @@
+{
+  "company_name": "Netflix",
+  "team_size": 5400,
+  "budget": "Netflix revenue in 2017 was $11.69 billion. The R&D budget for technology and development was approximately $1 billion, dedicated to improving streaming quality and UI.",
+  "tech_stack": [
+    "Netflix Web (React)",
+    "Netflix iOS (Swift)",
+    "Netflix Android (Java)",
+    "Gibbon (Custom rendering engine for TV UI)",
+    "AWS (Cloud infrastructure for backend services)",
+    "Open Connect (Proprietary Content Delivery Network)",
+    "Python / ML Infrastructure (for audio fingerprinting)",
+    "Spinnaker (Continuous Delivery Platform)"
+  ],
+  "platform_scale": {
+    "monthly_active_users": "110 million subscribers globally (End of 2017)",
+    "hours_streamed_per_day": "Over 140 million hours streamed per day",
+    "global_reach": "Available in over 190 countries",
+    "content_spend": "$6 billion in original and licensed content in 2017",
+    "tv_viewing_share": "Accounted for roughly one-third of all downstream internet traffic in North America during peak evening hours",
+    "device_fragmentation": "Deployed across thousands of different device types, including legacy smart TVs and low-end mobile phones"
+  },
+  "current_priorities": [
+    "Reduce Time-to-Play — eliminate any friction between the user opening the app and actively watching content",
+    "Increase Session Lengths — keep users on the platform longer by encouraging 'binge-watching' behavior",
+    "Global Expansion — ensure features scale cleanly across different languages and localization requirements",
+    "Original Content Dominance — transition from a licensed library to a premier original content studio",
+    "Personalization — improve recommendation algorithms to surface the perfect title in under 90 seconds"
+  ],
+  "competitors": [
+    "Hulu (Early competitor, supported by traditional TV networks, lacked smooth binge-watching features, heavy ads)",
+    "Amazon Prime Video (Launched globally in 2016, aggressive expansion, clunkier UI, tied to Prime shipping)",
+    "HBO Now (Premium content, but strictly linear/traditional TV release schedules, no binge model)",
+    "YouTube (Dominant in ad-supported user-generated content, different viewing paradigm)",
+    "Traditional Cable TV (Linear viewing, forced commercials, cannot skip anything, locked to broadcast schedules)"
+  ],
+  "key_stakeholders": [
+    "Netflix Subscribers: 110M+ users who pay a monthly subscription fee for convenience and premium content without ads",
+    "Hollywood Showrunners & Directors: Creators who view opening credits as essential artistic mood-setting and union-mandated billing",
+    "Product Innovation Team: Tasked with A/B testing every single pixel to maximize retention and engagement",
+    "Title Sequence Designers: Independent agencies (like Elastic) whose entire business revolves around crafting 60-second intro sequences",
+    "Infrastructure Engineering: Responsible for identifying exact timestamps for tens of thousands of episodes across thousands of shows",
+    "Legal & Licensing Team: Negotiating contracts with studios that may stipulate how and when credits must be displayed"
+  ],
+  "regulatory_environment": "Standard digital streaming regulations. The main friction is Hollywood union rules (DGA, WGA, SAG) regarding mandatory credit sequences, which historically required credits to be shown to the viewer. Netflix must navigate the line between UI innovation and breach of creator contracts.",
+  "historical_context": {
+    "feature_origin": "Conceived when Cameron Johnson (Product Director) was annoyed having to manually fast-forward through the long Game of Thrones opening credits while binge-watching.",
+    "data_validation": "Internal metrics proved 15% of viewers were already manually scrubbing past the first 5 minutes of shows.",
+    "naming_tests": "A/B tested 'Jump Past Credits', 'Skip Credits', 'Jump Ahead', and 'Skip Intro'. 'Skip Intro' won decisively.",
+    "public_launch": "Initially rolled out silently on the web in March 2017.",
+    "industry_impact": "Became a universal industry standard by 2019, copied by every major streaming service on earth.",
+    "user_reception": "Universally hailed as one of the best UX improvements in software history, saving users 195 years of cumulative time every day."
+  }
+}

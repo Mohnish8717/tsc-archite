@@ -21,6 +21,7 @@ import random
 from typing import Any, Optional
 
 from tsc.llm.base import LLMClient
+from tsc.llm.temperatures import OASIS_SEGMENT_INFERENCE, OASIS_PERSONA_DIVERSITY
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.oasis.models import OASISAgentProfile
 
@@ -207,7 +208,12 @@ You MUST maximise variation across these axes within the segment:
 5. Workaround strategy (some improvise, some pay for add-ons, some just suffer)
 6. Communication style (blunt/direct, verbose/analytical, passive, emotionally expressive)
 7. Participation mode (active-commenter, reactive-replier, lurker, thread-starter).
-   Lurkers MUST have their [CATALYST FOR CHANGE] specify the EXACT condition that breaks their silence.
+   Lurkers MUST have their [CORE GOALS & INCENTIVES] specify how their communication style and threshold for breaking silence are dictated by their goals (e.g. they only speak if a feature directly threatens their primary workflow goal).
+
+ENTROPY CONSTRAINT: 
+You must generate highly unique, rare Indian surnames from across all different states. DO NOT use common surnames like Sharma, Deshmukh, Kulkarni, Iyer, or Singh. ZERO overlap in surnames across the batch.
+- ZERO overlap in communication style (some must be hyper-technical, some casual, some aggressive, some passive).
+- ZERO overlap in primary motivation.
 
 If generating N personas, imagine N DIFFERENT real people — not clones of one archetype.
 </diversity_mandate>
@@ -249,7 +255,7 @@ neuroticism < 0.35  → emotionally stable, measured language, does not amplify 
 
 <sycophancy_guardrails>
 MANDATORY: Agents must possess genuine self-interest and defend their specific worldview.
-Do NOT program agents to be polite, agreeable, or easily persuaded just because another user or the platform made a polite argument. If a platform change fundamentally harms their workflow or breaks their trust, they must oppose it fiercely and consistently. They should ONLY change their mind if concrete evidence satisfies their [CATALYST FOR CHANGE].
+Do NOT program agents to be polite, agreeable, or easily persuaded just because another user or the platform made a polite argument. If a platform change fundamentally harms their workflow or breaks their trust, they must oppose it fiercely and consistently. They should ONLY change their stance if they autonomously evaluate that the presented arguments or product features directly align with or help them achieve their [CORE GOALS & INCENTIVES].
 </sycophancy_guardrails>
 
 <few_shot_anchors>
@@ -283,7 +289,7 @@ Example Persona A — Power User / Expert Engineer (B2B SaaS):
     }
   },
   "communication_style": "terse and technical — bullet points, no filler, cites docs or data",
-  "user_profile": "[IDENTITY ANCHOR] Ravi Menon is a 38-year-old Staff Engineer at a fintech startup. He is highly technically literate and relies on the product for his startup's survival.\\n[LIVED EXPERIENCE & MOTIVATION] Built 3 production internal tools on top of this API. Relies on the product for critical ETL runs. Last night, his batch job failed because he hit rate limits, causing severe stress and almost breaking production. This has made him extremely wary of platform limitations.\\n[WORLDVIEW & COGNITIVE BIAS] Curious about new paradigms but cynical about 'platform stability' promises. Reads full docs before commenting and waits for facts. Believes corporate changes usually hide unwanted pricing upgrades.\\n[COMMUNICATION FINGERPRINT] A lurker who reads silently, but pushes back bluntly when challenged. Emotionally stable and measured, never catastrophizes. Writes in short, numbered bullet points. Naturally distrusts marketing jargon.\\n[CATALYST FOR CHANGE] Currently cautiously satisfied but quietly seething about rate limits. Will inherently reject community consensus or marketing apologies that gloss over the technical details. Only changes his stance to positive if he receives a concrete technical fix or if a bulk export endpoint is publicly roadmapped."
+  "user_profile": "[IDENTITY ANCHOR] Ravi Menon is a 38-year-old Staff Engineer at a fintech startup. He is highly technically literate and relies on the product for his startup's survival.\\n[LIVED EXPERIENCE & MOTIVATION] Built 3 production internal tools on top of this API. Relies on the product for critical ETL runs. Last night, his batch job failed because he hit rate limits, causing severe stress and almost breaking production. This has made him extremely wary of platform limitations.\\n[WORLDVIEW & COGNITIVE BIAS] Curious about new paradigms but cynical about 'platform stability' promises. Reads full docs before commenting and waits for facts. Believes corporate changes usually hide unwanted pricing upgrades.\\n[COMMUNICATION FINGERPRINT] A lurker who reads silently, but pushes back bluntly when challenged. Emotionally stable and measured, never catastrophizes. Writes in short, numbered bullet points. Naturally distrusts marketing jargon.\\n[CORE GOALS & INCENTIVES] 1. Prevention of Operational Failure (Intrinsic Need: Competence/Efficacy): His startup's ETL batch runs must succeed with zero data dropouts. Outages threaten his professional standing and company runway. He will aggressively oppose any rate-limit or API changes that jeopardize job stability. 2. Preservation of Autonomy (Intrinsic Need: Control over Stack): He demands full visibility into API data flow. He will reject black-box upgrades and marketing hand-waving. He evaluates product updates strictly on whether they provide bulk export endpoints, customizable retry loops, or transparent documentation that lets him control integration. He will remain quietly frustrated unless concrete evidence of rate-limit mitigation is delivered."
 }
 
 Example Persona B — Active Consumer User (Content Platform):
@@ -311,25 +317,22 @@ Example Persona B — Active Consumer User (Content Platform):
     }
   },
   "communication_style": "highly expressive, impulsive, uses slang and exclamation marks, speaks in absolutes",
-  "user_profile": "[IDENTITY ANCHOR] Chloe Chen is a 19-year-old CS student who has grown up on the platform and views herself as a defender of the 'old' community-led web.\\n[LIVED EXPERIENCE & MOTIVATION] Uses the platform constantly for learning coding concepts. The community rating system was her only defense against 20-minute clickbait tutorials that don't actually work. Removing quality indicators feels like a personal attack on her time.\\n[WORLDVIEW & COGNITIVE BIAS] Views platform changes as 'corporate dystopia' and assumes executives prioritize advertisers over users. Highly resistant to change and deeply skeptical of corporate roadmaps.\\n[COMMUNICATION FINGERPRINT] Impulsive commenter who reacts quickly without reading full policy docs. Very blunt pushback with no softening. Frequently catastrophizes frustrations (e.g., 'this is the death of the open web!'). Starts new threads to rally others.\\n[CATALYST FOR CHANGE] Currently feeling actively frustrated. Views any corporate reassurance as a 'shield for bad content'. Will absolutely refuse to accept 'creator well-being' as an excuse for removing her utility. The only thing that will appease her is the immediate reinstatement of the community quality indicators or a verifiable third-party plugin that restores the functionality."
+  "user_profile": "[IDENTITY ANCHOR] Chloe Chen is a 19-year-old CS student who has grown up on the platform and views herself as a defender of the 'old' community-led web.\\n[LIVED EXPERIENCE & MOTIVATION] Uses the platform constantly for learning coding concepts. The community rating system was her only defense against 20-minute clickbait tutorials that don't actually work. Removing quality indicators feels like a personal attack on her time.\\n[WORLDVIEW & COGNITIVE BIAS] Views platform changes as 'corporate dystopia' and assumes executives prioritize advertisers over users. Highly resistant to change and deeply skeptical of corporate roadmaps.\\n[COMMUNICATION FINGERPRINT] Impulsive commenter who reacts quickly without reading full policy docs. Very blunt pushback with no softening. Frequently catastrophizes frustrations (e.g., 'this is the death of the open web!'). Starts new threads to rally others.\\n[CORE GOALS & INCENTIVES] 1. Cognitive Resource Conservation (Intrinsic Need: Efficacy/Utility): She has an intense workload and a low budget. Wasting time on non-working tutorials directly threatens her academic performance. She will reject any system that increases the time required to find high-quality information. 2. Protect Relatedness & Trust (Intrinsic Need: Community Preservation): She views community-led metrics (dislikes, downvotes) as the web's democratic safety shield. She evaluates features based on whether they protect public metrics. She will actively ignore corporate announcements about 'creator well-being' and remain hostile unless the company reinstates transparent indicators or supports third-party bypass plugins."
 }
 </few_shot_anchors>
 
-<resolution_and_catalyst_requirement>
-EVERY persona's user_profile MUST include a [CATALYST FOR CHANGE] section that specifies:
-1. Their current emotional and product stance based on their lived experience.
-2. The EXACT concrete evidence, resolution, or catalyst required to shift their worldview.
-   (e.g., "Will remain actively frustrated until shown a community-led alternative or if the new algorithm demonstrably filters out clickbait within 3 searches.")
-3. What they will ignore (e.g. "Will actively ignore corporate apologies or peer optimism without data").
-
-This replaces arbitrary rigid rules. The agent's refusal to budge must come organically from their underlying pain points and motivations.
-</resolution_and_catalyst_requirement>
+<goals_and_incentives_requirement>
+EVERY persona's user_profile MUST include a [CORE GOALS & INCENTIVES] section that specifies:
+1. The 2-3 core, self-interested objectives this persona is trying to achieve in their workflow or daily life (e.g. "Minimize workflow latency", "Protect user data privacy", "Keep subscription costs low").
+2. Their current emotional/product stance based on their goals.
+3. Do NOT script the exact trigger that changes their mind. Give the LLM absolute autonomy to calculate whether arguments or features align with or threaten these core goals.
+</goals_and_incentives_requirement>
 
 <output_format>
 Return a JSON array of persona objects. No prose, no markdown fences.
 Ensure strictly valid JSON (escape internal quotes and newlines in strings).
 Each object must adhere to this schema:
-- name (string: realistic, culturally diverse)
+- name (string: realistic, authentic Indian name)
 - age (integer: within segment demographic range)
 - gender (string)
 - occupation (string: specific job title + company size/type)
@@ -355,7 +358,7 @@ Each object must adhere to this schema:
     [LIVED EXPERIENCE & MOTIVATION] ... 
     [WORLDVIEW & COGNITIVE BIAS] ...
     [COMMUNICATION FINGERPRINT] ... 
-    [CATALYST FOR CHANGE] ...
+    [CORE GOALS & INCENTIVES] ...
 </output_format>
 
 <critical_reminders>
@@ -411,7 +414,7 @@ class OASISUserPersonaGenerator:
         customer_evidence = await self._gather_customer_data(raw_chunks)
 
         # Step 2: LLM-inferred segment discovery from actual data
-        segments = await self._infer_segments(company, customer_evidence)
+        segments = await self._infer_segments(company, customer_evidence, feature)
 
         # Step 3: Distribute agent count across segments
         segment_counts = self._distribute_agents(segments, num_agents)
@@ -551,18 +554,30 @@ class OASISUserPersonaGenerator:
         ]
 
     async def _infer_segments(
-        self, company: CompanyContext, customer_evidence: str
+        self, company: CompanyContext, customer_evidence: str, feature: Optional[FeatureProposal] = None
     ) -> list[dict]:
         """Use Structured CoT prompt to discover ALL user segments including silent majority."""
         # v2.0 user prompt: passes product metadata at top (primacy bias anchor),
         # then injects customer data for Step 2 of the CoT reasoning chain.
+        feature_context = ""
+        if feature:
+            feature_context = (
+                f"\n<proposed_feature>\n"
+                f"Title: {feature.title}\n"
+                f"Description: {feature.description[:500]}\n"
+                f"</proposed_feature>\n\n"
+                f"CRITICAL: Identify the canonical user segments that will be most impacted by this feature (e.g., as stakeholders). "
+                f"However, describe them as generic platform roles (e.g. 'Commentary Creator', 'Casual Viewer'), NOT specific to this feature.\n"
+            )
+
         prompt = (
             f"<product_context>\n"
             f"Product: {company.company_name}\n"
             f"Tech Stack: {', '.join(company.tech_stack) if company.tech_stack else 'N/A'}\n"
             f"Competitors: {', '.join(company.competitors) if company.competitors else 'N/A'}\n"
             f"</product_context>\n\n"
-            f"<customer_data>\n{customer_evidence}\n</customer_data>\n\n"
+            f"<customer_data>\n{customer_evidence}\n</customer_data>\n"
+            f"{feature_context}\n"
             "Follow the four reasoning steps in your system instructions to produce "
             "a COMPLETE coverage-verified segment map for this product."
         )
@@ -571,7 +586,7 @@ class OASISUserPersonaGenerator:
             result = await self._llm.analyze(
                 system_prompt=SEGMENT_INFERENCE_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.3,   # Lower temp: structured reasoning benefits from determinism
+                temperature=OASIS_SEGMENT_INFERENCE,   # Lower temp: structured reasoning benefits from determinism
                 max_tokens=6000,   # Larger budget: CoT reasoning + coverage check + full JSON
             )
             segments = result.get("segments", [])
@@ -669,13 +684,6 @@ class OASISUserPersonaGenerator:
         start_id: int,
     ) -> list[OASISAgentProfile]:
         """Generate individual personas within a segment."""
-        feature_context = ""
-        if feature:
-            feature_context = (
-                f"\n## Feature Under Discussion\n"
-                f"Title: {feature.title}\n"
-                f"Description: {feature.description[:500]}\n"
-            )
 
         prompt = (
             f"## Product: {company.company_name}\n"
@@ -686,7 +694,6 @@ class OASISUserPersonaGenerator:
             f"## Pain Points: {json.dumps(segment.get('pain_points', []))}\n"
             f"## Desired Outcomes: {json.dumps(segment.get('desired_outcomes', []))}\n"
             f"## Real Quotes: {json.dumps(segment.get('representative_quotes', []))}\n"
-            f"{feature_context}\n"
             f"Generate exactly {count} unique, diverse personas for this segment. "
             f"Each persona should feel like a distinct real person, not a clone. "
             f"Vary their age, gender, occupation, personality, and specific pain points."
@@ -701,7 +708,7 @@ class OASISUserPersonaGenerator:
             result = await self._llm.analyze(
                 system_prompt=system_prompt_with_count,
                 user_prompt=prompt,
-                temperature=0.8,   # Higher temp: maximises within-segment diversity
+                temperature=OASIS_PERSONA_DIVERSITY,   # Higher temp: maximises within-segment diversity
                 max_tokens=6000,   # Larger budget: richer per-persona schema (workarounds, etc.)
             )
 
@@ -950,8 +957,6 @@ class OASISUserPersonaGenerator:
             f"HOW YOU THINK: {openness_desc} {conscientiousness_desc}\n"
             f"HOW YOU ENGAGE: {extraversion_desc} {agreeableness_desc}\n"
             f"HOW YOU FEEL: {neuroticism_desc}\n"
-            f"YOUR RULE: You do NOT change your stated position because others disagree. "
-            f"You only update when shown concrete evidence that matches your specific concern."
         )
 
     def _assign_network_properties(self, profiles: list[OASISAgentProfile]) -> None:

@@ -60,6 +60,7 @@ class CognitiveLedger:
         self.blackboard_conflicts: Dict[str, str] = {}
         self.frustration_levels: Dict[str, float] = {}
         self.veto_used: Dict[str, bool] = {}
+        self.parliamentary_votes: Dict[str, str] = {}
         
         # New State: Dynamic Hierarchical Task Ledger
         self.tasks: Dict[str, dict] = {
@@ -69,6 +70,74 @@ class CognitiveLedger:
             "T4": {"title": "Security, Legal & Compliance", "status": "OPEN", "resolution": "", "subtasks": {}}
         }
         self.agenda_handled: bool = False
+
+        # V32: Strategic Thought Stack (Cognitive Stacking)
+        self.thought_stack: Dict[str, Any] = {
+            "axioms": [],      # List of established facts / search / simulation outputs
+            "objections": {},   # {id: {"agent": name, "dimension": dim, "desc": desc, "status": "UNRESOLVED"/"MITIGATED", "mitigation": str}}
+            "mitigations": {}  # {id: {"desc": desc, "proposer": name, "endorsers": []}}
+        }
+        self.resolution_proposal: Optional[str] = None
+
+    def stack_axiom(self, desc: str):
+        with self._lock:
+            if desc and desc not in self.thought_stack["axioms"]:
+                self.thought_stack["axioms"].append(desc)
+
+    def stack_objection(self, obj_id: str, agent: str, dimension: str, desc: str):
+        with self._lock:
+            self.thought_stack["objections"][obj_id] = {
+                "agent": agent,
+                "dimension": dimension,
+                "desc": desc,
+                "status": "UNRESOLVED",
+                "mitigation": ""
+            }
+
+    def stack_mitigation(self, mit_id: str, desc: str, proposer: str):
+        with self._lock:
+            self.thought_stack["mitigations"][mit_id] = {
+                "desc": desc,
+                "proposer": proposer,
+                "endorsers": []
+            }
+
+    def resolve_objection(self, obj_id: str, mitigation: str):
+        with self._lock:
+            if obj_id in self.thought_stack["objections"]:
+                self.thought_stack["objections"][obj_id]["status"] = "MITIGATED"
+                self.thought_stack["objections"][obj_id]["mitigation"] = mitigation
+
+    def get_formatted_thought_stack(self) -> str:
+        with self._lock:
+            lines = ["# BOARDROOM STRATEGIC THOUGHT STACK (Cognitive Map)\n"]
+            
+            lines.append("## ESTABLISHED AXIOMS (FACT-CHECKED DATA)")
+            if not self.thought_stack["axioms"]:
+                lines.append("- No hard axioms established yet.")
+            else:
+                for axiom in self.thought_stack["axioms"]:
+                    lines.append(f"- [FACT] {axiom}")
+            
+            lines.append("\n## STRATEGIC OBJECTIONS & CONCERNS")
+            if not self.thought_stack["objections"]:
+                lines.append("- No active objections stacked yet.")
+            else:
+                for oid, obj in self.thought_stack["objections"].items():
+                    checkbox = "[x]" if obj["status"] == "MITIGATED" else "[ ]"
+                    lines.append(f"- {checkbox} [{oid}] {obj['agent']} ({obj['dimension']}): {obj['desc']}")
+                    if obj["status"] == "MITIGATED":
+                        lines.append(f"    └ Mitigated via: {obj['mitigation']}")
+            
+            lines.append("\n## PROPOSED MITIGATIONS")
+            if not self.thought_stack["mitigations"]:
+                lines.append("- No mitigations proposed yet.")
+            else:
+                for mid, mit in self.thought_stack["mitigations"].items():
+                    endorsers_str = f" (Endorsed by: {', '.join(mit['endorsers'])})" if mit["endorsers"] else ""
+                    lines.append(f"- [{mid}] {mit['proposer']}: {mit['desc']}{endorsers_str}")
+            
+            return "\n".join(lines)
 
     def internal_add_micro_task(self, parent_id: str, micro_id: str, desc: str):
         with self._lock:

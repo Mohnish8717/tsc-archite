@@ -44,7 +44,7 @@ class DebateStateMachine:
 
     def advance(self, override: Optional[DebateState] = None) -> None:
         valid = self.TRANSITIONS.get(self.current_state, [])
-        if override and override in valid:
+        if override:
             self.current_state = override
         elif valid:
             self.current_state = valid[0]

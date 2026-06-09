@@ -13,8 +13,8 @@ import { usePipelineStore } from './store/usePipelineStore';
 
 function App() {
   const ws = useWebSocket();
-  const { isConnected, simulationStatus, simulationTitle, simulationProgress, pendingAction, sessionId, simulationReport, isBootstrapped } = usePipelineStore();
-  const [activeLayer, setActiveLayer] = useState(0); // 0 = landing page
+  const { isConnected, simulationStatus, simulationTitle, simulationProgress, pendingAction, sessionId, simulationReport, isBootstrapped, stopSimulation } = usePipelineStore();
+  const [activeLayer, setActiveLayer] = useState(0.5); // 0.5 = Input Setup Page
   const [statusWidth, setStatusWidth] = useState(450);
   const [hasAutoSwitched, setHasAutoSwitched] = useState(false);
 
@@ -27,7 +27,7 @@ function App() {
 
   // Auto-switch to dashboard on load if a simulation already exists
   useEffect(() => {
-    if (isBootstrapped && sessionId && activeLayer === 0 && !hasAutoSwitched) {
+    if (isBootstrapped && sessionId && activeLayer === 0.5 && !hasAutoSwitched) {
       if (simulationReport) {
         setActiveLayer(8); // Handoff
       } else if (pendingAction?.action === 'review_seeds') {
@@ -43,7 +43,7 @@ function App() {
   }, [isBootstrapped, sessionId, activeLayer, hasAutoSwitched, simulationReport, pendingAction]);
 
   const navItems = [
-    { id: 0, name: 'Home', icon: Home },
+    { id: 0.5, name: 'Home', icon: Home },
     { id: 1, name: 'Ingestion', icon: Layers },
     { id: 3, name: 'Personas', icon: Users },
     { id: 4, name: 'Seeds', icon: FileText },
@@ -85,33 +85,26 @@ function App() {
     );
   }
 
-  const handleStartSimulation = async (inputs: any) => {
+  // InputSetupPage handles the /api/upload call and passes back server-side file paths.
+  // We just need to switch to layer 1 and forward those paths to the backend via WebSocket.
+  const handleStartSimulation = async (filePaths: Record<string, string>, boardroomOnly: boolean = false) => {
+    // Switch to Ingestion layer immediately
+    setActiveLayer(1);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'config', files: filePaths, boardroom_only: boardroomOnly }));
+    } else {
+      console.warn("WebSocket not open, backend will not start. Dev fallback active.");
+    }
+  };
+
+  // Cancel the running simulation — optimistic UI reset first, then HTTP call to backend.
+  const handleStopSimulation = async () => {
+    stopSimulation(); // immediate: status → 'idle', progress cleared
     try {
-      const response = await fetch('http://localhost:8000/api/upload_text', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(inputs)
-      });
-      if (response.ok) {
-        const data = await response.json();
-        // Go to Ingestion layer immediately when simulation starts
-        setActiveLayer(1);
-        
-        // Trigger the backend pipeline via websocket
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'config', files: data.files }));
-        } else {
-          console.warn("WebSocket not open, backend will not start. Dev fallback.");
-        }
-      } else {
-        console.error("Failed to upload inputs", await response.text());
-      }
+      await fetch('http://localhost:8000/api/simulation/stop', { method: 'POST' });
     } catch (e) {
-      console.error("API error:", e);
-      // fallback for dev if backend isn't up
-      setActiveLayer(1);
+      console.warn('Stop request failed — backend may already be done:', e);
     }
   };
 
@@ -152,7 +145,7 @@ function App() {
               `}
             >
               <item.icon className="w-4 h-4" strokeWidth={3} />
-              {item.id === 0 ? 'Home' : `L${item.id}: ${item.name}`}
+              {item.id === 0.5 ? 'Home' : `L${item.id}: ${item.name}`}
             </button>
           ))}
         </nav>
@@ -208,8 +201,20 @@ function App() {
             <span className={`w-3 h-3 border-2 border-black ${isConnected ? 'bg-brand animate-pulse' : 'bg-red-500'}`} />
             <span className="font-black text-xs uppercase tracking-widest">{isConnected ? 'Live' : 'Offline'}</span>
           </div>
+
+          {/* Stop button — only visible while simulation is running */}
+          {simulationStatus === 'running' && (
+            <button
+              id="stop-simulation-btn"
+              onClick={handleStopSimulation}
+              className="shrink-0 px-4 py-2 bg-[#FF4500] text-black border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-all hover:translate-x-1 hover:translate-y-1 hover:bg-black hover:text-[#FF4500]"
+            >
+              ⏹ Stop
+            </button>
+          )}
+
           <button
-            onClick={() => setActiveLayer(0)}
+            onClick={() => setActiveLayer(0.5)}
             className="shrink-0 px-4 py-2 bg-black text-white border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-all hover:translate-x-1 hover:translate-y-1 hover:bg-brand hover:text-black"
           >
             Home
