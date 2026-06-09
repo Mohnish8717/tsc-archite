@@ -184,9 +184,17 @@ tsc_dev.db
 simulation_results/
 neobrutalist_landing/
 
+# Local Scenario Data
+company_grade_prd_scenario/
+production_data/
+slack_ai_scenario/
+tsc/data/optimized_inputs/
 
+# Agent System Folders
+.claude/
+.gemini/
 
-
-
-
-
+# Generated Artifacts
+docs/implementation_plan.md
+docs/task.md
+docs/walkthrough.md
