@@ -1,0 +1,9 @@
+model_list:
+  - model_name: gemma-4-31b-it
+    litellm_params:
+      model: gemini/gemma-4-31b-it
+      
+
+litellm_settings:
+  drop_params: false
+  request_timeout: 1800

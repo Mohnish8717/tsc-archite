@@ -63,12 +63,9 @@ except ImportError:
 
 from tsc.models.inputs import FeatureProposal, CompanyContext
 from tsc.models.personas import FinalPersona
+from tsc.llm.limits import MAX_TOKENS_L6_DEBATE_COMPROMISE, MAX_TOKENS_L6_DEBATE_SUMMARY
 from tsc.models.graph import KnowledgeGraph
-# Gates removed from pipeline in v3.0 — import kept for backward compat only
-try:
-    from tsc.models.gates import GatesSummary
-except ImportError:
-    GatesSummary = None
+
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L6_DEBATE_SUMMARY, L6_DEBATE_COMPROMISE
 from tsc.models.debate import ConsensusResult, DebatePosition, DebateRound
@@ -181,14 +178,24 @@ class AG2DebateEngine:
                 "api_type": "openai",
                 "max_retries": 5,
             }
-        elif is_google_model and gemini_key:
-            config = {
-                "model": model_name,
-                "api_key": gemini_key,
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
-                "api_type": "openai",
-                "max_retries": 5,
-            }
+        elif is_google_model and (gemini_key or os.getenv("LITELLM_PROXY_URL")):
+            proxy_url = os.getenv("LITELLM_PROXY_URL")
+            if proxy_url:
+                config = {
+                    "model": model_name,
+                    "api_key": "litellm-dummy-key",
+                    "base_url": proxy_url,
+                    "api_type": "openai",
+                    "max_retries": 5,
+                }
+            else:
+                config = {
+                    "model": model_name,
+                    "api_key": gemini_key,
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
+                    "api_type": "openai",
+                    "max_retries": 5,
+                }
         elif is_groq_model and groq_key:
             config = {
                 "model": model_name,
@@ -245,14 +252,24 @@ class AG2DebateEngine:
                 "api_type": "openai",
                 "max_retries": 5,
             }
-        elif is_google_model and gemini_key:
-            config = {
-                "model": model_name,
-                "api_key": gemini_key,
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
-                "api_type": "openai",
-                "max_retries": 5,
-            }
+        elif is_google_model and (gemini_key or os.getenv("LITELLM_PROXY_URL")):
+            proxy_url = os.getenv("LITELLM_PROXY_URL")
+            if proxy_url:
+                config = {
+                    "model": model_name,
+                    "api_key": "litellm-dummy-key",
+                    "base_url": proxy_url,
+                    "api_type": "openai",
+                    "max_retries": 5,
+                }
+            else:
+                config = {
+                    "model": model_name,
+                    "api_key": gemini_key,
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
+                    "api_type": "openai",
+                    "max_retries": 5,
+                }
         elif is_groq_model and groq_key:
             config = {
                 "model": model_name,
@@ -899,8 +916,11 @@ class AG2DebateEngine:
                             return "No customer data found for this query."
                         # Return raw retrieval — the calling agent LLM will synthesize.
                         # Removed inner self.llm.analyze() which caused a 60-120s stall.
-                        raw_str = str(raw_res)[:3000]
-                        return f"[HTX-{abs(hash(raw_str)) % 99999}] {raw_str}"
+                        if isinstance(raw_res, list):
+                            raw_str = "\n\n---\n\n".join(str(r) for r in raw_res)
+                        else:
+                            raw_str = str(raw_res)
+                        return f"CUSTOMER DATA RESULT:\n{raw_str[:3000]}"
 
                     try:
                         loop = asyncio.get_running_loop()
@@ -947,8 +967,11 @@ class AG2DebateEngine:
                         # Return raw retrieval — the calling agent LLM will synthesize.
                         # Removed inner self.llm.analyze() which caused a 60-120s stall
                         # due to rate-limiter delays on a secondary Gemini call.
-                        raw_str = str(raw_res)[:3000]
-                        return f"[HTX-{abs(hash(raw_str)) % 99999}] {raw_str}"
+                        if isinstance(raw_res, list):
+                            raw_str = "\n\n---\n\n".join(str(r) for r in raw_res)
+                        else:
+                            raw_str = str(raw_res)
+                        return f"SIMULATION DATA RESULT:\n{raw_str[:3000]}"
 
                     try:
                         loop = asyncio.get_running_loop()
@@ -2779,6 +2802,10 @@ class AG2DebateEngine:
                     # Strip any thought tags for clean UI display
                     clean_content = AG2DebateEngine._strip_thought_tags(content).strip()
                     
+                    # Skip tool execution responses to prevent polluting the UI
+                    if last_msg.get("role") == "tool" or "tool_calls" in last_msg or last_msg.get("name") == "tool_execution":
+                        return False, None
+                        
                     # If this message has actual content, and is not a system control message
                     if clean_content and not any(token in clean_content for token in ["[SOVEREIGN", "[SESSION", "[BOARDROOM", "BOARD MEMORANDUM"]):
                         # Determine if it's a challenge
@@ -3337,7 +3364,7 @@ class AG2DebateEngine:
                 _resp = _client.chat.completions.create(
                     model=_model,
                     messages=[{"role": "user", "content": compromise_prompt}],
-                    max_tokens=300,
+                    max_tokens=MAX_TOKENS_L6_DEBATE_COMPROMISE,
                     temperature=L6_DEBATE_COMPROMISE
                 )
                 _raw = AG2DebateEngine._strip_thought_tags(_resp.choices[0].message.content.strip())
@@ -3394,7 +3421,7 @@ class AG2DebateEngine:
                 _resp = _client.chat.completions.create(
                     model=_model,
                     messages=[{"role": "user", "content": blueprint_prompt}],
-                    max_tokens=600,
+                    max_tokens=MAX_TOKENS_L6_DEBATE_SUMMARY,
                     temperature=0.2
                 )
                 _raw = AG2DebateEngine._strip_thought_tags(_resp.choices[0].message.content.strip())

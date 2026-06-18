@@ -126,7 +126,7 @@ class LLMClient(ABC):
             except json.JSONDecodeError:
                 continue
 
-        raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")
+        raise ValueError(f"Could not parse JSON from LLM response (len={len(text)}). End of response: {text[-200:]}")
 
     def _log_call(self, method: str, input_tok: int, output_tok: int, elapsed: float) -> None:
         self._call_count += 1

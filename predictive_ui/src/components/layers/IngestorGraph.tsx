@@ -124,7 +124,7 @@ export default function IngestorGraph() {
   const activeCount = ingestionNodes.filter(n => n.status === 'active').length;
 
   return (
-    <div className="w-full h-full flex gap-0" style={{ paddingTop: '72px' }}>
+    <div className="w-full h-full flex gap-0">
       
       {/* ── Side Panel ─────────────────────────────────── */}
       <div className="w-64 flex-none flex flex-col border-r-8 border-black bg-white">

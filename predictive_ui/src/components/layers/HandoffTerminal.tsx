@@ -75,7 +75,7 @@ export default function HandoffTerminal() {
   const progressPercent = simulationProgress?.percent ?? 0;
 
   return (
-    <div className="w-full h-full flex bg-white" style={{ paddingTop: '72px' }}>
+    <div className="w-full h-full flex bg-white">
 
       {/* ── Left: Simulation Report ──────────────────────── */}
       <div className="flex-[2] flex flex-col overflow-hidden border-r-8 border-black">
@@ -140,7 +140,7 @@ export default function HandoffTerminal() {
                   <div className="font-black text-sm uppercase tracking-widest text-brand border-b-4 border-black pb-2">
                     Prediction Report — {simulationReport.feature_title}
                   </div>
-                  
+
                   {/* Executive Summary */}
                   {simulationReport.executive_summary && (
                     <div className="border-4 border-black shadow-neo-black p-5 bg-black text-white relative">

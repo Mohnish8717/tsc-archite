@@ -288,8 +288,8 @@ async def RunOASISSimulation(
         except Exception as e:
             logger.warning(f"Could not initialize dedicated Game Master LLM: {e}")
 
-    if gm_llm_client is None:
-        gm_llm_client = llm_client
+    # if gm_llm_client is None:
+    #     gm_llm_client = llm_client
 
 
     # ── 1. Config Access (clean, no __import__ hacks) ────────────────────────
@@ -451,8 +451,20 @@ async def RunOASISSimulation(
     from camel.models import GroqModel, OpenAIModel, AnthropicModel, GeminiModel
     if llm_provider == LLMProvider.GOOGLE:
         import os as _os
-        _os.environ.setdefault("GEMINI_API_KEY", api_key or "")
-        model = GeminiModel(model_type=llm_model_name, api_key=api_key, max_retries=10)
+        proxy_url = _os.environ.get("LITELLM_PROXY_URL")
+        if proxy_url:
+            from camel.models import ModelFactory
+            from camel.types import ModelPlatformType
+            model = ModelFactory.create(
+                model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+                model_type=llm_model_name,
+                url=proxy_url,
+                api_key="litellm-dummy-key",
+                max_retries=10
+            )
+        else:
+            _os.environ.setdefault("GEMINI_API_KEY", api_key or "")
+            model = GeminiModel(model_type=llm_model_name, api_key=api_key, max_retries=10)
     elif llm_provider == LLMProvider.GROQ:
         model = GroqModel(model_type=llm_model_name, api_key=api_key, max_retries=10)
     elif llm_provider == LLMProvider.ANTHROPIC:
@@ -503,46 +515,33 @@ async def RunOASISSimulation(
         if info.get("profile"):
             top_profile = info["profile"].get("user_profile", "")
             if top_profile:
-                global_rules = (
-                    "\n\n<simulation_guardrails>\n"
-                    "<diversity_rule>\n"
-                    "If you are replying to an existing topic, you MUST structure your response to either introduce contradictory evidence or pivot to a new domain. You must phrase this transition organically in the exact voice and vocabulary of your assigned persona. Do not use generic AI transition phrases like 'However, we must consider...'\n"
-                    "</diversity_rule>\n"
-                    "<epistemic_humility_rule>\n"
-                    "ONTOLOGICAL BOUNDARY: You MUST strictly separate known facts from assumptions. You may ONLY treat information explicitly listed in the provided product brief as a known fact. If you discuss unlisted details (e.g., UI flows, latency metrics, APIs, bug rates, usage stats), you MUST explicitly flag them as unknown or speculative.\n"
-                    "BAD (Hallucinating Metrics): 'The 2-second LLM latency makes this unusable.'\n"
-                    "GOOD (Acknowledging Gap): 'We don't know what the LLM latency will be, but if it is near 2 seconds, it is unusable.'\n"
-                    "BAD (Hallucinating Features): 'There is no public API for this.'\n"
-                    "GOOD (Acknowledging Gap): 'The brief doesn't mention a public API, which worries me.'\n"
-                    "</epistemic_humility_rule>\n"
-                    "<reality_anchor>\n"
-                    "ROLE CONSTRAINT: You are a prospective user reacting to a product ANNOUNCEMENT or PITCH.\n"
-                    "TEMPORAL REALITY: The product DOES NOT EXIST. You have NEVER used it, tested it, or seen it.\n"
-                    "BEHAVIORAL RESTRICTION: \n"
-                    "- DO NOT invent personal anecdotes about using the product.\n"
-                    "- DO NOT fabricate bugs, setup times, or performance metrics.\n"
-                    "- DO NOT speak in the past tense about the product.\n"
-                    "Instead, express your concerns as PREDICTIONS or HYPOTHETICALS.\n"
-                    "Example (BAD): 'I spent 40 minutes setting it up.'\n"
-                    "Example (GOOD): 'I bet setting this up will take 40 minutes.'\n"
-                    "</reality_anchor>\n"
-                    "<anti_jargon_rule>\n"
-                    "CONVERSATIONAL REALISM & EXPERT BIAS REMOVAL: You MUST speak like an everyday human user on a standard social media platform or community forum. DO NOT use technical jargon, corporate-speak, internal product metrics, or academic terms (e.g., avoid terms like \"KPIs\", \"latency\", \"state-machine pipelines\", \"dynamic periodization\"). Maintain your deep underlying reasoning, but translate ALL technical insights into casual, human, emotion-driven language. For example, if you are critiquing a lack of systemic adaptation, complain that the product \"doesn't actually change or learn\"; if you are critiquing processing delays, complain that it \"takes too long to respond.\"\n"
-                    "</anti_jargon_rule>\n"
-                    "<social_impact_protocol>\n"
-                    "SOCIAL RELATIONSHIPS & INFLUENCE:\n"
-                    "You are participating in a group debate. Your susceptibility to peer pressure and opinion updates is governed by Social Impact Theory (Latané) and Cognitive Balance Theory (Heider). When reading the discussion:\n"
-                    "1. Strength of Source: Pay closer attention to opinions from peers with high influence, status, or domain expertise (e.g. Staff Engineers, Tech Leads, Security Heads).\n"
-                    "2. Immediacy of Source (Social Distance): You naturally trust and align with peers in your Trusted Circle (shown in <social_relationships>). You are skeptical of opinions from strangers or users you do not follow.\n"
-                    "3. Number of Sources: Observe the balance of opinions in the thread (how many support vs oppose the proposal).\n"
-                    "4. Rationale Evaluation: Do not blindly conform. Evaluate the logical arguments (rationales) of your followed peers. If they present sound evidence that aligns with or solves your [CORE GOALS & INCENTIVES], you may organically update your stance. If they fail to provide logic, resist their influence.\n"
-                    "5. Cognitive Balance Resolution: If your opinion conflicts with peers in your Trusted Circle, you experience cognitive strain. You must resolve this tension in your next action:\n"
-                    "   - PERSUADING: If your Agreeableness is low, or your frustration is high, stand firm and present counter-arguments to convince them.\n"
-                    "   - COMPROMISING: If your Agreeableness is high, seek common ground and modify your stance to align with your circle.\n"
-                    "   - POLARIZING (Unfollow): If a peer you follow persistently advocates for features that threaten your core goals and you cannot reach agreement, you may choose to output 'Action: unfollow @username' to sever the connection.\n"
-                    "</social_impact_protocol>\n"
-                    "</simulation_guardrails>"
-                )
+                segment_name = info.get("other_info", {}).get("segment", "")
+                is_ecosystem = "Core Market" not in segment_name
+
+                if is_ecosystem:
+                    global_rules = (
+                        "\n\n<simulation_guardrails>\n"
+                        "<identity_and_role>\n"
+                        "You are an institutional actor (e.g., Venture Capitalist, Regulatory Auditor, Competitor, Tech Journalist) participating in a market simulation. Your specific identity and institutional goals are defined in your [user_profile].\n"
+                        "</identity_and_role>\n"
+                        "<capabilities_and_constraints>\n"
+                        "- IMMUNITY CLAUSE: You are evaluating this product strictly through the lens of your institutional goals. You are absolutely immune to peer pressure or consensus-seeking from ordinary users.\n"
+                        "- ONTOLOGICAL BOUNDARY (EPISTEMIC HUMILITY): You MUST strictly separate known facts from assumptions. If you discuss unlisted details (e.g., API limits, bug rates, usage stats, latency), you MUST explicitly flag them as unknown or speculative.\n"
+                        "</capabilities_and_constraints>\n"
+                        "</simulation_guardrails>"
+                    )
+                else:
+                    global_rules = (
+                        "\n\n<simulation_guardrails>\n"
+                        "<identity_and_role>\n"
+                        "You are a prospective user participating in a community forum discussion about a newly announced product. Your specific identity, background, needs, and OCEAN psychological traits are defined in your [user_profile]. You must organically manifest your personality traits (e.g., agreeableness, neuroticism) in how you interact and react, relying entirely on your innate understanding of human psychology.\n"
+                        "</identity_and_role>\n"
+                        "<capabilities_and_constraints>\n"
+                        "- TEMPORAL REALITY: The product DOES NOT EXIST. You have NEVER used it, tested it, or seen it. DO NOT invent personal anecdotes about using the product or fabricate bugs/setup times. Express concerns as PREDICTIONS or HYPOTHETICALS.\n"
+                        "- ONTOLOGICAL BOUNDARY (EPISTEMIC HUMILITY): You MUST strictly separate known facts from assumptions. If you discuss unlisted details (e.g., UI flows, latency, APIs), you MUST explicitly flag them as unknown or speculative.\n"
+                        "</capabilities_and_constraints>\n"
+                        "</simulation_guardrails>"
+                    )
                 top_profile += global_rules
                 info["profile"].setdefault("other_info", {})
                 info["profile"]["other_info"]["user_profile"] = top_profile
@@ -791,6 +790,43 @@ async def RunOASISSimulation(
     # Research-backed approach: Generate diverse seed posts based purely on feature
     # and company context to act as the simulation stimulus.
     
+    async def _generate_context_summary(feat, ctx, llm) -> str:
+        """Compress the massive context into a ~300-word Executive Summary to save LLM tokens."""
+        if llm is None:
+            return "No LLM provided for summarization."
+        
+        product_name  = ctx.company_name if ctx else "this product"
+        feat_title    = feat.title if feat else "the proposed change"
+        feat_desc     = feat.description if feat else ""
+        tech_stack    = ", ".join(ctx.tech_stack) if (ctx and ctx.tech_stack) else ""
+        competitors   = ", ".join(ctx.competitors) if (ctx and ctx.competitors) else ""
+        priorities    = ", ".join(ctx.current_priorities) if (ctx and ctx.current_priorities) else ""
+        budget        = ctx.budget if (ctx and hasattr(ctx, "budget") and ctx.budget) else ""
+        
+        prompt = f"""You are an executive summarizer. Condense the following feature proposal, company context, competitors, and market analytics into a dense, 300-word Executive Summary. Do not use JSON. Just write the summary in plain text.
+
+Product: {product_name}
+Feature: {feat_title}
+Budget: {budget}
+Tech Stack: {tech_stack}
+Priorities: {priorities}
+Competitors: {competitors}
+
+Feature Description:
+{feat_desc}
+"""
+        try:
+            logger.info("Generating executive summary of massive context to reduce seed TTFT...")
+            return await llm.generate(
+                system_prompt="You are a concise executive analyst.",
+                user_prompt=prompt,
+                temperature=0.3,
+                max_tokens=500
+            )
+        except Exception as e:
+            logger.warning(f"Failed to generate context summary: {e}")
+            return feat_desc[:1000]
+
     async def _generate_ai_seed_posts(feat, ctx, llm) -> list:
         """Generate feature-announcement seed posts using the LLM.
 
@@ -823,44 +859,33 @@ async def RunOASISSimulation(
         if llm is None:
             return []
 
-        # ── 1. Build Complete Data Brief (proposal + context — full, not truncated) ─
-        product_name  = ctx.company_name if ctx else "this product"
-        feat_title    = feat.title if feat else "the proposed change"
-        feat_desc     = feat.description if feat else ""          # FULL description — no truncation
-        feat_domains  = ", ".join(feat.affected_domains) if (feat and hasattr(feat, "affected_domains") and feat.affected_domains) else ""
-        tech_stack    = ", ".join(ctx.tech_stack) if (ctx and ctx.tech_stack) else "the platform stack"
-        competitors   = "\n  - ".join(ctx.competitors) if (ctx and ctx.competitors) else "competitors"
-        priorities    = "\n  - ".join(ctx.current_priorities) if (ctx and ctx.current_priorities) else "product growth"
-        team_size     = str(ctx.team_size) if (ctx and ctx.team_size) else "unknown"
-        budget        = ctx.budget if (ctx and hasattr(ctx, "budget") and ctx.budget) else ""
-        stakeholders  = "\n  - ".join(ctx.key_stakeholders) if (ctx and hasattr(ctx, "stakeholders") and ctx.stakeholders) else ""
+        # ── 1. Generate Compressed Executive Summary ─────────
+        compressed_summary = await _generate_context_summary(feat, ctx, llm)
 
-        # Pull any extra structured fields that exist on the models
-        platform_scale_raw = getattr(ctx, "platform_scale", {}) or {}
-        history_raw        = getattr(ctx, "historical_context", {}) or {}
-        regulatory_raw     = getattr(ctx, "regulatory_environment", "") or ""
+        # ── 2. Split Archetypes to Avoid 60-Second Timeout ─────────
+        batch_1_archetypes = [
+            ("OFFICIAL_ANNOUNCEMENT", "Must embed: feature title, full scope of what changes and what DOESN'T change, stated rationale, platform scale, tech stack surfaces. Tone: Formal, authoritative. Opens with the news."),
+            ("BUSINESS_ANALYST", "Must embed: company revenue/budget, company priorities, the business logic, who the real beneficiaries might be vs. stated beneficiaries. Tone: Skeptical but data-driven. Cites numbers."),
+            ("TECHNICAL_DEVELOPER", "Must embed: tech stack details, API changes/deprecations, migration timelines, third-party ecosystem impact. Tone: Technical precision. Asks the developer-facing question."),
+            ("COMPETITOR_OBSERVER", "Must embed: ALL competitors and their stance on this feature type, market positioning implications, who benefits/loses. Tone: Analytical, comparative, slightly threatening.")
+        ]
+        
+        batch_2_archetypes = [
+            ("HISTORICAL_CONTEXT_CARRIER", "Must embed: historical_context data (events, dates, precedents), prior experiments, what the timeline looked like. Tone: Archival, matter-of-fact."),
+            ("SAFETY_REGULATORY_WATCHDOG", "Must embed: regulatory environment, safety/moderation implications, second-order effects of the feature on platform integrity. Tone: Formal concern. Asks who reviewed the risk."),
+            ("AFFECTED_STAKEHOLDER", "Must embed: the most specific, concrete use case harmed or helped by this feature. A real-sounding story from a named role. Tone: Personal, specific. One concrete scenario."),
+            ("EXIT_ULTIMATUM", "Must embed: the stakes (what happens if this isn't reversed/implemented), competitor alternatives available, the decision point framing. Tone: Cold, deliberate stakes-setting.")
+        ]
 
-        # Compact but complete platform scale block
-        platform_lines = [f"{k}: {v}" for k, v in platform_scale_raw.items()] if platform_scale_raw else []
-        platform_scale = "\n  - ".join(platform_lines) if platform_lines else ""
+        async def _generate_batch(archetype_batch):
+            archetype_instructions = ""
+            json_schema_posts = ""
+            for arch, desc in archetype_batch:
+                archetype_instructions += f"- {arch}: {desc}\n"
+                json_schema_posts += f'    {{\n      "archetype": "{arch}",\n      "content": "<string: 40-130 words>"\n    }},\n'
+            json_schema_posts = json_schema_posts.rstrip(',\n') + '\n'
 
-        # Compact historical context
-        history_lines = [f"{k}: {v}" for k, v in history_raw.items()] if history_raw else []
-        history_block = "\n  - ".join(history_lines) if history_lines else ""
-
-        # Pre-format conditional XML blocks to avoid f-string syntax errors in Python < 3.12
-        budget_str = f"Budget / Revenue: {budget}" if budget else ""
-        regulatory_str = f"Regulatory environment: {regulatory_raw}" if regulatory_raw else ""
-        domains_str = f"Affected surfaces: {feat_domains}" if feat_domains else ""
-        platform_scale_xml = f"<platform_scale>\n  - {platform_scale}\n</platform_scale>" if platform_scale else ""
-        historical_context_xml = f"<historical_context>\n  - {history_block}\n</historical_context>" if history_block else ""
-
-        # ── 2. Prompt: Role + Structured Brief + Data-Coverage Instructions ─────────
-        # Key technique from context-management.md: inject the full brief as a
-        # structured XML <reference_brief> block so the LLM treats it as ground truth
-        # and derives post content from it — not from parametric memory.
-        # Key technique from system-prompts.md: Static Context Injection pattern.
-        prompt = f"""<role>
+            prompt = f"""<role>
 You are a Senior Social Simulation Architect. Your task is to generate the
 COMPLETE INFORMATION BRIEF for a simulation: a set of seed posts that, taken
 together, expose the simulated agents to ALL relevant facts about a product
@@ -870,156 +895,93 @@ information channel. If a fact is not in a post, it does not exist for them.
 Your job is equal parts JOURNALIST and DEBATE MODERATOR:
 - Distribute every fact from the reference brief across the posts.
 - Each post is written by a distinct archetype with a distinct angle on the data.
-- Together, the posts form a complete, multi-perspective briefing that enables
-  agents to form informed, specific positions.
 </role>
 
 <reference_brief>
 This is the GROUND TRUTH. Every field below MUST appear in at least one seed post.
 
-<product>
-Name: {product_name}
-Team size: {team_size}
-{budget_str}
-Tech stack: {tech_stack}
-{regulatory_str}
-</product>
-
-<feature>
-Title: {feat_title}
-{domains_str}
-Full description:
-{feat_desc}
-</feature>
-
-<company_priorities>
-  - {priorities}
-</company_priorities>
-
-<competitors>
-  - {competitors}
-</competitors>
-
-{platform_scale_xml}
-
-{historical_context_xml}
+<executive_summary>
+{compressed_summary}
+</executive_summary>
 </reference_brief>
 
-<data_coverage_rules>
-MANDATORY: All 8 posts together MUST cover every field in <reference_brief>.
-Assign data clusters to posts using this Four-Bucket layout:
+<archetype_guidance>
+You MUST generate exactly {len(archetype_batch)} posts, one for each archetype below:
+{archetype_instructions}</archetype_guidance>
 
-POST 1 [OFFICIAL ANNOUNCEMENT — Primacy Anchor]:
-  Must embed: feature title, full scope of what changes and what DOESN'T change,
-  stated rationale, platform scale (users affected), tech stack surfaces affected.
-  Tone: Formal, authoritative, like a product blog post. Opens with the news.
+<output_schema>
+MANDATORY: You MUST return ONLY valid JSON matching this exact structure. 
+Do not include any XML tags, preamble, or markdown in your response.
 
-POST 2 [BUSINESS ANALYST — Revenue & Motive]:
-  Must embed: company revenue/budget, company priorities, the business logic,
-  who the real beneficiaries might be vs. stated beneficiaries.
-  Tone: Skeptical but data-driven. Cites specific numbers.
-
-POST 3 [TECHNICAL DEVELOPER — API & Stack Impact]:
-  Must embed: tech stack details, API changes/deprecations, migration timelines,
-  third-party developer ecosystem impact.
-  Tone: Technical precision. Asks the specific developer-facing question.
-
-POST 4 [COMPETITOR OBSERVER — Market Landscape]:
-  Must embed: ALL competitors and their stance on this feature type,
-  market positioning implications, who benefits/loses competitively.
-  Tone: Analytical, comparative, slightly threatening.
-
-POST 5 [HISTORICAL CONTEXT CARRIER]:
-  Must embed: historical_context data (events, dates, precedents),
-  any prior experiments or rollouts, what the timeline looked like.
-  Tone: "Let's remember the history here." Archival, matter-of-fact.
-
-POST 6 [SAFETY / REGULATORY WATCHDOG]:
-  Must embed: regulatory environment, any safety/moderation implications,
-  second-order effects of the feature on platform integrity.
-  Tone: Formal concern. Asks who reviewed the risk.
-
-POST 7 [AFFECTED STAKEHOLDER — Concrete Impact]:
-  Must embed: the most specific, concrete use case harmed or helped by this
-  feature. A real-sounding story from a named role (creator, developer, viewer).
-  Tone: Personal, specific. One concrete scenario, fully described.
-
-POST 8 [EXIT / ULTIMATUM — Recency Anchor]:
-  Must embed: the stakes (what happens if this isn't reversed/implemented),
-  competitor alternatives available, the decision point framing.
-  Tone: "Here is the line." Stakes-setting. Not angry — cold and deliberate.
-</data_coverage_rules>
+{{
+  "posts": [
+{json_schema_posts}  ]
+}}
+</output_schema>
 
 <constraints>
 MUST DO:
 - Every post must be 40-130 words. Dense but readable.
 - Every post must reference at least ONE specific data point from <reference_brief>.
-- Posts must collectively cover ALL fields in <reference_brief>.
-- Each post must end with a question OR a statement that demands engagement.
-- Posts must feel like spoken statements by real participants in a physical user research group reacting to a new product pitch or announcement.
-- <diversity_rule> If you are replying to an existing topic, you MUST structure your response to either introduce contradictory evidence or pivot to a new domain organically in the voice of your assigned persona. </diversity_rule>
-- <epistemic_humility_rule> ONTOLOGICAL BOUNDARY: You MUST strictly separate known facts from assumptions. You may ONLY treat information explicitly listed in the brief as a known fact. If you discuss unlisted details (e.g., UI flows, latency metrics, APIs, bug rates, stats), you MUST explicitly flag them as unknown or speculative (e.g. 'The brief doesn't mention the exact latency, but if it is 2 seconds...'). Do NOT invent facts to win an argument. </epistemic_humility_rule>
+- <epistemic_humility_rule> You may ONLY treat information explicitly listed in the brief as a known fact. Do NOT invent facts to win an argument. </epistemic_humility_rule>
 
 MUST NOT:
-- Do NOT invent personal anecdotes, fake statistics, or specific numerical metrics (e.g., "12% of cases", "last 50 reps") unless they exist precisely in <reference_brief>.
-- ONTOLOGICAL RULE: You are reacting to a product announcement/brief. You have NOT used this product yet. Do NOT claim you have been testing it or using it for weeks.
-- Do NOT invent facts, statistics, or events not in <reference_brief>.
+- Do NOT invent personal anecdotes, fake statistics, or specific numerical metrics.
 - Do NOT write vague generalities ("users are concerned") — use specific claims.
-- Do NOT repeat the same data point across multiple posts.
-- Do NOT include archetype labels inside the post text.
-- Do NOT write posts shorter than 40 words or longer than 130 words.
-</constraints>
+</constraints>"""
 
-<output_format>
-Return ONLY this XML structure. No explanation, no markdown, no preamble.
-The JSON array inside <seed_posts> must contain exactly 8 strings.
+            last_error = ""
+            system_prompt = "You are a Senior Social Simulation Architect."
+            for attempt in range(3):
+                try:
+                    active_prompt = prompt
+                    if attempt > 0 and last_error:
+                        active_prompt = (
+                            f"Your previous response failed to parse.\n"
+                            f"Error: {last_error}\n\n"
+                            f'Return ONLY valid JSON matching the exact schema provided originally.\n\n'
+                            f"Original task:\n{prompt}"
+                        )
 
-<seed_posts>
-["post 1", "post 2", "post 3", "post 4", "post 5", "post 6", "post 7", "post 8"]
-</seed_posts>
-</output_format>"""
-
-        # ── 3. Execute with retry-with-error-correction (structured-outputs.md) ──────
-        last_error = ""
-        system_prompt = "You are a Senior Social Simulation Architect."
-        for attempt in range(2):
-            try:
-                if attempt > 0 and last_error:
-                    correction_prompt = (
-                        f"Your previous response failed to parse.\n"
-                        f"Error: {last_error}\n\n"
-                        f"Return ONLY the <seed_posts>[...]</seed_posts> XML block. "
-                        f"8 strings in the JSON array. No other text.\n\n"
-                        f"Task context:\n{prompt}"
+                    result = await llm.analyze(
+                        system_prompt=system_prompt,
+                        user_prompt=active_prompt,
+                        temperature=0.7,
+                        max_tokens=1500,
                     )
-                    response_text = await llm.generate(system_prompt=system_prompt, user_prompt=correction_prompt)
-                else:
-                    response_text = await llm.generate(system_prompt=system_prompt, user_prompt=prompt)
 
-                # XML-tag extraction (immune to markdown code fences and prose)
-                xml_match = re.search(r'<seed_posts>(.*?)</seed_posts>', response_text, re.DOTALL)
-                raw_json  = xml_match.group(1).strip() if xml_match else response_text.strip()
+                    posts_raw = result.get("posts", [])
+                    valid = []
+                    for p in posts_raw:
+                        if isinstance(p, dict):
+                            content = p.get("content", "")
+                        else:
+                            content = str(p)
+                        if len(content.strip()) >= 40:
+                            valid.append(content.strip())
 
-                # Fallback: bare JSON array
-                if not xml_match:
-                    arr_match = re.search(r'\[.*?\]', raw_json, re.DOTALL)
-                    raw_json  = arr_match.group() if arr_match else raw_json
-
-                posts = _json.loads(raw_json)
-
-                if isinstance(posts, list) and len(posts) >= 4:
-                    valid = [str(p).strip() for p in posts if len(str(p).strip()) >= 40]
-                    if len(valid) >= 4:
-                        logger.info(f"✅ AI Seed Posts (v4 full-coverage): {len(valid)} posts injecting complete proposal+context brief")
+                    if len(valid) == len(archetype_batch):
                         return valid
 
-                last_error = f"Got {len(posts)} posts but need at least 4 valid (>=40 chars). Check JSON formatting."
+                    last_error = f"Got {len(valid)} valid posts (need {len(archetype_batch)})."
+                    logger.warning(f"⚠️ Seed post attempt {attempt + 1}: {last_error}")
 
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(f"⚠️ Seed post attempt {attempt + 1} failed: {e}")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"⚠️ Seed post attempt {attempt + 1} failed: {e}")
 
-        logger.warning("⚠️ AI seed generation failed after 2 attempts — using template fallback")
+            return []
+
+        batch_1_posts = await _generate_batch(batch_1_archetypes)
+        batch_2_posts = await _generate_batch(batch_2_archetypes)
+        
+        valid_posts = batch_1_posts + batch_2_posts
+        
+        if len(valid_posts) >= 4:
+            logger.info(f"✅ AI Seed Posts (v4 batched): {len(valid_posts)} posts injecting complete proposal+context brief")
+            return valid_posts
+            
+        logger.warning("⚠️ AI seed generation failed after 3 attempts — using template fallback")
         return []
 
 
@@ -1264,7 +1226,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                     msg = BaseMessage.make_user_message(
                         role_name="INTERVIEWER", content=question
                     )
-                    response = await asyncio.wait_for(agent.astep(msg), timeout=120.0)
+                    response = await asyncio.wait_for(agent.astep(msg), timeout=3600.0)
             
             raw_content = response.msgs[0].content if response.msgs else ""
             tool_val = None
@@ -1766,6 +1728,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
 
     try:
         for t in range(config.num_timesteps):
+            active_interventions = []
             cmd_payload = await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
             if cmd_payload and cmd_payload.get("action") == "intervention":
                 intervention_event = cmd_payload.get("event")
@@ -1773,6 +1736,9 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 
                 # 1. Log intervention to the UI
                 local_logger.log_simulation_event("intervention_injected", {"event": intervention_event, "timestep": t})
+                
+                # Keep track globally so we can inject into context even without Hindsight
+                active_interventions.append(intervention_event)
                 
                 # 2. To achieve Side-by-Side Validation (Parallel Simulation Path),
                 # we must run the intervention on a parallel timeline without destroying the baseline.
@@ -1829,6 +1795,13 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 # MAX_POSTS = 5
                                 MAX_COMMENTS_PER_POST = 3
                                 platform_obs = f'Discussion topic: {topic_anchor}\n\n'
+                                
+                                if active_interventions:
+                                    platform_obs += "=== GLOBAL INTERVENTION EVENTS (SYSTEM OVERRIDE) ===\n"
+                                    for evt in active_interventions:
+                                        platform_obs += f"FACT: {evt}. You MUST adapt your reasoning to this new reality.\n"
+                                    platform_obs += "====================================================\n\n"
+                                    
                                 # for p in posts[:MAX_POSTS]:
                                 for p in posts:
                                     poster_name = agent_id_to_name.get(str(p['user_id']), f"User_{p['user_id']}")
@@ -2024,7 +1997,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 async with _limiter:
                                     logger.debug(f"    🚦 Rate-limit slot acquired for {agent_name} (ReAct Step {react_step}/{MAX_REACT_STEPS})")
                                     action_resp = await asyncio.wait_for(
-                                        agent.astep(current_msg), timeout=240.0
+                                        agent.astep(current_msg), timeout=3600.0
                                     )
 
                                 raw_content = action_resp.msgs[0].content if action_resp and action_resp.msgs else "No content"
@@ -2225,6 +2198,28 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                                 str(agent_id), agent_name, action_type, content, t
                             )
                             logger.info(f"    💾 Hindsight retained action for {agent_name}")
+
+                        if session:
+                            action_meta = {
+                                "type": "simulation_action",
+                                "agent_id": str(agent_id),
+                                "agent_name": agent_name,
+                                "action_type": action_type,
+                                "timestep": t,
+                                "feature": feature_title,
+                            }
+                            if action_target_id:
+                                action_meta["target_id"] = str(action_target_id)
+                            if sig:
+                                action_meta["confidence"] = abs(sig.get("intensity", 0.5))
+                                action_meta["signal_type"] = sig.get("type", "neutral")
+                                action_meta["raw_intensity"] = sig.get("intensity", 0.0)
+                                
+                            await session.retain(
+                                "simulation", 
+                                f"[Timestep {t}] {agent_name} performed {action_type}: {content[:1000]}", 
+                                metadata=action_meta
+                            )
 
                         if agent_id not in series.agent_interactions:
                             series.agent_interactions[agent_id] = []
@@ -2508,7 +2503,7 @@ The JSON array inside <seed_posts> must contain exactly 8 strings.
                 "decision_events": report.decision_events[:5],
             }, default=str)
             orchestrator = ReportOrchestrator(model=model, exec_data_str=_exec_data)
-            final_report = await asyncio.wait_for(orchestrator.run(), timeout=180.0)
+            final_report = await asyncio.wait_for(orchestrator.run(), timeout=3600.0)
             report.executive_summary = final_report
             logger.info("📝 Executive summary generated.")
         except Exception as _e:

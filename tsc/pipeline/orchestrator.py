@@ -76,6 +76,7 @@ class TSCPipeline:
         context: Optional[str] = None,
         proposal: Optional[str] = None,
         num_simulations: Optional[int] = None,
+        sim_timesteps: int = 10,
         use_legacy_personas: bool = False,
         boardroom_only: bool = False,
     ) -> FinalRecommendation:
@@ -249,7 +250,7 @@ class TSCPipeline:
             oasis_gen = OASISUserPersonaGenerator(self._llm, world_bank)
             profiles = await oasis_gen.generate(
                 company=company,
-                num_agents=num_simulations or 10,
+                num_agents=num_simulations or 25,
                 feature=feature if proposal else None,
                 raw_chunks=bundle.chunks,
             )
@@ -318,7 +319,7 @@ class TSCPipeline:
             sim_config = OASISSimulationConfig(
                 simulation_name=session_id,
                 num_agents=len(profiles),
-                num_timesteps=10,
+                num_timesteps=sim_timesteps,
             )
             # FIX (Critical): Pass world_bank as the session for RunOASISSimulation.
             # The simulation retains its output (agent traces, comments, prediction

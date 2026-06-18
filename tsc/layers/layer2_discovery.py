@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L2_RESEARCH_QUERY, L2_GRAPH_SYNTHESIS, L2_GRAPH_CLASSIFIER
+from tsc.llm.limits import MAX_TOKENS_L2_RESEARCH_QUERY, MAX_TOKENS_L2_GRAPH_SYNTHESIS, MAX_TOKENS_L2_GRAPH_CLASSIFIER
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.oasis.models import MarketSentimentSeries
 from tsc.memory.world_rag import _get_qdrant, _embed
@@ -207,7 +208,7 @@ class FeatureDiscoveryEngine:
                         system_prompt=FEATURE_MAP_SYSTEM,
                         user_prompt=batch_evidence,
                         temperature=L2_RESEARCH_QUERY,
-                        max_tokens=4000
+                        max_tokens=MAX_TOKENS_L2_RESEARCH_QUERY
                     )
                     intermediate_pain_points.extend(res.get("top_pain_points", []))
                     intermediate_features.extend(res.get("proposed_features", []))
@@ -239,7 +240,7 @@ class FeatureDiscoveryEngine:
                 user_prompt=reduce_input,
                 json_schema=DISCOVERY_JSON_SCHEMA,
                 temperature=L2_GRAPH_SYNTHESIS,
-                max_tokens=6000
+                max_tokens=MAX_TOKENS_L2_GRAPH_SYNTHESIS
             )
         except Exception as e:
             logger.error("Feature Discovery Reduce step failed: %s", e)
@@ -378,7 +379,7 @@ class FeatureDiscoveryEngine:
                 system_prompt=system_prompt,
                 user_prompt=merge_prompt,
                 temperature=L2_GRAPH_CLASSIFIER,
-                max_tokens=2000
+                max_tokens=MAX_TOKENS_L2_GRAPH_CLASSIFIER
             )
             return FeatureProposal(
                 title=res.get("title", new_p.title),

@@ -16,12 +16,14 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+from tsc.llm.limits import GROQ_TPM_LIMIT, GROQ_RPM_LIMIT, GEMINI_FREE_RPM
+
 @dataclass
 class TokenBucket:
     """Dual token + request rate limiter with proportional refill."""
 
-    tpm_limit: int = 4000       # 33% safety margin under Groq free-tier 6,000
-    rpm_limit: int = 20         # 33% safety margin under Groq free-tier 30
+    tpm_limit: int = GROQ_TPM_LIMIT
+    rpm_limit: int = GROQ_RPM_LIMIT
 
     refill_interval: float = 60.0  # seconds
 
@@ -346,7 +348,7 @@ class LeakyBucketQueue:
     async def _drain_loop(self) -> None:
         """Single consumer — pops one coroutine per interval and dispatches it.
 
-        Each coroutine is given a hard 300-second timeout. We dispatch the
+        Each coroutine is given a hard 600-second timeout. We dispatch the
         coroutine concurrently as a background task, and then sleep for exactly
         the interval to ensure we never burst API limits while still allowing
         concurrent LLM executions.
@@ -365,13 +367,13 @@ class LeakyBucketQueue:
 
             async def _execute(c, f):
                 try:
-                    result = await asyncio.wait_for(c, timeout=300.0)
+                    result = await asyncio.wait_for(c, timeout=600.0)
+                    f.set_result(result)
+                except asyncio.TimeoutError:
+                    # Catch the timeout to prevent a full crash, and reject the future
+                    logger.warning("LeakyBucketQueue: coroutine timed out after 600s")
                     if not f.done():
-                        f.set_result(result)
-                except asyncio.TimeoutError as exc:
-                    logger.warning("LeakyBucketQueue: coroutine timed out after 300s")
-                    if not f.done():
-                        f.set_exception(exc)
+                        f.set_exception(asyncio.TimeoutError())
                 except Exception as exc:  # noqa: BLE001
                     if not f.done():
                         f.set_exception(exc)
@@ -415,7 +417,7 @@ def get_leaky_bucket(rpm: int | None = None) -> "LeakyBucketQueue":
     """
     global _leaky_bucket
     if _leaky_bucket is None:
-        effective_rpm = rpm or int(os.getenv("GEMINI_FREE_RPM", "10"))
+        effective_rpm = rpm or GEMINI_FREE_RPM
         _leaky_bucket = LeakyBucketQueue(rpm=effective_rpm)
         logger.info("LeakyBucketQueue singleton created: %d RPM", effective_rpm)
     return _leaky_bucket

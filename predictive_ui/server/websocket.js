@@ -308,6 +308,8 @@ function startTailing(run) {
     } catch {}
   }
 
+  let leftoverBuffer = '';
+
   const watcher = fs.watch(run.actionsFile, (eventType) => {
     if (eventType !== 'change') return;
     try {
@@ -324,11 +326,11 @@ function startTailing(run) {
         encoding: 'utf-8',
       });
 
-      let buffer = '';
+      let chunkBuffer = leftoverBuffer;
       stream.on('data', chunk => {
-        buffer += chunk;
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
+        chunkBuffer += chunk;
+        const lines = chunkBuffer.split('\n');
+        chunkBuffer = lines.pop();
         lines.forEach(line => {
           if (line.trim()) {
             try { broadcast(JSON.parse(line)); } catch(e) { console.error('[WS] Parse error in actions:', e.message) }
@@ -337,9 +339,7 @@ function startTailing(run) {
       });
 
       stream.on('end', () => { 
-        if (buffer.trim()) {
-          try { broadcast(JSON.parse(buffer)); } catch(e) {}
-        }
+        leftoverBuffer = chunkBuffer;
       });
     } catch {}
   });
@@ -468,6 +468,8 @@ function startTailingPipeline(run) {
     } catch {}
   }
 
+  let leftoverBuffer = '';
+
   const watcher = fs.watch(pipelineFile, (eventType) => {
     if (eventType !== 'change') return;
     try {
@@ -484,11 +486,11 @@ function startTailingPipeline(run) {
         encoding: 'utf-8',
       });
 
-      let buffer = '';
+      let chunkBuffer = leftoverBuffer;
       stream.on('data', chunk => {
-        buffer += chunk;
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
+        chunkBuffer += chunk;
+        const lines = chunkBuffer.split('\n');
+        chunkBuffer = lines.pop();
         lines.forEach(line => {
           if (line.trim()) {
             try {
@@ -500,9 +502,9 @@ function startTailingPipeline(run) {
         });
       });
       stream.on('end', () => {
-        if (buffer.trim()) {
+        if (chunkBuffer.trim()) {
           try {
-            const event = JSON.parse(buffer);
+            const event = JSON.parse(chunkBuffer);
             broadcast(event);
           } catch(e) {}
         }

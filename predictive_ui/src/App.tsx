@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText } from 'lucide-react';
+import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText, Square } from 'lucide-react';
 import OASIS3D from './components/layers/OASIS3D';
 import BoardroomDebate from './components/layers/BoardroomDebate';
 import IngestorGraph from './components/layers/IngestorGraph';
@@ -98,9 +98,10 @@ function App() {
     }
   };
 
-  // Cancel the running simulation — optimistic UI reset first, then HTTP call to backend.
+  // Signal the backend to stop the simulation gracefully.
+  // We rely on the backend's WebSocket to update the frontend state to 'idle'
+  // once the final metrics are fully aggregated.
   const handleStopSimulation = async () => {
-    stopSimulation(); // immediate: status → 'idle', progress cleared
     try {
       await fetch('http://localhost:8000/api/simulation/stop', { method: 'POST' });
     } catch (e) {
@@ -207,9 +208,10 @@ function App() {
             <button
               id="stop-simulation-btn"
               onClick={handleStopSimulation}
-              className="shrink-0 px-4 py-2 bg-[#FF4500] text-black border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-all hover:translate-x-1 hover:translate-y-1 hover:bg-black hover:text-[#FF4500]"
+              className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 bg-red-500 text-black border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer hover:bg-red-600 transition-colors duration-200"
             >
-              ⏹ Stop
+              <Square className="w-3 h-3 fill-black" strokeWidth={4} />
+              STOP
             </button>
           )}
 

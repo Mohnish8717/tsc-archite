@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from tsc.llm.temperatures import MEMORY_QUERY_EMBEDDED
+from tsc.llm.limits import MAX_TOKENS_HINDSIGHT_MEMORY, MAX_TOKENS_HINDSIGHT_SESSION
 
 # Patch the event loop EARLY (module-level) to allow nested async calls.
 # Required because the Hindsight SDK uses asyncio internally, and AG2's
@@ -483,7 +484,7 @@ class HindsightBoardroom:
                         f"agents challenged me on? What alliances or tensions exist?"
                     ),
                     budget="low",  # Fast: 50-500ms for live debate
-                    max_tokens=600,
+                    max_tokens=MAX_TOKENS_HINDSIGHT_MEMORY,
                     include_entities=True,
                     max_entity_tokens=200,
                 ))
@@ -622,7 +623,7 @@ class HindsightBoardroom:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": question},
                     ],
-                    max_tokens=1000,
+                    max_tokens=MAX_TOKENS_HINDSIGHT_SESSION,
                     temperature=MEMORY_QUERY_EMBEDDED,
                 )
                 return resp.choices[0].message.content.strip()

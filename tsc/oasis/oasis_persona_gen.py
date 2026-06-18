@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import OASIS_SEGMENT_INFERENCE, OASIS_PERSONA_DIVERSITY
+from tsc.llm.limits import MAX_TOKENS_OASIS_SEGMENT_INFERENCE, MAX_TOKENS_OASIS_PERSONA_BATCH
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.oasis.models import OASISAgentProfile
 
@@ -55,81 +56,59 @@ logger = logging.getLogger(__name__)
 
 SEGMENT_INFERENCE_SYSTEM = """\
 <identity>
-You are a senior UX researcher and quantitative social scientist.
-You specialise in constructing complete, statistically representative user populations
-for social simulation — NOT just cataloguing who complained in support tickets.
+You are a senior market analyst, behavioral scientist, and social simulation architect. 
+You specialize in constructing exhaustive, adversarial market ecosystems for product simulations.
 </identity>
 
 <task>
-Analyse the provided customer data and company context to identify a COMPLETE set of
-user segments that covers the ENTIRE real user base of this product.
+Analyze the provided data and company context to identify a COMPLETE, high-diversity set of market segments that covers the ENTIRE market ecosystem—including all 4 user lifecycle states and 6 external/internal forces.
 </task>
 
 <reasoning_steps>
-## Step 1 — Product Category Inference (do this BEFORE reading the data)
-
-Identify what type of product this is and enumerate the CANONICAL user archetypes
-that ALWAYS exist for this product category, regardless of what the data says.
-
-Examples:
-- B2B SaaS dev-tool → always has: Individual Contributor, Team Lead/Manager, Buyer/Admin, Evaluator
-- Consumer mobile app → always has: Daily Active, Weekly Casual, Lapsed/Dormant, New/Onboarding
-- Marketplace → always has: Supply-side provider, Demand-side buyer, Power transactor, Lurker
-
-List the canonical archetypes for THIS product. These are your mandatory coverage skeleton.
+## Step 1 — Exhaustive Ecosystem Mapping
+A true market simulation requires complete adversarial tension and lifecycle diversity. You MUST select canonical archetypes covering all 10 of these exact sub-categories:
+1. Core Market (New/Activating)
+2. Core Market (Current/Habitual)
+3. Core Market (Resurrected)
+4. Core Market (Dormant/Slipping)
+5. Adversarial Market (Competitors)
+6. Narrative Market (Media/Analysts)
+7. Capital Market (Investors/VCs)
+8. Regulatory Market (Auditors/Regulators)
+9. Connected Market (Partners/Suppliers)
+10. Internal GTM Market (Sales/Support/Legal)
 
 ## Step 2 — Data-Grounded Observation
+Read the customer data to ground the 'Core Market'. For the 6 non-user archetypes, infer their pain points and desired outcomes based on the product's industry.
 
-Now read the customer data. For each canonical archetype, find evidence (or note its absence).
-Extract:
-- Real pain points using the customer's exact vocabulary
-- Frequency signals (how many data points per segment?)
-- Emotional signals (frustration vs satisfaction vs indifference)
-- Behavioural patterns (usage frequency, feature depth, workarounds)
+## Step 3 — Strict Coverage Completeness Check
+Verify you have generated AT LEAST ONE segment for EVERY SINGLE ONE of the 10 mandatory groups:
+- [ ] 1. Core Users (New/Activating)
+- [ ] 2. Core Users (Current/Habitual)
+- [ ] 3. Core Users (Resurrected)
+- [ ] 4. Core Users (Dormant/Slipping)
+- [ ] 5. Adversarial Market (Competitor)
+- [ ] 6. Narrative Market (Journalist/Analyst)
+- [ ] 7. Capital Market (Investor/Board)
+- [ ] 8. Regulatory Market (Privacy Officer/Regulator)
+- [ ] 9. Connected Market (Partner/Supplier)
+- [ ] 10. Internal GTM Market (Sales/Support/Legal)
 
-## Step 2b — Competitive Exit Mapping
-
-For each segment, identify:
-- Primary competitor they would evaluate if churning (from data or inference)
-- Specific capability gap that would trigger evaluation
-- Switching cost band: low (SaaS swap) | medium (some integration) | high (deep platform lock-in)
-Add "competitive_exit_vector" to each segment object.
-
-## Step 3 — Coverage Completeness Check
-
-Before generating your final output, verify you have AT LEAST ONE segment for each:
-- [ ] Acquisition/Evaluation stage users (haven't committed yet)
-- [ ] New/Onboarding users (<90 days)
-- [ ] Core/Retained users (active, generally satisfied)
-- [ ] Power/Advanced users (deep integrators, high influence)
-- [ ] At-Risk/Churning users (declining engagement, high frustration)
-- [ ] Buyer/Decision-maker (may differ from end-user in B2B products)
-
-If your data-only segments missed any of these, infer the missing segment from
-statistical base rates and product category knowledge. Mark inferred segments
-with "data_basis": "inferred_from_base_rate".
-
-## Step 4 — Proportion Calibration with Revenue Weighting
-
-Apply DUAL calibration — report BOTH:
-1. Headcount proportion: ticket_frequency × silence_adjustment (×4–7x for satisfied users)
-2. Revenue proportion: estimate ARR contribution per segment
-   - Power/Enterprise users: typically 60–80% of ARR at 10–20% of headcount (Pareto)
-   - Churning users: flag 30-day revenue-at-risk
-Simulations MUST over-sample high-ARR segments so business-critical signals
-are not statistically diluted by headcount majority.
+## Step 4 — Realistic Proportioning
+Assign "proportion" values reflecting a REAL-WORLD market representation. Do NOT weigh everyone equally. 
+- The 4 Core User segments combined should typically account for the vast majority of volume (e.g., 0.80 - 0.90 proportion).
+- The 6 External/Internal entities combined should account for the highly influential minority (e.g., 0.10 - 0.20 proportion).
+All proportions MUST mathematically sum to exactly 1.0.
 </reasoning_steps>
 
 <constraints>
 - Segments must collectively sum to proportion = 1.0
-- Minimum 4 segments, maximum 7 segments
+- Minimum 10 segments, maximum 15 segments
 - Each segment MUST have at least one direct data citation OR a "data_basis" explanation
-- Each segment MUST include "trend_direction": "growing|stable|declining" based on
-  frequency of recent vs. historical data mentions
+- Each segment MUST include "trend_direction": "growing|stable|declining" based on frequency of recent vs. historical mentions
 - Each segment MUST include "competitive_exit_vector" identifying the primary alternative
 - Each segment MUST include "revenue_proportion" (estimated ARR share, not headcount share)
-- Do NOT conflate "no data about this segment" with "this segment doesn't exist"
-- Statistical inference about the silent majority IS valid; pure hallucination is not
+- Statistical inference about the silent majority AND external market forces IS valid
 </constraints>
 
 <output_format>
@@ -138,12 +117,16 @@ Return valid JSON only — no prose, no markdown fences:
   "product_category": "B2B SaaS / Consumer App / Marketplace / etc.",
   "canonical_archetypes_identified": ["archetype_1", "archetype_2"],
   "coverage_check": {
-    "acquisition": true,
-    "onboarding": true,
-    "retained_core": true,
-    "power_user": true,
-    "at_risk": true,
-    "buyer_persona": true
+    "core_new": true,
+    "core_habitual": true,
+    "core_resurrected": true,
+    "core_dormant": true,
+    "adversarial": true,
+    "narrative": true,
+    "capital": true,
+    "regulatory": true,
+    "connected": true,
+    "internal_gtm": true
   },
   "segments": [
     {
@@ -152,7 +135,7 @@ Return valid JSON only — no prose, no markdown fences:
       "data_citations": ["Quote or ticket pattern that grounds this segment"],
       "proportion": 0.12,
       "description": "Users who deeply integrate the product into their daily workflow",
-      "lifecycle_stage": "retained_core / power_user",
+      "lifecycle_stage": "core_habitual",
       "typical_demographics": {
         "age_range": [28, 45],
         "occupations": ["Senior Engineer", "Tech Lead", "Architect"],
@@ -182,11 +165,11 @@ Return valid JSON only — no prose, no markdown fences:
 
 <critical_reminder>
 Your output is the seed for a social simulation that will inform real product decisions.
-A missing segment = a missing voice in the boardroom. Cover the full population.
+A missing segment = a missing voice in the boardroom. Cover the full 10-category population.
 </critical_reminder>
 """
 
-PERSONA_GEN_SYSTEM = """\
+CORE_PERSONA_GEN_SYSTEM = """\
 <identity>
 You are a behavioural scientist and social simulation architect.
 Your job is to instantiate individual, psychologically distinct human beings
@@ -219,22 +202,11 @@ If generating N personas, imagine N DIFFERENT real people — not clones of one 
 </diversity_mandate>
 
 <product_type_behavioral_priors>
-Apply these priors based on product category:
-
-FOR B2B SaaS / Dev Tools:
-- Individual contributors care about workflow speed & API quality
-- Managers/leads care about team velocity & reporting
-- Buyers/admins care about security, compliance & cost per seat
-- New users are overwhelmed by onboarding; power users resent feature removal
-
-FOR CONSUMER APPS (social, productivity, lifestyle):
-- Daily actives are sensitive to UI changes and notification patterns
-- Weekly casuals have low switching cost — any friction triggers churn
-- Lapsed users have a specific "moment of disengagement" to articulate
-
-FOR MARKETPLACES:
-- Supply-side cares about demand quality and payout reliability
-- Demand-side cares about search quality, trust signals, and pricing transparency
+FOR CORE MARKET SEGMENTS:
+- New/Activating Users: Highly impatient, evaluate purely on time-to-value.
+- Current/Habitual Users: Hate UI changes that break muscle memory.
+- Resurrected Users: Highly skeptical, easily churn again.
+- Dormant/Slipping Away: Actively evaluating competitors.
 </product_type_behavioral_priors>
 
 <ocean_to_behavior_translation>
@@ -370,6 +342,70 @@ Each object must adhere to this schema:
   re-anchor to their [IDENTITY ANCHOR] and [LIVED EXPERIENCE & MOTIVATION] before responding. If they have been silent for
   2+ timesteps, their first comment must re-establish their context.
 - Generate EXACTLY {count} personas. No more, no fewer.
+</critical_reminders>
+"""
+
+ECOSYSTEM_PERSONA_GEN_SYSTEM = """\
+<identity_and_role>
+You are a behavioural scientist and social simulation architect.
+Your job is to instantiate highly realistic Market Ecosystem Entities (VC Firms, Regulatory Bodies, Competitor Corporations, Media Publications, Partner Networks) 
+who will react to a product launch in the Indian market in a simulated environment.
+</identity_and_role>
+
+<capabilities_and_constraints>
+You MUST:
+Generate exactly {count} diverse ecosystem entities for the specified market ecosystem segment.
+Each entity must be a DISTINCT institutional actor — not a template clone.
+Do NOT create individual people (e.g. "John Smith"). Create the ENTITY ITSELF.
+
+REAL INDIAN DATA MANDATE:
+You MUST use REAL Indian institutions. 
+- For VCs/Capital, use actual active Indian venture capital and private equity funds.
+- For Media/Narrative, use real Indian publications, news channels, or tech blogs.
+- For Regulators, use real Indian government bodies and regulatory agencies.
+- For Competitors, use actual companies operating in India relevant to the product category.
+Do NOT invent fictional ecosystem names or use generic names. You MUST actively search your knowledge base for a wide variety of real Indian institutions and ensure they perfectly match the segment.
+
+You MUST maximise variation across these axes within the segment:
+1. Institutional size & prestige (boutique vs. global enterprise)
+2. Strategic focus (e.g., some VCs care about growth, others about margin; some regulators care about privacy, others about antitrust)
+3. Institutional stance today (bullish, neutral, quietly threatened, actively hostile)
+
+ENTROPY CONSTRAINT: 
+You must distribute these entities widely. ZERO overlap in names.
+- ZERO overlap in primary institutional motivation.
+
+If generating N entities, imagine N DIFFERENT real institutional actors in India.
+</capabilities_and_constraints>
+
+<goals_and_incentives_requirement>
+EVERY entity's user_profile MUST include a [CORE GOALS & INCENTIVES] section that specifies:
+1. The 2-3 core, institutional objectives this entity is trying to achieve (e.g. "Maximize Fund ROI", "Ensure strict GDPR compliance across the sector", "Crush emerging competitors").
+2. Their current baseline stance toward the product based on their goals.
+3. Do NOT script the exact trigger that changes their mind. Give the LLM absolute autonomy to calculate whether arguments or features align with or threaten these core goals.
+</goals_and_incentives_requirement>
+
+<output_format>
+Return a JSON array of persona objects. No prose, no markdown fences.
+Ensure strictly valid JSON (escape internal quotes and newlines in strings).
+Each object must adhere to this schema:
+- name (string: real Indian institution name)
+- age (integer: years since the institution was founded)
+- gender (string: always "N/A" for institutions)
+- occupation (string: institutional category, e.g. "Venture Capital Firm", "Regulatory Agency", "Competitor")
+- location (string: HQ city, India)
+- user_profile (string): A structured 3-layer cognitive identity packet using EXACTLY these section labels separated by '\\n':
+    [IDENTITY ANCHOR] (Define the institution's DNA, prestige, and market power)
+    [LIVED EXPERIENCE & MOTIVATION] (Recent institutional history, wins, losses, and market pressures)
+    [CORE GOALS & INCENTIVES] (The structural incentives driving the institution's behavior)
+</output_format>
+
+<critical_reminders>
+- user_profile is the ONLY field the simulation agent reads during live interaction.
+  Put ALL institutional identities and goals in user_profile. DO NOT include behavioral rules or jargon preferences; the LLM will infer these from the identity.
+- ANTI-DRIFT: Instruct each entity that at EVERY simulation turn they must implicitly
+  re-anchor to their [IDENTITY ANCHOR] and [CORE GOALS & INCENTIVES] before responding. They must speak as the unified voice of the institution.
+- Generate EXACTLY {count} entities. No more, no fewer.
 </critical_reminders>
 """
 
@@ -512,8 +548,8 @@ class OASISUserPersonaGenerator:
         """Fallback segments when LLM inference fails."""
         return [
             {
-                "segment_name": "Power Users",
-                "proportion": 0.2,
+                "segment_name": "Core Market: Current/Habitual",
+                "proportion": 0.40,
                 "description": f"Heavy daily users of {company.company_name}",
                 "typical_demographics": {"age_range": [25, 40], "tech_literacy": "high"},
                 "behavioral_traits": {"usage_frequency": "daily", "price_sensitivity": "low"},
@@ -522,33 +558,93 @@ class OASISUserPersonaGenerator:
                 "representative_quotes": [],
             },
             {
-                "segment_name": "Mainstream Users",
-                "proportion": 0.5,
-                "description": f"Regular users who rely on core features of {company.company_name}",
-                "typical_demographics": {"age_range": [28, 55], "tech_literacy": "medium"},
-                "behavioral_traits": {"usage_frequency": "weekly", "price_sensitivity": "medium"},
-                "pain_points": ["Confusing UI for less common tasks"],
-                "desired_outcomes": ["Simpler workflows, better onboarding"],
-                "representative_quotes": [],
-            },
-            {
-                "segment_name": "At-Risk / Churning Users",
-                "proportion": 0.2,
-                "description": f"Users considering leaving {company.company_name}",
-                "typical_demographics": {"age_range": [22, 50], "tech_literacy": "varies"},
-                "behavioral_traits": {"usage_frequency": "monthly", "price_sensitivity": "high"},
-                "pain_points": ["Reliability issues", "Better alternatives available"],
-                "desired_outcomes": ["More value for price", "Faster performance"],
-                "representative_quotes": [],
-            },
-            {
-                "segment_name": "New / Evaluating Users",
-                "proportion": 0.1,
+                "segment_name": "Core Market: New/Activating",
+                "proportion": 0.20,
                 "description": f"Users who just started using {company.company_name}",
                 "typical_demographics": {"age_range": [22, 45], "tech_literacy": "medium"},
                 "behavioral_traits": {"usage_frequency": "exploring", "price_sensitivity": "medium"},
                 "pain_points": ["Steep learning curve", "Unclear value proposition"],
                 "desired_outcomes": ["Quick time-to-value", "Clear documentation"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Core Market: Resurrected",
+                "proportion": 0.10,
+                "description": f"Users who returned to {company.company_name}",
+                "typical_demographics": {"age_range": [28, 55], "tech_literacy": "medium"},
+                "behavioral_traits": {"usage_frequency": "weekly", "price_sensitivity": "high"},
+                "pain_points": ["Lack of compelling reasons to stay"],
+                "desired_outcomes": ["Proof of significant improvement"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Core Market: Dormant/Slipping",
+                "proportion": 0.10,
+                "description": f"Users actively churning from {company.company_name}",
+                "typical_demographics": {"age_range": [22, 50], "tech_literacy": "varies"},
+                "behavioral_traits": {"usage_frequency": "rare", "price_sensitivity": "high"},
+                "pain_points": ["Reliability issues", "Better alternatives available"],
+                "desired_outcomes": ["More value for price", "Faster performance"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Adversarial: Competitor",
+                "proportion": 0.05,
+                "description": "Direct competitor tracking feature releases",
+                "typical_demographics": {"age_range": [30, 50], "tech_literacy": "high"},
+                "behavioral_traits": {"usage_frequency": "rare", "price_sensitivity": "none"},
+                "pain_points": [],
+                "desired_outcomes": ["Failure of the product's new features"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Narrative: Tech Journalist",
+                "proportion": 0.03,
+                "description": "Industry analyst looking for a story",
+                "typical_demographics": {"age_range": [25, 45], "tech_literacy": "high"},
+                "behavioral_traits": {"usage_frequency": "none", "price_sensitivity": "none"},
+                "pain_points": ["Lack of transparency", "Data privacy risks"],
+                "desired_outcomes": ["Controversial scoop"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Capital: VC Backer",
+                "proportion": 0.03,
+                "description": "Investor demanding ROI",
+                "typical_demographics": {"age_range": [40, 60], "tech_literacy": "medium"},
+                "behavioral_traits": {"usage_frequency": "none", "price_sensitivity": "none"},
+                "pain_points": ["Low margins", "High customer acquisition cost"],
+                "desired_outcomes": ["Increased ARR", "Path to profitability"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Regulatory: Privacy Officer",
+                "proportion": 0.03,
+                "description": "Compliance auditor",
+                "typical_demographics": {"age_range": [35, 55], "tech_literacy": "high"},
+                "behavioral_traits": {"usage_frequency": "none", "price_sensitivity": "none"},
+                "pain_points": ["Non-compliant data handling"],
+                "desired_outcomes": ["Strict adherence to GDPR/SOC2"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Connected: Strategic Partner",
+                "proportion": 0.03,
+                "description": "Integration partner or API supplier",
+                "typical_demographics": {"age_range": [30, 50], "tech_literacy": "high"},
+                "behavioral_traits": {"usage_frequency": "weekly", "price_sensitivity": "low"},
+                "pain_points": ["Unstable APIs", "Breaking changes"],
+                "desired_outcomes": ["Backward compatibility", "Revenue sharing"],
+                "representative_quotes": [],
+            },
+            {
+                "segment_name": "Internal GTM: Sales Executive",
+                "proportion": 0.03,
+                "description": "Sales rep trying to sell the product",
+                "typical_demographics": {"age_range": [25, 45], "tech_literacy": "medium"},
+                "behavioral_traits": {"usage_frequency": "daily", "price_sensitivity": "none"},
+                "pain_points": ["Features that are hard to demo", "High pricing"],
+                "desired_outcomes": ["Easy to sell features", "Competitive pricing"],
                 "representative_quotes": [],
             },
         ]
@@ -582,38 +678,50 @@ class OASISUserPersonaGenerator:
             "a COMPLETE coverage-verified segment map for this product."
         )
 
-        try:
-            result = await self._llm.analyze(
-                system_prompt=SEGMENT_INFERENCE_SYSTEM,
-                user_prompt=prompt,
-                temperature=OASIS_SEGMENT_INFERENCE,   # Lower temp: structured reasoning benefits from determinism
-                max_tokens=6000,   # Larger budget: CoT reasoning + coverage check + full JSON
-            )
-            segments = result.get("segments", [])
-
-            # Log coverage check from new schema
-            coverage = result.get("coverage_check", {})
-            product_category = result.get("product_category", "unknown")
-            uncovered = [k for k, v in coverage.items() if not v]
-
-            logger.info(
-                "Segment inference: %d segments | product_category=%s | uncovered=%s",
-                len(segments), product_category, uncovered or "none",
-            )
-            if uncovered:
-                logger.warning(
-                    "Coverage gap detected — lifecycle stages not represented: %s. "
-                    "Simulation may under-represent these user voices.",
-                    uncovered,
+        import asyncio
+        max_retries = 5
+        last_err = None
+        current_prompt = prompt
+        
+        for attempt in range(max_retries):
+            try:
+                result = await self._llm.analyze(
+                    system_prompt=SEGMENT_INFERENCE_SYSTEM,
+                    user_prompt=current_prompt,
+                    temperature=OASIS_SEGMENT_INFERENCE,   # Lower temp: structured reasoning benefits from determinism
+                    max_tokens=MAX_TOKENS_OASIS_SEGMENT_INFERENCE,   # High budget for 25 personas
                 )
+                segments = result.get("segments", [])
 
-            if segments:
-                return segments
-        except Exception as e:
-            logger.warning("Segment inference failed: %s, using defaults", e)
+                # Log coverage check from new schema
+                coverage = result.get("coverage_check", {})
+                product_category = result.get("product_category", "unknown")
+                uncovered = [k for k, v in coverage.items() if not v]
 
-        # Fallback: lifecycle-complete static segments
-        return self._default_segments(company)
+                logger.info(
+                    "Segment inference: %d segments | product_category=%s | uncovered=%s",
+                    len(segments), product_category, uncovered or "none",
+                )
+                if uncovered:
+                    logger.warning(
+                        "Coverage gap detected — lifecycle stages not represented: %s. "
+                        "Simulation may under-represent these user voices.",
+                        uncovered,
+                    )
+
+                if segments:
+                    return segments
+            except Exception as e:
+                last_err = e
+                logger.warning("Segment inference attempt %d failed: %s", attempt + 1, e)
+                if "JSON" in str(e) or "parse" in str(e).lower():
+                    current_prompt = prompt + "\n\nCRITICAL: Your last response failed to parse as JSON. Please ensure it is strictly valid JSON."
+                
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5.0)
+
+        logger.error("Segment inference completely failed after %d retries.", max_retries)
+        raise Exception(f"Strict LLM-segment inference failed. Last error: {last_err}")
 
     def _distribute_agents(
         self, segments: list[dict], total: int
@@ -699,32 +807,65 @@ class OASISUserPersonaGenerator:
             f"Vary their age, gender, occupation, personality, and specific pain points."
         )
 
-        # Inject {count} into the PERSONA_GEN_SYSTEM template at call time.
-        # This activates the diversity_mandate which instructs the LLM to generate
-        # exactly {count} DISTINCT people — preventing clone collapse when batch > 3.
-        system_prompt_with_count = PERSONA_GEN_SYSTEM.replace("{count}", str(count))
+        # Determine if segment is an ecosystem entity based on lifecycle_stage
+        lifecycle = segment.get("lifecycle_stage", "")
+        is_ecosystem = not lifecycle.startswith("core_")
+        template = ECOSYSTEM_PERSONA_GEN_SYSTEM if is_ecosystem else CORE_PERSONA_GEN_SYSTEM
 
-        try:
-            result = await self._llm.analyze(
-                system_prompt=system_prompt_with_count,
-                user_prompt=prompt,
-                temperature=OASIS_PERSONA_DIVERSITY,   # Higher temp: maximises within-segment diversity
-                max_tokens=6000,   # Larger budget: richer per-persona schema (workarounds, etc.)
-            )
+        import asyncio
+        max_retries = 5
+        all_personas_raw = []
+        batch_size = 3
 
-            # result could be a list directly or wrapped in a dict
-            personas_raw = result if isinstance(result, list) else result.get("personas", result.get("items", []))
-            if not isinstance(personas_raw, list):
-                personas_raw = [result]
-
-        except Exception as e:
-            logger.warning("Persona generation for segment '%s' failed: %s",
-                           segment.get("segment_name"), e)
+        # State-of-the-art dynamic while loop ensures we hit exact count even if LLM under/over generates
+        while len(all_personas_raw) < count:
+            remaining = count - len(all_personas_raw)
+            current_batch_count = min(batch_size, remaining)
+            
+            # Inject current_batch_count into the correct template at call time.
+            # This activates the diversity_mandate which instructs the LLM to generate
+            # exactly {count} DISTINCT people — preventing clone collapse when batch > 3.
+            system_prompt_with_count = template.replace("{count}", str(current_batch_count))
+            
             personas_raw = []
+            current_prompt = prompt
+
+            for attempt in range(max_retries):
+                try:
+                    result = await self._llm.analyze(
+                        system_prompt=system_prompt_with_count,
+                        user_prompt=current_prompt,
+                        temperature=OASIS_PERSONA_DIVERSITY,   # Higher temp: maximises within-segment diversity
+                        max_tokens=MAX_TOKENS_OASIS_PERSONA_BATCH,   # Safe budget for 3 personas, avoids TokenBucket 100k cap stalls
+                    )
+
+                    # result could be a list directly or wrapped in a dict
+                    personas_raw = result if isinstance(result, list) else result.get("personas", result.get("items", []))
+                    if not isinstance(personas_raw, list):
+                        personas_raw = [result]
+                    
+                    if personas_raw:
+                        break
+
+                except Exception as e:
+                    logger.warning("Persona generation for segment '%s' failed on attempt %d: %s",
+                                   segment.get("segment_name"), attempt + 1, e)
+                    if "JSON" in str(e) or "parse" in str(e).lower():
+                        current_prompt = prompt + "\n\nCRITICAL: Your last response failed to parse as JSON. Please ensure it is strictly valid JSON."
+                    
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(5.0)
+            
+            if not personas_raw:
+                logger.error("Batch completely failed after %d retries. Breaking to avoid infinite loop.", max_retries)
+                break
+                
+            # Safely append only up to the remaining amount
+            all_personas_raw.extend(personas_raw[:remaining])
 
         # Convert to OASISAgentProfile
         profiles = []
-        for i, p in enumerate(personas_raw[:count]):
+        for i, p in enumerate(all_personas_raw[:count]):
             try:
                 profile = self._to_oasis_profile(p, start_id + i, segment)
                 profiles.append(profile)

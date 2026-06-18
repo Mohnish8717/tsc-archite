@@ -8,6 +8,11 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
+from tsc.llm.limits import (
+    MAX_TOKENS_L8_COMPLIANCE_SUMMARY,
+    MAX_TOKENS_L8_HANDOFF_NARRATIVE,
+    MAX_TOKENS_L8_FINAL_OUTPUT
+)
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L8_COMPLIANCE_SUMMARY, L8_OUTPUT_CONSOLIDATION, L8_HANDOFF_NARRATIVE
@@ -25,6 +30,7 @@ from tsc.models.recommendation import (
     PillarVerdict,
 )
 from tsc.models.spec import FeatureSpecification
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +190,8 @@ class HandoffGenerator:
             res = await self._llm.analyze(
                 system_prompt=system_prompt,
                 user_prompt=prompt,
-                temperature=L8_COMPLIANCE_SUMMARY,
-                max_tokens=500
+                temperature=0.2,
+                max_tokens=MAX_TOKENS_L8_COMPLIANCE_SUMMARY
             )
             return res
         except Exception as e:
@@ -356,8 +362,8 @@ class HandoffGenerator:
             return await self._llm.generate(
                 system_prompt=SUMMARY_SYSTEM,
                 user_prompt=prompt,
-                temperature=L8_HANDOFF_NARRATIVE,
-                max_tokens=200,
+                temperature=0.3,
+                max_tokens=MAX_TOKENS_L8_FINAL_OUTPUT,
             )
         except Exception as e:
             logger.warning("Summary generation failed: %s", e)

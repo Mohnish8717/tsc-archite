@@ -20,7 +20,8 @@ class OpenAIClient(LLMClient):
 
     def __init__(self, api_key: str, model: str = "gpt-4o", **kwargs: Any):
         super().__init__(api_key, model, **kwargs)
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        base_url = kwargs.get("base_url")
+        self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
         self._rate_limiter = get_groq_bucket()
 
     def _estimate_tokens(self, messages: list[dict[str, str]], max_tokens: int = 0) -> int:
@@ -65,13 +66,19 @@ class OpenAIClient(LLMClient):
         chunks = []
         usage = None
         async for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                chunks.append(chunk.choices[0].delta.content)
+            if chunk.choices:
+                if chunk.choices[0].delta.content:
+                    chunks.append(chunk.choices[0].delta.content)
+                if getattr(chunk.choices[0], "finish_reason", None) not in (None, "stop"):
+                    logger.warning(f"Unexpected finish_reason: {chunk.choices[0].finish_reason}")
             if hasattr(chunk, "usage") and chunk.usage:
                 usage = chunk.usage
 
         text = "".join(chunks) or "{}"
         logger.debug(f"\n[LLM RESPONSE - analyze]\n{text}\n" + "="*40)
+        with open("/Users/mohnish/.gemini/antigravity-ide/brain/cafd043e-bf65-47bb-9064-62d62ddeaf01/scratch/llm_debug.txt", "a") as f:
+            f.write(f"\n[LLM PROMPT - analyze]\n{user_prompt}\n")
+            f.write(f"\n[LLM RESPONSE - analyze]\n{text}\n")
 
         elapsed = time.time() - t0
         usage = usage or getattr(response, "usage", None)

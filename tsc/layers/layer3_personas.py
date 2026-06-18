@@ -40,6 +40,12 @@ from tsc.llm.temperatures import (
     L3_INTERNAL_PERSONA_PROFILE,
     L3_EXTERNAL_PERSONA_PROFILE,
 )
+from tsc.llm.limits import (
+    MAX_TOKENS_L3_INTERNAL_STAKEHOLDER_SELECTION,
+    MAX_TOKENS_L3_EXTERNAL_STAKEHOLDER_SELECTION,
+    MAX_TOKENS_L3_INTERNAL_PERSONA_PROFILE,
+    MAX_TOKENS_L3_EXTERNAL_PERSONA_PROFILE,
+)
 from tsc.llm.prompts import (
     PERSONA_SYSTEM,
     PERSONA_SYSTEM_GROUNDED,
@@ -573,7 +579,7 @@ class PersonaGenerator:
                 system_prompt=STAKEHOLDER_SELECTION_SYSTEM,
                 user_prompt=prompt,
                 temperature=L3_INTERNAL_STAKEHOLDER_SELECTION,
-                max_tokens=2000,
+                max_tokens=MAX_TOKENS_L3_INTERNAL_STAKEHOLDER_SELECTION,
             )
 
             if not result:
@@ -645,7 +651,7 @@ class PersonaGenerator:
                 system_prompt=EXTERNAL_STAKEHOLDER_SELECTION_SYSTEM,
                 user_prompt=prompt,
                 temperature=L3_EXTERNAL_STAKEHOLDER_SELECTION,
-                max_tokens=2000,
+                max_tokens=MAX_TOKENS_L3_EXTERNAL_STAKEHOLDER_SELECTION,
             )
             
             if not result:
@@ -1360,7 +1366,7 @@ MANDATORY WRITING RULES:
                     system_prompt=EXTERNAL_PERSONA_SYSTEM,
                     user_prompt=user_prompt,
                     temperature=L3_EXTERNAL_PERSONA_PROFILE,   # slightly higher creativity for market personas
-                    max_tokens=3000,    # 14 sections need more room
+                    max_tokens=MAX_TOKENS_L3_EXTERNAL_PERSONA_PROFILE,    # 14 sections need more room
                 )
             else:
                 # ── Internal stakeholder: use existing grounded org prompt ──
@@ -1371,7 +1377,7 @@ MANDATORY WRITING RULES:
                     system_prompt=PERSONA_SYSTEM_GROUNDED,
                     user_prompt=user_prompt,
                     temperature=L3_INTERNAL_PERSONA_PROFILE,
-                    max_tokens=2500,
+                    max_tokens=MAX_TOKENS_L3_INTERNAL_PERSONA_PROFILE,
                 )
 
             # Validate grounding quality

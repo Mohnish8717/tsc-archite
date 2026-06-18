@@ -30,6 +30,7 @@ from typing import Any
 from tsc.layers.layer4_gates import GateExecutor
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L5_REFINEMENT
+from tsc.llm.limits import MAX_TOKENS_L5_REFINEMENT
 from tsc.models.chunks import ProblemContextBundle
 from tsc.models.gates import GatesSummary
 from tsc.models.graph import KnowledgeGraph
@@ -145,7 +146,7 @@ class RefinementEngine:
                 system_prompt=system_prompt,
                 user_prompt=refinement_prompt,
                 temperature=L5_REFINEMENT,
-                max_tokens=3000,
+                max_tokens=MAX_TOKENS_L5_REFINEMENT,
             )
 
             if not refinement_response:

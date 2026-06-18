@@ -9,6 +9,7 @@ from typing import Any
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import GATE_BASE_DEFAULT
+from tsc.llm.limits import MAX_TOKENS_L4_GATE_EVALUATION
 from tsc.llm.prompts import GATE_SYSTEM, GATE_USER
 from tsc.models.chunks import ProblemContextBundle
 from tsc.models.gates import GateResult, GateVerdict, RiskEntry
@@ -75,7 +76,7 @@ class BaseGate(ABC):
             system_prompt=system,
             user_prompt=prompt,
             temperature=GATE_BASE_DEFAULT,
-            max_tokens=3000,
+            max_tokens=MAX_TOKENS_L4_GATE_EVALUATION,
         )
 
         # Parse into GateResult

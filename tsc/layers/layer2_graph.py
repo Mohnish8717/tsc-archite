@@ -32,6 +32,7 @@ from typing import Any
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L2_GRAPH_CLASSIFIER, L2_GRAPH_ENRICHMENT
+from tsc.llm.limits import MAX_TOKENS_L2_GRAPH_ENRICHMENT
 from tsc.llm.prompts import (
     GROUNDED_NER_SYSTEM,
     GROUNDED_NER_USER,
@@ -786,7 +787,7 @@ class KnowledgeGraphBuilder:
                     system_prompt=RELATIONSHIP_SYSTEM,
                     user_prompt=prompt,
                     temperature=L2_GRAPH_ENRICHMENT,
-                    max_tokens=1500,
+                    max_tokens=MAX_TOKENS_L2_GRAPH_ENRICHMENT,
                 )
 
                 batch_count = 0

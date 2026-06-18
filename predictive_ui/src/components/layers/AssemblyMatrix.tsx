@@ -1068,7 +1068,7 @@ export default function AssemblyMatrix() {
   }, [boardroomPersonas]);
 
   return (
-    <div className="w-full h-full flex flex-col bg-white overflow-y-auto invisible-scroll" style={{ paddingTop: '72px' }}>
+    <div className="w-full h-full flex flex-col bg-white overflow-y-auto invisible-scroll">
 
       {/* ── Simulation Config Band ──────────────────────── */}
       <SimConfigPanel />

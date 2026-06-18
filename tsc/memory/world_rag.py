@@ -826,6 +826,7 @@ class WorldRAGEngine:
         # Use the existing LLM client to extract entities
         try:
             from tsc.llm.factory import create_llm_client
+            from tsc.llm.limits import MAX_TOKENS_WORLD_RAG
             llm = create_llm_client(settings=settings)
 
             prompt = f"""Extract entities and relationships from this text.
@@ -840,7 +841,7 @@ Text: {text[:3000]}"""
                 system_prompt="You are a precise data extractor. Return only valid JSON.",
                 user_prompt=prompt,
                 temperature=MEMORY_WORLD_RAG,
-                max_tokens=2000
+                max_tokens=MAX_TOKENS_WORLD_RAG
             )
             import json, re
             json_match = re.search(r"\{.*\}", resp, re.DOTALL)

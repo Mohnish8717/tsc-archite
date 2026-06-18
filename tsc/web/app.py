@@ -333,12 +333,13 @@ manager = ConnectionManager()
 # Holds the currently running pipeline task so /api/simulation/stop can cancel it.
 # None when no simulation is active.
 _active_pipeline_task: Optional[asyncio.Task] = None
+_active_pipeline: Optional[TSCPipeline] = None
 
 
 @app.websocket("/ws/evaluate")
 async def ws_evaluate(ws: WebSocket):
     """Run evaluation with real-time progress via WebSocket."""
-    global _active_pipeline_task
+    global _active_pipeline_task, _active_pipeline
     await manager.connect(ws)
     try:
         # Receive config
@@ -387,6 +388,7 @@ async def ws_evaluate(ws: WebSocket):
 
         # Run — register this task so /api/simulation/stop can cancel it
         _active_pipeline_task = asyncio.current_task()
+        _active_pipeline = pipeline
         await manager.send_json(ws, {"type": "started"})
         boardroom_only = config.get("boardroom_only", False)
         result = await pipeline.evaluate(**files, boardroom_only=boardroom_only)
@@ -415,16 +417,33 @@ async def ws_evaluate(ws: WebSocket):
         })
     finally:
         _active_pipeline_task = None
+        _active_pipeline = None
         manager.disconnect(ws)
 
 
 @app.post("/api/simulation/stop")
 async def stop_simulation():
-    """Cancel the active pipeline task and notify clients via pipeline.jsonl."""
-    global _active_pipeline_task
+    """Gracefully signal the simulation engine to stop and aggregate results."""
+    global _active_pipeline_task, _active_pipeline
+    
+    if _active_pipeline and hasattr(_active_pipeline, '_pipeline_jsonl') and _active_pipeline._pipeline_jsonl:
+        run_dir = _active_pipeline._pipeline_jsonl.parent
+        commands_file = run_dir / "commands.json"
+        
+        try:
+            import json
+            with open(commands_file, "w") as f:
+                json.dump({"action": "stop"}, f)
+            return {"status": "stopping", "message": "Stop command sent to OASIS engine"}
+        except Exception as e:
+            logger.error(f"Failed to write stop command: {e}")
+            return {"status": "error", "message": f"Failed to write stop command: {e}"}
+            
+    # Fallback to hard cancel if pipeline is stuck elsewhere
     if _active_pipeline_task and not _active_pipeline_task.done():
         _active_pipeline_task.cancel()
-        return {"status": "stopping", "message": "Pipeline cancellation requested"}
+        return {"status": "stopping", "message": "Pipeline hard cancellation requested"}
+        
     return {"status": "idle", "message": "No simulation currently running"}
 
 

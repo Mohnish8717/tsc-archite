@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tsc.models.personas import FinalPersona
 from tsc.selection.models import PersonaPole, PoleType, SelectionResult
 from tsc.llm.temperatures import SELECTION_SYNTHETIC_EXPANDER
+from tsc.llm.limits import MAX_TOKENS_SYNTHETIC_EXPANDER
 
 logger = logging.getLogger(__name__)
 
@@ -438,7 +439,7 @@ class GMMSyntheticExpander:
                 system_prompt="You are an expert persona generator.",
                 user_prompt=prompt,
                 temperature=SELECTION_SYNTHETIC_EXPANDER,
-                max_tokens=600
+                max_tokens=MAX_TOKENS_SYNTHETIC_EXPANDER
             )
             clone.psychological_profile.full_profile_text = (
                 f"{frame_tag}{bio_prefix}\n\n"

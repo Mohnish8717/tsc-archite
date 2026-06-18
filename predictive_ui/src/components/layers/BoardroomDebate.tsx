@@ -1051,7 +1051,7 @@ function DebateChat() {
 export default function BoardroomDebate() {
   const { isConnected, simulationConfig } = usePipelineStore();
   return (
-    <div className="w-full h-full flex" style={{ paddingTop: '72px' }}>
+    <div className="w-full h-full flex">
       {/* 3D Canvas */}
       <div className="flex-[2] relative overflow-hidden border-r-8 border-black">
         <BoardroomErrorBoundary>

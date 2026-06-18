@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { usePipelineStore } from '../../store/usePipelineStore';
 import type { AgentAction } from '../../store/usePipelineStore';
 import { cleanPersonaName } from '../../utils/nameHelper';
-import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2, ThumbsUp } from 'lucide-react';
+import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2, ThumbsUp, Square } from 'lucide-react';
 import { normalizeBio, parseBioSections } from './AssemblyMatrix';
 import { EagleEyeInterrogationModal } from './EagleEyeInterrogationModal';
 import { InterventionPanel } from './InterventionPanel';
@@ -667,6 +667,7 @@ function NetworkScene({ onSelect, showTopologyLines, onInterrogate }: { onSelect
       const cleanName = cleanPersonaName(a.agent_name);
       const normId = normalizeId(a.agent_id);
       if (!map.has(normId)) {
+        const storeAgent = usePipelineStore.getState().spawnedAgents[normId];
         map.set(normId, { 
           id: normId, 
           name: cleanName, 
@@ -675,12 +676,12 @@ function NetworkScene({ onSelect, showTopologyLines, onInterrogate }: { onSelect
           downvotes: 0, 
           recent: [], 
           hot: false,
-          role: 'Lurker',
-          bio: 'A synthetic participant observing the conversation dynamics.',
-          mbti: null,
-          traits: ['Observer', 'Analytical'],
-          ocean: null,
-          buyerJourney: 'Awareness'
+          role: storeAgent?.role || 'Lurker',
+          bio: storeAgent?.bio || 'A synthetic participant observing the conversation dynamics.',
+          mbti: storeAgent?.mbti || null,
+          traits: storeAgent?.traits || ['Observer', 'Analytical'],
+          ocean: (storeAgent?.ocean_scores && Object.keys(storeAgent.ocean_scores).length > 0) ? storeAgent.ocean_scores : null,
+          buyerJourney: storeAgent?.buyer_journey || 'Awareness'
         });
       }
       const ag = map.get(normId)!;
@@ -1226,6 +1227,22 @@ export default function OASIS3D() {
           )}
         </div>
         <div className="flex items-center gap-3">
+          {/* Stop Simulation Button */}
+          {simulationStatus === 'running' && (
+            <button
+              onClick={async () => {
+                try {
+                  await fetch('http://localhost:8000/api/simulation/stop', { method: 'POST' });
+                } catch (err) {
+                  console.error("Failed to stop simulation:", err);
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 border-2 border-red-500 bg-red-500 text-black font-black text-xs uppercase tracking-widest cursor-pointer hover:bg-red-600 hover:border-red-600 transition-colors duration-200"
+            >
+              <Square className="w-3 h-3 fill-black" strokeWidth={4} />
+              STOP
+            </button>
+          )}
           {/* Network Topology toggle */}
           {networkTopology && (
             <button

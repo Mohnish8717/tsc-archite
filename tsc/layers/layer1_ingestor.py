@@ -30,6 +30,13 @@ from typing import Any, Optional
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L1_ENTITY_EXTRACTION, L1_PROBLEM_SYNTHESIS
+from tsc.llm.limits import (
+    MAX_TOKENS_L1_MERGE,
+    MAX_TOKENS_L1_PROBLEM_SYNTHESIS,
+    MAX_TOKENS_L1_ENTITY_EXTRACTION,
+    MAX_TOKENS_L1_FILE_SUMMARY,
+    MAX_TOKENS_L1_CHUNK_SUMMARY
+)
 from tsc.llm.prompts import (
     ENRICHMENT_SYSTEM,
     ENRICHMENT_USER,
@@ -526,7 +533,7 @@ class ContextualIngestor:
                     system_prompt=SEMANTIC_CHUNKING_SYSTEM,
                     user_prompt=prompt,
                     temperature=L1_ENTITY_EXTRACTION,
-                    max_tokens=8000,
+                    max_tokens=MAX_TOKENS_L1_MERGE,
                 )
                 response_text = response_text.strip()
                 if response_text.startswith("```json"):
@@ -669,22 +676,38 @@ class ContextualIngestor:
                 elif chunk.source_type == "company_context":
                     chunk.is_customer_perspective = False
 
-                try:
-                    prompt = ENRICHMENT_USER.render(
-                        text=chunk.text,
-                        source_file=chunk.source_file,
-                        source_type=chunk.source_type,
-                    )
-                    result = await self._llm.analyze(
-                        system_prompt=ENRICHMENT_SYSTEM,
-                        user_prompt=prompt,
-                        temperature=L1_PROBLEM_SYNTHESIS,
-                        max_tokens=1000,
-                    )
-                    self._apply_llm_enrichment(chunk, result)
-                except Exception as e:
-                    logger.warning("LLM enrichment failed for %s: %s", chunk.chunk_id, e)
+                prompt = ENRICHMENT_USER.render(
+                    text=chunk.text,
+                    source_file=chunk.source_file,
+                    source_type=chunk.source_type,
+                )
+                
+                max_retries = 3
+                current_prompt = prompt
+                success = False
+                
+                for attempt in range(max_retries):
+                    try:
+                        result = await self._llm.analyze(
+                            system_prompt=ENRICHMENT_SYSTEM,
+                            user_prompt=current_prompt,
+                            temperature=L1_PROBLEM_SYNTHESIS,
+                            max_tokens=MAX_TOKENS_L1_PROBLEM_SYNTHESIS,
+                        )
+                        self._apply_llm_enrichment(chunk, result)
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.warning("LLM enrichment failed for %s on attempt %d: %s", chunk.chunk_id, attempt + 1, e)
+                        if "JSON" in str(e) or "parse" in str(e).lower():
+                            current_prompt = prompt + "\n\nCRITICAL: Your last response failed to parse as JSON. Please ensure it is strictly valid JSON."
+                        
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2.0)
+                
+                if not success:
                     # Minimal fallback: regex metrics + keyword urgency
+                    logger.error("All %d LLM enrichment attempts failed for %s. Using fallback.", max_retries, chunk.chunk_id)
                     chunk.metrics = self._extract_metrics(chunk.text)
                     chunk.urgency = self._estimate_urgency(chunk.text)
 
@@ -711,11 +734,10 @@ class ContextualIngestor:
     ) -> None:
         """Apply LLM enrichment results to a chunk."""
         if not isinstance(result, dict):
-            logger.warning(f"Expected dict for enrichment result, got {type(result)}: {result}")
             if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
-                result = result[0]
+                result = {"entities": result}
             else:
-                return
+                raise ValueError(f"Expected dict for enrichment result, got {type(result)}")
 
         # Entities
         raw_entities = result.get("entities", [])
@@ -854,7 +876,7 @@ Only return valid JSON, no markdown."""
                 system_prompt="You are a precise data extraction specialist. Extract only metrics that are explicitly stated in the text. Do not infer or hallucinate numbers.",
                 user_prompt=prompt,
                 temperature=L1_ENTITY_EXTRACTION,
-                max_tokens=800,
+                max_tokens=MAX_TOKENS_L1_ENTITY_EXTRACTION,
             )
             
             raw = result.get("metrics", [])
@@ -1044,7 +1066,7 @@ Only return valid JSON, no markdown."""
                         system_prompt=system,
                         user_prompt=user,
                         temperature=0.1,
-                        max_tokens=1500,
+                        max_tokens=MAX_TOKENS_L1_CHUNK_SUMMARY,
                     )
                     logger.info(
                         "✓ FeatureProposal LLM extraction done in %.2fs — title=%r",
@@ -1129,7 +1151,7 @@ Only return valid JSON, no markdown."""
                         system_prompt=system,
                         user_prompt=user,
                         temperature=0.1,
-                        max_tokens=1000,
+                        max_tokens=MAX_TOKENS_L1_FILE_SUMMARY,
                     )
                     logger.info(
                         "✓ CompanyContext LLM extraction done in %.2fs — company=%r",

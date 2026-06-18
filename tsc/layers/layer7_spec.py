@@ -12,6 +12,7 @@ import re
 
 from tsc.llm.base import LLMClient
 from tsc.llm.temperatures import L7_SPEC_GENERATION
+from tsc.llm.limits import MAX_TOKENS_L7_SPEC_GENERATION
 from tsc.models.debate import ConsensusResult
 from tsc.models.inputs import CompanyContext, FeatureProposal
 from tsc.models.spec import DevelopmentTask, FeatureSpecification
@@ -97,7 +98,7 @@ class SpecGenerator:
             system_prompt=SPEC_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=L7_SPEC_GENERATION,
-            max_tokens=6000,
+            max_tokens=MAX_TOKENS_L7_SPEC_GENERATION,
         )
 
         try:

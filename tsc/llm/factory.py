@@ -32,6 +32,14 @@ def create_llm_client(
     m = model or cfg.llm_model
     k = api_key or cfg.get_api_key(p)
 
+    import os
+    proxy_url = os.environ.get("LITELLM_PROXY_URL")
+    # Do not intercept if the provider is explicitly local Ollama (unless routed via LiteLLM)
+    if proxy_url and p != LLMProvider.OLLAMA:
+        from tsc.llm.openai_provider import OpenAIClient
+        # Globally intercept all LLM requests if a local proxy is defined
+        return OpenAIClient(api_key=k or "litellm-dummy-key", model=m, base_url=proxy_url)
+
     if p == LLMProvider.ANTHROPIC:
         from tsc.llm.anthropic_provider import AnthropicClient
         return AnthropicClient(api_key=k, model=m)

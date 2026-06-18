@@ -21,7 +21,9 @@ def build_anti_sycophancy_config(base_config: dict, is_moderator: bool) -> dict:
         for cfg in config.get('config_list', []):
             cfg_copy = cfg.copy()
             is_google_endpoint = "generativelanguage.googleapis.com" in (cfg_copy.get('base_url') or "")
-            if cfg_copy.get('api_type') == 'google' or is_google_endpoint:
+            model_name = cfg_copy.get('model', '').lower()
+            is_google_model = "gemma" in model_name or "gemini" in model_name
+            if cfg_copy.get('api_type') == 'google' or is_google_endpoint or is_google_model:
                 new_config_list.append(cfg_copy)
                 continue
             
@@ -137,9 +139,16 @@ def create_redundancy_hook(feature_description: str):
 
     def _v28_redundancy_check(sender, message, recipient, silent):
         """V28-Fix6: Detect and flag messages that restate the feature brief."""
+        if isinstance(message, dict) and message.get("role") == "tool":
+            return message  # Do not reprimand tool returns
+            
         content = message if isinstance(message, str) else (message.get('content', '') if isinstance(message, dict) else '')
         if not content or len(content) < 100:
             return message  # Too short to be redundant
+            
+        # Ignore simulation reports or raw data dumps
+        if "SIMULATION PREDICTION REPORT" in content or "[HTX-" in content:
+            return message
         
         sender_name = getattr(sender, 'name', 'Unknown')
         if _v28_retry_count.get(sender_name, 0) >= 1:

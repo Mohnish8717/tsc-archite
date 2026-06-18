@@ -1,4 +1,4 @@
-# 🔮 Predictive Reality Engine
+# Predictive Reality Engine
 ### *Autonomous Social Simulation & Adversarial Boardroom Debate*
 
 <div align="center">
@@ -9,137 +9,152 @@
 [![Docker](https://img.shields.io/badge/Docker-Enabled-blue?style=for-the-badge&logo=docker)](https://www.docker.com/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=for-the-badge)](https://www.gnu.org/licenses/agpl-3.0)
 
-**Validate product-market fit, predict regulatory friction, and generate technical specifications before writing a single line of code.**
+**Find out if your feature will fail before you spend 3 months building it.**
 
-[Overview](#-overview) • [Architecture](#-how-it-works-the-8-layer-stack) • [Quick Start](#-supercharged-quick-start) • [Runtime Modes](#-runtime-modes) • [Quality Gates](#-built-in-quality-gates) • [Telemetry](#-analytics--telemetry)
+[Overview](#overview) • [Live Demos](#live-simulation-examples) • [How it Works](#the-8-step-process) • [Quick Start](#how-to-run-it) • [Runtime Modes](#runtime-modes) • [Community](#join-the-conversation)
 
 </div>
 
 ---
 
-## 🌟 Overview
+## Overview
 
-Modern software development is plagued by a massive blind spot: we build features based on hunches, deploy them, and only *then* discover how the market reacts. 
+Right now, building software is mostly guesswork. We come up with an idea, build it, ship it, and just hope people actually want it. If they don't, we've just burned a ton of time, money, and engineering effort.
 
-**The Predictive Reality Engine** fundamentally inverses this paradigm. It is an end-to-end **Autonomous Software Factory** that allows you to simulate the future of your product. By combining massive-scale synthetic user simulation with a highly adversarial, agentic boardroom debate, the system stress-tests feature proposals against technical debt, financial budgets, and user backlash—all in a completely synthetic, high-fidelity environment.
+**Predictive Reality Engine** fixes that. It's a simulation engine that lets you see how the market will react *before* you write any code.
 
----
+We spin up a synthetic social network filled with AI users based on your actual customer data. We drop your feature idea into the mix and watch them react. After that, an AI boardroom—featuring a CTO, CFO, CISO, and others—takes that user backlash and aggressively debates whether the feature is actually worth building given your real-world constraints.
 
-## 🏗️ How It Works: The 8-Layer Stack
+*   **For Leadership (Macro):** It's a safe sandbox to test technical debt and ROI without risking actual money or engineer hours.
+*   **For Product Teams (Micro):** It flags onboarding friction, edge cases, and user hostility instantly.
 
-The pipeline is a highly orchestrated flow of autonomous intelligence, shifting from raw data ingestion to social simulation, and finally to executive consensus.
-
-### 🏛️ Layer 1: Contextual Ingestion
-Ingests raw enterprise data (Zendesk tickets, Slack logs, customer interviews) and extracts core semantic signals using RAG-enhanced parsers.
-
-### 🔍 Layer 2: Feature Discovery
-Dynamically clusters pain points into "Tension Clusters" and automatically drafts compelling **Feature Proposals** that address real customer friction.
-
-### 👥 Layer 3: Persona Generation
-Builds deep psychological **User Personas** representing your actual market segments. These aren't just "profiles"—they are agents with cognitive biases, social interaction patterns, and distinct value systems.
-
-### 👔 Layer 4: Boardroom Assembly
-Initializes the **Autonomous Executive Suite** (CEO, CTO, CISO, Legal, Product). Each executive is pre-warmed with company-specific context, budget constraints, and "Private Intelligence" briefs (e.g., the CFO knows the *actual* runway, which may differ from public reports).
-
-### 🌊 Layer 5: OASIS Market Simulation
-Spins up hundreds of synthetic users in a simulated social media environment (CAMEL-AI OASIS). They interact, argue, post, and comment on the proposal, generating high-fidelity behavioral data that predicts market adoption and churn.
-
-### ⚔️ Layer 6: AG2 Adversarial Debate
-Executives debate the feature, grounded in simulation data.
-*   **Zero Hallucination:** Agents query the **Hindsight Memory Bank** for actual user comments and metrics generated in Layer 5.
-*   **Anti-Sycophancy:** Built-in logit-bias manipulation forces agents to challenge each other, preventing "echo chamber" consensus.
-
-### 📝 Layer 7: Spec Generation
-If the feature survives the boardroom, the system automatically compiles the debate consensus into a high-fidelity **PRD**, generating UI changes, data model updates, and prioritized development tasks.
-
-### 📦 Layer 8: Technical Handoff
-Generates the final engineering-ready artifacts, including integration tests and monitoring plans, for direct deployment into development environments.
+Basically, we let you play out the future of your product so you don't build the wrong thing.
 
 ---
 
-## 🛡️ Built-in Quality Gates
+## Live Simulation Examples
 
-The pipeline includes rigorous "Gates" that verify artifacts between layers to prevent garbage-in, garbage-out.
+Want to see what this actually looks like? Here is a scenario we've already run:
 
-| Gate | Name | Description |
-| :--- | :--- | :--- |
-| **4.5** | **Market Fit Gate** | Evaluates if the generated personas actually represent the customer feedback ingested in Layer 1. |
-| **4.6** | **Red Team Gate** | An adversarial agent attempts to "poison" the simulation or find fatal technical flaws (RCE, privacy leaks) before the boardroom convenes. |
-| **7.2** | **Logic Validator** | Ensures the PRD generated in Layer 7 strictly follows the boardroom's mitigation requirements. |
+### 1. The AI Fitness Platform
+Watch our simulated market tear apart the onboarding flow of a proposed AI Fitness app. The backlash forces the Autonomous Boardroom (CTO, CISO, CFO) into a cut-throat debate over edge processing, HIPAA compliance, and 60fps latency targets.
+*(Demo videos and interactive views coming soon...)*
 
 ---
 
-## ⚡ Supercharged Quick Start
+## The 8-Step Process
 
-Follow these steps to get the Predictive Reality Engine running in less than 5 minutes.
+Here is exactly how the engine works from start to finish:
 
-### 1️⃣ Environment Setup
-Clone the repo and install the core dependencies:
+1. **Ingest Real Data:** We pull in your raw Zendesk tickets, Slack logs, and user interviews to figure out what's actually broken.
+2. **Find the Pain:** The system clusters that data to find exactly what users hate, and automatically drafts a Feature Proposal to fix it.
+3. **Build the Personas:** We generate AI agents that act exactly like your real users—complete with their specific biases and habits.
+4. **Assemble the Boardroom:** We set up an AI executive suite (CEO, CTO, CISO, CMO, CFO, CPO, Legal, Data, Sales, CS). Each one is briefed with real company constraints (e.g., the CFO knows we're running out of cash).
+5. **Run the Simulation:** We drop 'Seeds'—initial controversial takes about the feature—into our OASIS social network. Hundreds of AI users react, argue, and complain in real-time.
+6. **The Debate:** The executives take that backlash and fight over it. There are no yes-men here. If the CTO says the feature is too slow, they have to back it up with hard data from the **World RAG**.
+7. **Generate the Spec (WIP):** If the feature survives the boardroom, we automatically turn the consensus into a ready-to-build PRD.
+8. **Handoff:** We output the final engineering tickets, integration tests, and monitoring plans so your team can just start building.
+
+---
+
+## How to Run It
+
+### What you need
+Make sure you have these installed:
+*   `python 3.10+`
+*   `node 18+` (for the UI)
+*   `docker` & `docker-compose` (for the memory engine)
+
+### Setup (The Full Stack)
+
+#### 1. API Keys
 ```bash
-git clone https://github.com/your-org/tsc-architecture.git
-cd tsc-architecture
-pip install -r requirements.txt
+# Copy the example config
+cp .env.example .env
+
+# Open .env and drop in your GROQ_API_KEY and OPENAI_API_KEY
 ```
 
-### 2️⃣ Start Hindsight (The Memory Engine)
-The system requires a persistent memory bank. Launch the self-hosted Hindsight server using Docker:
+#### 2. Start the World RAG
+The engine needs a memory bank to store everything. Boot up the local Docker setup:
 ```bash
 chmod +x start_hindsight_local.sh
 ./start_hindsight_local.sh start
 ```
-*   **API Server:** [http://localhost:8888](http://localhost:8888)
-*   **Control Plane:** [http://localhost:9999](http://localhost:9999)
+*   **API:** http://localhost:8888
+*   **Control Plane:** http://localhost:9999
 
-### 3️⃣ Configure API Keys
-Copy `.env.example` to `.env` and add your LLM provider keys:
-```env
-GROQ_API_KEY=your_key_here
-OPENAI_API_KEY=your_key_here
-HINDSIGHT_URL=http://localhost:8888
-```
-
-### 4️⃣ Launch Your First Simulation
-Run the AI Fitness Case Study scenario:
+#### 3. Install Packages
 ```bash
-./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py
+# Backend
+pip install -r requirements.txt
+
+# Frontend
+cd predictive_ui && npm install && cd ..
 ```
 
+#### 4. Run Everything
+We made a quick script that boots up the Uvicorn backend, the WebSocket server, and the Vite frontend all at once:
+```bash
+./start_dev.sh
+```
+*   **Frontend UI:** http://localhost:5173
+*   **Backend API:** http://localhost:8000
+
+*(Note: If you just want to run headless simulations in the terminal, you can just run `./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py` instead).*
+
 ---
 
-## 🔄 Runtime Modes
+## Runtime Modes
 
-The engine supports multiple execution modes depending on your research needs:
+Depending on what you're trying to do, you can run the engine in a few different ways:
 
-| Mode | Command | Description |
+| Mode | Command | What it does |
 | :--- | :--- | :--- |
-| **Standard Scenario** | `./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py` | Runs a pre-configured case study with simulations and full boardroom debate. |
-| **Production Pipeline** | `python run_production_pipeline.py` | High-stakes mode for real enterprise data. Supports parallel simulation scaling. |
-| **OASIS Isolated** | `./run_oasis.sh` | Runs only the social simulation layer to test user sentiment without executive debate. |
-| **Memory Purge** | `./start_hindsight_local.sh purge` | Deletes all simulation memory banks for a fresh start. |
-| **Clean Reset** | `./clean_start.sh` | Purges all temporary logs, databases, and local artifacts. |
+| **Standard** | `./run_oasis.sh tsc/scripts/run_ai_fitness_case_study.py` | Runs a standard case study with the full boardroom debate. |
+| **Production** | `python run_production_pipeline.py` | The real deal. Hook it up to your actual enterprise data. |
+| **Simulation Only** | `./run_oasis.sh` | Just runs the social simulation. Skips the boardroom debate entirely. |
+| **Purge Memory** | `./start_hindsight_local.sh purge` | Wipes the simulation memory clean so you can start fresh. |
+| **Hard Reset** | `./clean_start.sh` | Deletes all temporary logs, databases, and artifacts. |
 
 ---
 
-## 📊 Analytics & Telemetry
+## Built-in Checks
 
-The engine generates a comprehensive **Prediction Report** at the end of every run:
+We put a few guardrails in place to make sure the output isn't garbage:
 
-*   **Market Sentiment Series:** Time-series data of user trust and frustration (NPS/Churn).
-*   **Decision Journals:** A chronological log of every cognitive threshold crossed by the simulated market.
-*   **Tension Ledger:** An audit trail of why the CTO voted "High Risk."
-*   **PRD Output:** Found in the `tsc_results/` directory or your specified output path.
+| Check | What it does |
+| :--- | :--- |
+| **Market Fit Gate** | Makes sure the AI personas actually match the real user data we fed into Layer 1. |
+| **Red Team Gate** | Tries to actively break the simulation or find fatal security flaws (like privacy leaks) before the executives even see it. |
+| **Logic Validator** | Makes sure the final PRD actually fixes the problems the boardroom complained about. |
+
+---
+
+## What You Get Out Of It
+
+At the end of every run, you get a full Prediction Report:
+*   **Market Sentiment:** Charts showing how user trust and frustration changed over time.
+*   **Decision Journals:** A timeline of exactly when and why the market turned on your feature.
+*   **Tension Ledger:** A paper trail explaining exactly why an executive voted to kill the project.
 
 ---
 
-## 🛠️ Advanced Troubleshooting
+## Troubleshooting
 
-*   **macOS Deadlock:** The system includes a "Darwin Immunity" layer to prevent gRPC/PyTorch deadlocks common on Apple Silicon. Ensure `nest_asyncio` is installed.
-*   **Hindsight Unreachable:** If Layer 6 fails, verify Hindsight is running with `./start_hindsight_local.sh status`.
-*   **Memory Issues:** Simulations with >50 agents require at least 16GB RAM. For 1000+ agents, use a cloud-hosted Hindsight cluster.
+*   **App crashing on Mac?** Apple Silicon sometimes deadlocks with PyTorch. We built a "Darwin Immunity" fix for this, just make sure you have `nest_asyncio` installed.
+*   **Engine failing at Layer 6?** The boardroom probably can't talk to the memory bank. Double check that Hindsight is running by typing `./start_hindsight_local.sh status`.
 
 ---
+
+## Join the Conversation
+Building software blindly is a massive waste of time. If you're interested in using AI agents to simulate the market and stress-test product ideas, we'd love to chat. Join the community to talk about autonomous boardrooms and the future of product development.
+
+## Shoutouts
+A huge thanks to the CAMEL-AI team. The social simulation layer of this engine relies heavily on their open-source [OASIS](https://github.com/camel-ai/oasis) framework. 
 
 <div align="center">
+  <br>
   <i>"The future belongs to those who can simulate it."</i>
   <br>
   <b>Built with ❤️ </b>
