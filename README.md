@@ -38,7 +38,8 @@ Want to see what this actually looks like? Here is a scenario we've already run:
 
 ### 1. The AI Fitness Platform
 Watch our simulated market tear apart the onboarding flow of a proposed AI Fitness app. The backlash forces the Autonomous Boardroom (CTO, CISO, CFO) into a cut-throat debate over edge processing, HIPAA compliance, and 60fps latency targets.
-*(Demo videos and interactive views coming soon...)*
+
+**[Watch the full Demo on Loom](https://www.loom.com/share/1c0707c9e91844b58caf85750202f3dc)**
 
 ---
 
