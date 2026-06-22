@@ -38,8 +38,8 @@ except ImportError:
     pass
 
 
-BANK_NAMES = ["world", "simulation", "discovery", "personas", "debate", "spec", "meta"]
-
+# Empty bank list since all simulation data is now routed to the unified oasis bank
+BANK_NAMES = []
 
 class HindsightSessionManager:
     """Unified Hindsight session for the entire pipeline run.
@@ -142,17 +142,6 @@ class HindsightSessionManager:
             content: Text content to store
             metadata: Optional metadata dict (e.g., {"type": "interview", "file": "data.txt"})
         """
-        # M5 fix: block "world" bank — document storage is now WorldRAGEngine's domain.
-        # Hindsight is ONLY for agent experience memory (boardroom personas, OASIS agents).
-        if bank == "world":
-            logger.error(
-                "DEPRECATED: session.retain('world', ...) is blocked. "
-                "The 'world' bank has been migrated to WorldRAGEngine (Qdrant). "
-                "Use WorldDataBank.retain() or WorldRAGEngine.ingest_run_data() instead. "
-                "Hindsight is reserved for agent experience memory only."
-            )
-            return  # Silently drop — do NOT store document data in Hindsight
-
         if not content or not content.strip():
             return
 
@@ -222,6 +211,88 @@ class HindsightSessionManager:
 
         # Embedded fallback: simple keyword matching
         return self._embedded_recall(bank, query)
+
+    def recall_sync(self, bank: str, query: str, max_tokens: int = 800) -> str:
+        """Synchronous version of recall. Retrieves semantically relevant content from a bank.
+
+        Args:
+            bank: Bank name to query
+            query: Natural language query
+            max_tokens: Max tokens in response
+
+        Returns:
+            Relevant context as a string
+        """
+        if bank not in BANK_NAMES:
+            return f"Unknown bank '{bank}'."
+
+        # Try Hindsight first
+        if self.is_connected:
+            try:
+                bank_id = self._bank_id(bank)
+                # Call natively synchronously, eliminating cross-thread event loop boundaries
+                result = self._hindsight.recall(
+                    bank_id=bank_id,
+                    query=query,
+                    budget="low",
+                    max_tokens=max_tokens,
+                )
+                if result:
+                    text = getattr(result, 'answer', getattr(result, 'text', str(result)))
+                    return str(text)[:max_tokens * 4]
+            except Exception as e:
+                logger.debug(f"Hindsight recall_sync failed for bank '{bank}': {e}")
+
+        # Embedded fallback: simple keyword matching
+        return self._embedded_recall(bank, query)
+
+    async def raw_recall(self, bank_id: str, query: str, max_tokens: int = 800) -> str:
+        """Query any Hindsight bank directly by raw bank_id (bypasses BANK_NAMES validation).
+
+        Use this for banks outside BANK_NAMES — e.g. boardroom-{agent_name} and oasis-{sim_id}.
+        Returns empty string if not connected or no result found.
+        Raises exception on Hindsight server errors (caller should catch).
+        """
+        if not self.is_connected or not self._hindsight:
+            return ""
+        result = await asyncio.to_thread(
+            self._hindsight.recall,
+            bank_id=bank_id,
+            query=query,
+            budget="low",
+            max_tokens=max_tokens,
+        )
+        if result:
+            return str(getattr(result, "answer", getattr(result, "text", str(result))))
+        return ""
+
+    def raw_recall_sync(self, bank_id: str, query: str, max_tokens: int = 800) -> str:
+        """Synchronous version of raw_recall.
+
+        Args:
+            bank_id: Raw exact bank ID
+            query: Query string
+            max_tokens: Limit
+
+        Returns:
+            Relevant context
+        """
+        if not self.is_connected:
+            return ""
+
+        try:
+            result = self._hindsight.recall(
+                bank_id=bank_id,
+                query=query,
+                budget="low",
+                max_tokens=max_tokens,
+            )
+            if result:
+                return str(getattr(result, "answer", getattr(result, "text", str(result))))
+        except Exception as e:
+            logger.debug(f"Hindsight raw_recall_sync failed for bank_id '{bank_id}': {e}")
+            
+        return ""
 
     async def reflect(self, bank: str, query: str) -> str:
         """Deep reflection over a bank's contents (slower, more thorough).
@@ -339,32 +410,14 @@ class HindsightSessionManager:
     @staticmethod
     def _bank_background(bank_name: str) -> str:
         backgrounds = {
-            # DEPRECATED (M5 migration): The 'world' bank is intentionally blocked.
-            # All document/RAG data now lives in WorldRAGEngine (Qdrant).
-            # retain("world", ...) raises ValueError. This string is kept for
-            # bank provisioning API compatibility only — it is never written to.
-            "world": "[DEPRECATED — WorldRAGEngine] Document storage was migrated to Qdrant (WorldRAGEngine) in M5. This bank is provisioned for API compatibility but all writes are blocked. Use WorldDataBank.ingest_document() for customer data ingestion.",
             "simulation": "OASIS social simulation data: agent interactions, behavioral patterns, product usage feedback from synthetic users.",
-            "discovery": "Feature discovery analysis: identified pain points, proposed features, customer evidence citations.",
-            "personas": "Generated user and stakeholder personas with psychological profiles, belief vectors, and predicted stances.",
-            "debate": "AG2 adversarial boardroom debate: stakeholder positions, votes, challenges, vetoes, and consensus formation.",
-            "spec": "Generated product specifications: PRD sections, UI proposals, data model changes, workflow modifications, development tasks.",
-            "meta": "Pipeline execution metadata: timing, token usage, provenance chains, run configuration.",
         }
         return backgrounds.get(bank_name, f"Data bank for {bank_name}")
 
     @staticmethod
     def _bank_retain_mission(bank_name: str) -> str:
         missions = {
-            # DEPRECATED (M5 migration): world bank writes are blocked — no NLU
-            # extraction should be configured here. See _bank_background above.
-            "world": "[DEPRECATED — blocked] Do not extract from this bank. All customer document ingestion routes through WorldRAGEngine (Qdrant hybrid search).",
             "simulation": "Extract user behavior patterns, feature adoption signals, rejection reasons, and social contagion dynamics from simulation logs.",
-            "discovery": "Extract feature proposals, supporting evidence, customer quotes, and prioritization rationale.",
-            "personas": "Extract persona traits, domain expertise, predicted behaviors, and belief systems.",
-            "debate": "Extract stakeholder positions, commitments, vetoes, challenges, concessions, and evolving consensus.",
-            "spec": "Extract development tasks, UI specifications, data model changes, and acceptance criteria.",
-            "meta": "Extract pipeline execution metrics, timing data, and configuration parameters.",
         }
         return missions.get(bank_name, f"Extract and organize data for {bank_name}")
 

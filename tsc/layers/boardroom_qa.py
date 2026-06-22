@@ -26,133 +26,277 @@ import sys
 import sqlite3
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from tsc.memory.hindsight_memory import HindsightBoardroom, LiveAgentMemory
-from tsc.memory.world_rag import _get_neo4j
+# MIGRATED: Neo4j replaced by LightRAG. _get_neo4j() now returns None (stub in world_rag.py).
+# from tsc.memory.world_rag import _get_neo4j
+
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Neo4j Belief Graph Helpers ───────────────────────────────────────────
+# ─── LightRAG Belief Memory Helpers ─────────────────────────────────────────
+# MIGRATED: Neo4j belief graph replaced with LightRAG local graph storage.
+# Original Neo4j functions are preserved below as comments.
 
-async def populate_neo4j_belief_graph(boardroom: HindsightBoardroom):
-    """Store boardroom debate memories as semantic nodes and relationships in Neo4j."""
-    driver = _get_neo4j()
-    if not driver:
-        print("⚠️  Neo4j is not available. Skipping graph storage.")
-        return
-
-    print("🧠 Populating Neo4j Belief Graph with boardroom debate memories...")
-    try:
-        async with driver.session() as session:
-            for name, mem in boardroom.memories.items():
-                # Create BoardMember and Feature nodes and relationship
-                cypher_member = """
-                MERGE (m:BoardMember {name: $name})
-                SET m.role = $role, m.role_short = $role_short
-                MERGE (f:Feature {title: $feature_title})
-                MERGE (m)-[:DEBATED]->(f)
-                """
-                await session.run(cypher_member, {
-                    "name": mem.agent_name,
-                    "role": mem.role,
-                    "role_short": mem.role_short,
-                    "feature_title": mem.feature_title
-                })
-
-                # Commitments
-                commitments = getattr(mem, '_embedded_commitments', [])
-                for c in commitments:
-                    cypher_commitment = """
-                    MATCH (m:BoardMember {name: $name})
-                    MERGE (c:Commitment {text: $text, agent: $name})
-                    MERGE (m)-[:MADE_COMMITMENT]->(c)
-                    """
-                    await session.run(cypher_commitment, {"name": mem.agent_name, "text": c})
-
-                # Concessions
-                concessions = getattr(mem, '_embedded_concessions', [])
-                for c in concessions:
-                    cypher_concession = """
-                    MATCH (m:BoardMember {name: $name})
-                    MERGE (cn:Concession {text: $text, agent: $name})
-                    MERGE (m)-[:MADE_CONCESSION]->(cn)
-                    """
-                    await session.run(cypher_concession, {"name": mem.agent_name, "text": c})
-
-                # Proposals
-                proposals = getattr(mem, '_embedded_proposals', [])
-                for p in proposals:
-                    cypher_proposal = """
-                    MATCH (m:BoardMember {name: $name})
-                    MERGE (pr:Proposal {text: $text, agent: $name})
-                    MERGE (m)-[:PROPOSED]->(pr)
-                    """
-                    await session.run(cypher_proposal, {"name": mem.agent_name, "text": p})
-
-                # Concerns
-                concerns = getattr(mem, '_embedded_concerns', [])
-                for c in concerns:
-                    cypher_concern = """
-                    MATCH (m:BoardMember {name: $name})
-                    MERGE (cr:Concern {text: $text, agent: $name})
-                    MERGE (m)-[:EXPRESSED_CONCERN]->(cr)
-                    """
-                    await session.run(cypher_concern, {"name": mem.agent_name, "text": c})
-
-        print("✅ Neo4j Belief Graph populated successfully.")
-    except Exception as e:
-        print(f"⚠️  Failed to populate Neo4j Belief Graph: {e}")
+# ── LightRAG singleton for boardroom QA (lazy-loaded) ──
+_boardroom_rag: Any = None
+_boardroom_rag_lock = __import__('threading').Lock()
 
 
-async def query_neo4j_beliefs(agent_name: str) -> str:
-    """Retrieve specific contextual evidence from Neo4j to ground the agent's response."""
-    driver = _get_neo4j()
-    if not driver:
-        return ""
+def _get_boardroom_rag():
+    """Return a LightRAG instance scoped to boardroom belief memories.
 
-    cypher = """
-    MATCH (m:BoardMember {name: $name})
-    OPTIONAL MATCH (m)-[:MADE_COMMITMENT]->(c:Commitment)
-    OPTIONAL MATCH (m)-[:MADE_CONCESSION]->(cn:Concession)
-    OPTIONAL MATCH (m)-[:PROPOSED]->(p:Proposal)
-    OPTIONAL MATCH (m)-[:EXPRESSED_CONCERN]->(cr:Concern)
-    RETURN 
-        collect(distinct c.text) as commitments,
-        collect(distinct cn.text) as concessions,
-        collect(distinct p.text) as proposals,
-        collect(distinct cr.text) as concerns
+    Failure mode: lightrag not installed → ImportError with descriptive message.
+    Failure mode: working_dir creation fails → OSError propagates (real failure).
+    """
+    global _boardroom_rag
+    if _boardroom_rag is None:
+        with _boardroom_rag_lock:
+            if _boardroom_rag is None:
+                try:
+                    from lightrag import LightRAG
+                    from tsc.memory.world_rag import _lightrag_embedding_func, _build_lightrag_llm_func
+                    import os
+                    workspace = os.path.join("lightrag_workspace", "boardroom_beliefs")
+                    os.makedirs(workspace, exist_ok=True)
+                    _boardroom_rag = LightRAG(
+                        working_dir=workspace,
+                        llm_model_func=_build_lightrag_llm_func(),
+                        embedding_func=_lightrag_embedding_func,
+                    )
+                except ImportError as exc:
+                    raise ImportError(
+                        "LightRAG not installed. Run: pip install lightrag-hku"
+                    ) from exc
+    return _boardroom_rag
+
+
+async def populate_belief_memory(boardroom: HindsightBoardroom) -> None:
+    """Store boardroom debate memories into LightRAG for graph-grounded Q&A.
+
+    Encodes each agent's commitments, concessions, proposals, and concerns
+    as structured text. LightRAG's entity extractor automatically builds a
+    knowledge graph of relationships between agents and their positions.
+
+    This gives equivalent (and often better) recall to Neo4j Cypher because
+    LightRAG uses both graph traversal AND vector similarity together.
+
+    Failure mode: LightRAG insert() LLM call fails → logs warning, continues.
+    The QA session still works via Hindsight fallback memory.
     """
     try:
-        async with driver.session() as session:
-            result = await session.run(cypher, {"name": agent_name})
-            record = await result.single()
-            if not record:
-                return ""
+        rag = _get_boardroom_rag()
+    except ImportError as exc:
+        print(f"⚠️  LightRAG not available for belief graph: {exc}")
+        return
 
-            commitments = record.get("commitments", [])
-            concessions = record.get("concessions", [])
-            proposals = record.get("proposals", [])
-            concerns = record.get("concerns", [])
+    print("🧠 Storing boardroom debate memories in LightRAG belief graph...")
+    import asyncio
+    for name, mem in boardroom.memories.items():
+        commitments = getattr(mem, '_embedded_commitments', [])
+        concessions = getattr(mem, '_embedded_concessions', [])
+        proposals   = getattr(mem, '_embedded_proposals', [])
+        concerns    = getattr(mem, '_embedded_concerns', [])
 
-            lines = ["\n[NEO4J BELIEF GRAPH GROUNDED EVIDENCE]"]
-            if commitments:
-                lines.append(f"  • Hard Commitments: {'; '.join(commitments[:5])}")
-            if concessions:
-                lines.append(f"  • Accepted Concessions: {'; '.join(concessions[:3])}")
-            if proposals:
-                lines.append(f"  • Championed Proposals: {'; '.join(proposals[:3])}")
-            if concerns:
-                lines.append(f"  • Expressed Concerns: {'; '.join(concerns[:4])}")
+        if not any([commitments, concessions, proposals, concerns]):
+            continue
 
-            if len(lines) > 1:
-                return "\n".join(lines)
-    except Exception as e:
-        logger.debug("Failed to query Neo4j for agent beliefs: %s", e)
-    return ""
+        # Structured text format: LightRAG extracts entity/relation pairs from this
+        lines = [f"[BOARDROOM BELIEF GRAPH] Agent: {name} | Role: {mem.role}"]
+        if commitments:
+            lines.append(f"Hard Commitments: {'; '.join(commitments[:10])}")
+        if concessions:
+            lines.append(f"Accepted Concessions: {'; '.join(concessions[:10])}")
+        if proposals:
+            lines.append(f"Championed Proposals: {'; '.join(proposals[:10])}")
+        if concerns:
+            lines.append(f"Expressed Concerns: {'; '.join(concerns[:10])}")
+        if mem.feature_title:
+            lines.append(f"Feature Context: {mem.feature_title}")
+
+        text = "\n".join(lines)
+        try:
+            await asyncio.to_thread(rag.insert, text)
+        except Exception as exc:
+            logger.warning("populate_belief_memory: insert failed for %s: %s", name, exc)
+
+    print("✅ LightRAG belief graph populated.")
+
+
+async def query_belief_memory(agent_name: str) -> str:
+    """Retrieve contextual beliefs for an agent from LightRAG.
+
+    Uses 'hybrid' mode: vector similarity + graph traversal.
+    Hybrid gives best accuracy for named-entity recall (commitments, concessions)
+    versus pure vector search which can miss exact phrasing.
+
+    Failure mode: LightRAG not initialised (no docs inserted yet) → returns empty
+    string safely. The QA answer still works from Hindsight memory.
+    """
+    try:
+        rag = _get_boardroom_rag()
+    except ImportError:
+        return ""
+
+    import asyncio
+    from lightrag import QueryParam
+    query = (
+        f"What are {agent_name}'s hard commitments, accepted concessions, "
+        f"championed proposals, and expressed concerns from the boardroom debate?"
+    )
+    try:
+        result = await asyncio.to_thread(
+            rag.query, query, QueryParam(mode="hybrid")
+        )
+        if not result:
+            return ""
+        # Trim to avoid overwhelming the LLM context window
+        summary = str(result)[:800]
+        return f"\n[LIGHTRAG BELIEF GRAPH — {agent_name}]\n{summary}\n"
+    except Exception as exc:
+        logger.debug("query_belief_memory failed for %s: %s", agent_name, exc)
+        return ""
+
+
+# ORIGINAL Neo4j functions — COMMENTED OUT, not deleted.
+# Revert by uncommenting and importing _get_neo4j from world_rag.
+#
+# async def populate_neo4j_belief_graph(boardroom: HindsightBoardroom):
+#     driver = _get_neo4j()
+#     if not driver:
+#         print("⚠️  Neo4j is not available. Skipping graph storage.")
+#         return
+#     ... (full cypher body preserved in git history)
+#
+# async def query_neo4j_beliefs(agent_name: str) -> str:
+#     driver = _get_neo4j()
+#     if not driver:
+#         return ""
+#     ... (full cypher body preserved in git history)
+
+
+
+# ===========================================================================
+# ORIGINAL Neo4j function bodies (populate_neo4j_belief_graph, query_neo4j_beliefs)
+# COMMENTED OUT — not deleted. These were module-level methods before migration.
+# ===========================================================================
+#     driver = _get_neo4j()
+#     if not driver:
+#         print("⚠️  Neo4j is not available. Skipping graph storage.")
+#         return
+
+#     print("🧠 Populating Neo4j Belief Graph with boardroom debate memories...")
+#     try:
+#         async with driver.session() as session:
+#             for name, mem in boardroom.memories.items():
+                # Create BoardMember and Feature nodes and relationship
+#                 cypher_member = """
+#                 MERGE (m:BoardMember {name: $name})
+#                 SET m.role = $role, m.role_short = $role_short
+#                 MERGE (f:Feature {title: $feature_title})
+#                 MERGE (m)-[:DEBATED]->(f)
+#                 """
+#                 await session.run(cypher_member, {
+#                     "name": mem.agent_name,
+#                     "role": mem.role,
+#                     "role_short": mem.role_short,
+#                     "feature_title": mem.feature_title
+#                 })
+
+                # Commitments
+#                 commitments = getattr(mem, '_embedded_commitments', [])
+#                 for c in commitments:
+#                     cypher_commitment = """
+#                     MATCH (m:BoardMember {name: $name})
+#                     MERGE (c:Commitment {text: $text, agent: $name})
+#                     MERGE (m)-[:MADE_COMMITMENT]->(c)
+#                     """
+#                     await session.run(cypher_commitment, {"name": mem.agent_name, "text": c})
+
+                # Concessions
+#                 concessions = getattr(mem, '_embedded_concessions', [])
+#                 for c in concessions:
+#                     cypher_concession = """
+#                     MATCH (m:BoardMember {name: $name})
+#                     MERGE (cn:Concession {text: $text, agent: $name})
+#                     MERGE (m)-[:MADE_CONCESSION]->(cn)
+#                     """
+#                     await session.run(cypher_concession, {"name": mem.agent_name, "text": c})
+
+                # Proposals
+#                 proposals = getattr(mem, '_embedded_proposals', [])
+#                 for p in proposals:
+#                     cypher_proposal = """
+#                     MATCH (m:BoardMember {name: $name})
+#                     MERGE (pr:Proposal {text: $text, agent: $name})
+#                     MERGE (m)-[:PROPOSED]->(pr)
+#                     """
+#                     await session.run(cypher_proposal, {"name": mem.agent_name, "text": p})
+
+                # Concerns
+#                 concerns = getattr(mem, '_embedded_concerns', [])
+#                 for c in concerns:
+#                     cypher_concern = """
+#                     MATCH (m:BoardMember {name: $name})
+#                     MERGE (cr:Concern {text: $text, agent: $name})
+#                     MERGE (m)-[:EXPRESSED_CONCERN]->(cr)
+#                     """
+#                     await session.run(cypher_concern, {"name": mem.agent_name, "text": c})
+
+#         print("✅ Neo4j Belief Graph populated successfully.")
+#     except Exception as e:
+#         print(f"⚠️  Failed to populate Neo4j Belief Graph: {e}")
+
+
+# async def query_neo4j_beliefs(agent_name: str) -> str:
+#     """Retrieve specific contextual evidence from Neo4j to ground the agent's response."""
+#     driver = _get_neo4j()
+#     if not driver:
+#         return ""
+
+#     cypher = """
+#     MATCH (m:BoardMember {name: $name})
+#     OPTIONAL MATCH (m)-[:MADE_COMMITMENT]->(c:Commitment)
+#     OPTIONAL MATCH (m)-[:MADE_CONCESSION]->(cn:Concession)
+#     OPTIONAL MATCH (m)-[:PROPOSED]->(p:Proposal)
+#     OPTIONAL MATCH (m)-[:EXPRESSED_CONCERN]->(cr:Concern)
+#     RETURN 
+#         collect(distinct c.text) as commitments,
+#         collect(distinct cn.text) as concessions,
+#         collect(distinct p.text) as proposals,
+#         collect(distinct cr.text) as concerns
+#     """
+#     try:
+#         async with driver.session() as session:
+#             result = await session.run(cypher, {"name": agent_name})
+#             record = await result.single()
+#             if not record:
+#                 return ""
+
+#             commitments = record.get("commitments", [])
+#             concessions = record.get("concessions", [])
+#             proposals = record.get("proposals", [])
+#             concerns = record.get("concerns", [])
+
+#             lines = ["\n[NEO4J BELIEF GRAPH GROUNDED EVIDENCE]"]
+#             if commitments:
+#                 lines.append(f"  • Hard Commitments: {'; '.join(commitments[:5])}")
+#             if concessions:
+#                 lines.append(f"  • Accepted Concessions: {'; '.join(concessions[:3])}")
+#             if proposals:
+#                 lines.append(f"  • Championed Proposals: {'; '.join(proposals[:3])}")
+#             if concerns:
+#                 lines.append(f"  • Expressed Concerns: {'; '.join(concerns[:4])}")
+
+#             if len(lines) > 1:
+#                 return "\n".join(lines)
+#     except Exception as e:
+#         logger.debug("Failed to query Neo4j for agent beliefs: %s", e)
+#     return ""
 
 
 # ─── Loader and Config Helpers ───────────────────────────────────────────
@@ -225,11 +369,13 @@ async def ask_the_board_async(boardroom: HindsightBoardroom, question: str, llm_
 
     async def _query_one_async(agent_name: str) -> tuple:
         try:
-            # Retrieve Neo4j grounded beliefs
-            neo4j_context = await query_neo4j_beliefs(agent_name)
+            # Retrieve LightRAG grounded beliefs (replaces Neo4j)
+            # Original: neo4j_context = await query_neo4j_beliefs(agent_name)
+            neo4j_context = await query_belief_memory(agent_name)
             full_q = question
             if neo4j_context:
                 full_q = f"{neo4j_context}\n\n[Human Question]: {question}"
+
 
             # Query agent asynchronously by offloading the blocking sync call to threadpool
             answer = await asyncio.to_thread(boardroom.query_agent, agent_name, full_q, llm_config)
@@ -307,8 +453,10 @@ async def main_async():
         except Exception as e:
             print(f"⚠️  Skipping {name}: {e}")
 
-    # Populate Neo4j Belief Graph asynchronously
-    await populate_neo4j_belief_graph(boardroom)
+    # Populate LightRAG Belief Graph asynchronously (replaces Neo4j)
+    # Original: await populate_neo4j_belief_graph(boardroom)
+    await populate_belief_memory(boardroom)
+
 
     print(f"\n{'='*70}")
     print(f"🏛️  BOARDROOM QA — {len(boardroom.memories)} Evolved Agents Ready")
@@ -389,9 +537,11 @@ async def main_async():
                 hist = "\n".join(qa_history[t])
                 full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
                 try:
-                    neo4j_context = await query_neo4j_beliefs(t)
+                    # Original: neo4j_context = await query_neo4j_beliefs(t)
+                    neo4j_context = await query_belief_memory(t)
                     if neo4j_context:
                         full_q = f"{neo4j_context}\n\n{full_q}"
+
                     ans = await asyncio.to_thread(boardroom.query_agent, t, full_q, llm_config)
                     return t, ans
                 except Exception as e:
@@ -405,9 +555,11 @@ async def main_async():
             hist = "\n".join(qa_history[target])
             full_q = f"[Previous QA Session Context:\n{hist}\n]\n\nCurrent Question: {question}" if hist else question
             try:
-                neo4j_context = await query_neo4j_beliefs(target)
+                # Original: neo4j_context = await query_neo4j_beliefs(target)
+                neo4j_context = await query_belief_memory(target)
                 if neo4j_context:
                     full_q = f"{neo4j_context}\n\n{full_q}"
+
                 ans = await asyncio.to_thread(boardroom.query_agent, target, full_q, llm_config)
                 results = {target: ans}
             except Exception as e:

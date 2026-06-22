@@ -92,52 +92,40 @@ async def bulk_ingest(directory: str) -> None:
         total_chunks, len(files) - failed, failed,
     )
 
-    # Rebuild LazyGraphRAG community index after bulk load
-    await build_lazy_graphrag_index(directory)
+    # MIGRATED: LightRAG builds its graph automatically during insert().
+    # No separate community index build step needed.
+    # Original: await build_lazy_graphrag_index(directory)
+
 
 
 # ---------------------------------------------------------------------------
 # LazyGraphRAG community index builder
+# MIGRATED: This function is now a no-op stub.
+# LightRAG builds its graph during insert(); no external index step needed.
+# Original subprocess call kept here as a comment for reference.
 # ---------------------------------------------------------------------------
 async def build_lazy_graphrag_index(input_dir: str) -> None:
     """
-    Build / rebuild the Microsoft LazyGraphRAG community index.
-    Uses Leiden partitioning (no LLM calls at index time — lazy mode).
-    Triggered automatically when documents are added.
-    """
-    index_dir = Path("graphrag_index")
-    index_dir.mkdir(parents=True, exist_ok=True)
+    STUB: LazyGraphRAG replaced by LightRAG.
+    LightRAG builds the knowledge graph automatically on every insert().
+    This function is kept as a no-op so any remaining callers do not crash.
 
-    logger.info("Building LazyGraphRAG community index (Leiden partitioning)...")
-    try:
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "graphrag.index",
-                "--root", str(index_dir),
-                "--method", "local",        # lazy mode — no upfront LLM summarization
-                "--input-dir", input_dir,
-                "--skip-validation",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,                    # 10 min max for 100s of docs
-        )
-        if result.returncode == 0:
-            logger.info("LazyGraphRAG index built successfully → %s", index_dir)
-        else:
-            logger.warning(
-                "LazyGraphRAG indexer returned non-zero (%d): %s",
-                result.returncode, result.stderr[:500],
-            )
-    except FileNotFoundError:
-        logger.warning(
-            "graphrag package not installed — skipping community index. "
-            "Install with: pip install graphrag"
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("LazyGraphRAG indexing timed out after 10 minutes")
-    except Exception as exc:
-        logger.error("LazyGraphRAG indexing failed: %s", exc)
+    ORIGINAL IMPLEMENTATION (commented, not deleted):
+    # Build / rebuild the Microsoft LazyGraphRAG community index.
+    # Uses Leiden partitioning (no LLM calls at index time — lazy mode).
+    # index_dir = Path("graphrag_index")
+    # index_dir.mkdir(parents=True, exist_ok=True)
+    # result = subprocess.run(
+    #     [sys.executable, "-m", "graphrag.index",
+    #      "--root", str(index_dir),
+    #      "--method", "local",
+    #      "--input-dir", input_dir,
+    #      "--skip-validation"],
+    #     capture_output=True, text=True, timeout=600,
+    # )
+    """
+    logger.debug("build_lazy_graphrag_index: no-op (LightRAG handles graph building).")
+
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +172,9 @@ class FileWatcher:
                     except Exception as exc:
                         logger.error("  ❌ %s — %s", f.name, exc)
 
-                # Rebuild LazyGraphRAG community index after any additions
-                await build_lazy_graphrag_index(str(self.dir))
+                # MIGRATED: LightRAG rebuilds graph automatically on insert().
+                # Original: await build_lazy_graphrag_index(str(self.dir))
+
             else:
                 logger.debug("No changes detected in %s", self.dir)
 
@@ -244,7 +233,10 @@ def main() -> None:
         watcher = FileWatcher(args.dir, poll_interval=args.interval)
         asyncio.run(watcher.start())
     elif args.command == "build-graph":
-        asyncio.run(build_lazy_graphrag_index(args.dir))
+        # MIGRATED: build-graph is now a no-op — LightRAG builds on insert().
+        # Original: asyncio.run(build_lazy_graphrag_index(args.dir))
+        logger.info("build-graph: LightRAG auto-builds graph on insert. No action needed.")
+
 
 
 if __name__ == "__main__":

@@ -228,30 +228,12 @@ class ContextualIngestor:
             if not full_text:
                 continue
 
-            # Store complete document text — NO truncation
             if hasattr(self._session, "ingest_document"):
                 await self._session.ingest_document(
                     document_text=full_text,
                     document_name=f"{doc_type}_input.txt",
                     doc_type=doc_type,
                     run_id="global"
-                )
-            else:
-                await self._session.retain("world", full_text, metadata={
-                    "type": "full_document",
-                    "document_type": doc_type,
-                    "word_count": len(full_text.split()),
-                })
-
-            # Store structured JSON if available (company context, proposals)
-            if norm.json_parsed:
-                await self._session.retain(
-                    "world",
-                    json.dumps(norm.json_parsed, indent=2),
-                    metadata={
-                        "type": "structured_data",
-                        "document_type": doc_type,
-                    },
                 )
 
         logger.info("✓ Retained %d raw documents in Hindsight", len(normalized))
@@ -280,20 +262,8 @@ class ContextualIngestor:
                 else str(chunk.topic_category)
             )
 
-            await self._session.retain("world", chunk.text, metadata={
-                "type": "enriched_chunk",
-                "chunk_id": chunk.chunk_id,
-                "source_type": chunk.source_type,
-                "sentiment": sent_label,
-                "urgency": chunk.urgency,
-                "topic": topic_val,
-                "entity_count": len(chunk.entities),
-                "metric_count": len(chunk.metrics),
-                "entities": [
-                    {"text": e.text, "type": e.type if isinstance(e.type, str) else e.type.value}
-                    for e in chunk.entities[:10]
-                ],
-            })
+            # Removed legacy Hindsight session.retain("world", ...) call
+            pass
 
         logger.info("✓ Retained %d enriched chunks in Hindsight", len(chunks))
 

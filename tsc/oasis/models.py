@@ -196,25 +196,14 @@ class OASISSimulationConfig(BaseModel):
     # Discovery/Interview config
     enable_interview_phase: bool = True
     interview_sample_size: int = 30
+    # interview_record=False: Hindsight handles memory — CAMEL feed stays clean
+    interview_record: bool = False
+    # Per-question wall-clock timeout (generous for free-tier latency)
+    interview_timeout_seconds: float = 180.0
+    # Virtual timestep used for Hindsight tagging — beyond any real timestep
+    interview_hindsight_timestep: int = 99
     interview_prompts: List[str] = [
-        # 1. Behavioral anchoring — forces specific, not abstract, recall
-        "Walk me through the LAST TIME you encountered the exact problem this feature is supposed to solve. "
-        "What did you actually do? What did it cost you in time, money, or reputation?",
-        # 2. Adoption ladder — extracts realistic commitment level with price threshold
-        "On a scale of 1-10, how likely are you to use this in your first week after launch? "
-        "What would need to be true for that number to be a 9 or 10? What would make it a 1?",
-        # 3. WTP — structured pricing probe extracting three numbers
-        "If this feature required an additional monthly charge, what price would make you say "
-        "'definitely yes', 'maybe', and 'definitely no'? Give me three specific numbers.",
-        # 4. Risk surfacing — open-ended objection probe
-        "What is the ONE thing about this feature that, if it went wrong, would make you actively "
-        "recommend against it to colleagues? How likely do you think that failure is?",
-        # 5. Competitive exit vector — identifies displacement risk
-        "If this feature ships as described and does not work for your workflow, what is your next move? "
-        "Which alternative would you look at first, and why that one specifically?",
-        # 6. Advocacy signal — NPS behavioral proxy (not a rating)
-        "Is there someone on your team you would forward this announcement to right now? "
-        "What would you say to them in your own words — not a summary, your actual message?",
+        "Please answer the following three questions concisely: 1) What did you actually do the last time you encountered the problem this feature solves, and what did it cost you? 2) If this required a monthly charge, what price makes it a 'definite yes', 'maybe', or 'definite no'? 3) What is the one thing about this feature that, if it went wrong, would make you actively recommend against it? Keep your answers brief and to the point."
     ]
 
 class MarketSentimentSeries(BaseModel):

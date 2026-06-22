@@ -18,6 +18,7 @@ class CommandListener:
         self.command_file = os.path.join(base_dir, "commands.json")
         self.is_paused = False
         self.should_stop = False
+        self.should_abort = False
         
         # Ensure base_dir exists
         os.makedirs(self.base_dir, exist_ok=True)
@@ -40,6 +41,8 @@ class CommandListener:
                 self.is_paused = False
             elif action == "stop":
                 self.should_stop = True
+            elif action == "abort":
+                self.should_abort = True
             elif action == "interview":
                 # Returns the interview details to be handled by the engine
                 interview_payload = {
@@ -48,6 +51,8 @@ class CommandListener:
                 }
                 # Clear command file *after* extracting data
                 os.remove(self.command_file)
+                # Auto-resume the simulation so it doesn't get stuck!
+                self.is_paused = False
                 return interview_payload
             elif action == "intervention":
                 intervention_payload = {
@@ -88,8 +93,23 @@ class CommandListener:
                 elif payload.get("action") == "intervention":
                     return payload
                 
-            if self.should_stop:
+            if self.should_stop or self.should_abort:
                 break
+
+    def get_latest_command(self) -> Optional[Dict[str, Any]]:
+        """Non-blocking poll for the latest command."""
+        if not os.path.exists(self.command_file):
+            return None
+        try:
+            with open(self.command_file, 'r', encoding='utf-8') as f:
+                cmd = json.load(f)
+            # Do NOT remove it here if it's a "stop" command, 
+            # let check_commands process it natively later if needed, 
+            # or we just process it manually.
+            os.remove(self.command_file)
+            return cmd
+        except Exception as e:
+            return None
 
 class LocalActionLogger:
     """

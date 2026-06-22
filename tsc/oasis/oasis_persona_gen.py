@@ -497,16 +497,29 @@ class OASISUserPersonaGenerator:
             len(all_profiles), len(segment_counts),
         )
 
-        # Step 6: Retain persona summaries in Hindsight
-        if self._session:
-            for p in all_profiles:
-                name = p.user_info_dict.get("name", f"Agent_{p.agent_id}")
-                profile_text = p.user_info_dict.get("profile", {}).get("user_profile", "")
-                await self._session.retain(
-                    "personas",
-                    f"OASIS USER: {name}\n{profile_text}",
-                    metadata={"type": "oasis_user_persona", "agent_id": str(p.agent_id)},
-                )
+        # Step 6: Retain persona summaries in Hindsight/WorldDataBank
+        # (Commented out so personas are not stored in LightRag)
+        # if self._session:
+        #     # Check if session supports batch ingestion (WorldDataBank does)
+        #     if hasattr(self._session, "retain_batch"):
+        #         contents = []
+        #         metadatas = []
+        #         for p in all_profiles:
+        #             name = p.user_info_dict.get("name", f"Agent_{p.agent_id}")
+        #             profile_text = p.user_info_dict.get("profile", {}).get("user_profile", "")
+        #             contents.append(f"OASIS USER: {name}\n{profile_text}")
+        #             metadatas.append({"type": "oasis_user_persona", "agent_id": str(p.agent_id)})
+        #         
+        #         await self._session.retain_batch("personas", contents, metadatas)
+        #     else:
+        #         for p in all_profiles:
+        #             name = p.user_info_dict.get("name", f"Agent_{p.agent_id}")
+        #             profile_text = p.user_info_dict.get("profile", {}).get("user_profile", "")
+        #             await self._session.retain(
+        #                 "personas",
+        #                 f"OASIS USER: {name}\n{profile_text}",
+        #                 metadata={"type": "oasis_user_persona", "agent_id": str(p.agent_id)},
+        #             )
 
         return all_profiles
 

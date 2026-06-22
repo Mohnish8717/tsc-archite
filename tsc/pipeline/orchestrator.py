@@ -33,6 +33,36 @@ from tsc.models.recommendation import FinalRecommendation
 
 logger = logging.getLogger(__name__)
 
+class DummyRel:
+    def __init__(self, name):
+        self.name = name
+
+class NXNodeAdapter:
+    def __init__(self, node_id, attrs):
+        self.id = str(node_id)
+        self.name = str(node_id)
+        self.full_name = str(node_id)
+        self.type = attrs.get("entity_type", "UNKNOWN")
+        self.attributes = attrs
+
+class NXEdgeAdapter:
+    def __init__(self, u, v, attrs):
+        self.id = f"{u}-{v}"
+        self.source_entity = str(u)
+        self.target_entity = str(v)
+        rel_name = attrs.get("relation_name", attrs.get("relationship_type", "RELATED_TO"))
+        self.relationship_type = DummyRel(rel_name)
+        self.description = attrs.get("description", "")
+        self.weight = attrs.get("weight", 1.0)
+
+class NXGraphAdapter:
+    def __init__(self, nx_graph):
+        self._nx = nx_graph
+        self.nodes = {str(n): NXNodeAdapter(n, attrs) for n, attrs in nx_graph.nodes(data=True)}
+        self.edges = [NXEdgeAdapter(u, v, attrs) for u, v, attrs in nx_graph.edges(data=True)]
+        
+    def get_entity(self, entity_id):
+        return self.nodes.get(str(entity_id))
 
 class TSCPipeline:
     """Orchestrates the autonomous product management pipeline."""
@@ -76,29 +106,22 @@ class TSCPipeline:
         context: Optional[str] = None,
         proposal: Optional[str] = None,
         num_simulations: Optional[int] = None,
-        sim_timesteps: int = 10,
+        sim_timesteps: int = 20,
         use_legacy_personas: bool = False,
         boardroom_only: bool = False,
+        existing_simulation_id: Optional[str] = None,
+        existing_run_id: Optional[str] = None,
+        fast_debate: bool = False,
     ) -> FinalRecommendation:
-        """Run the full Predictive Reality Engine pipeline.
-
-        Args:
-            interviews: Path to customer interviews file.
-            support: Path to support tickets file.
-            analytics: Path to analytics data file.
-            context: Path to company context JSON.
-            proposal: Path to feature proposal JSON.
-            num_simulations: Number of OASIS simulation agents.
-            use_legacy_personas: If True, uses the full Layer 3 LLM-driven
-                PersonaGenerator pipeline instead of BoardroomPersonaFactory.
-                Default is False (static boardroom personas).
-            boardroom_only: If True, bypasses OASIS simulation and Feature Discovery.
-
-        Returns:
-            FinalRecommendation with verdict, spec, and monitoring plan.
-        """
-        t0 = time.time()
-        session_id = f"run-{int(t0)}"
+        """Run the full Predictive Reality Engine pipeline."""
+        
+        if existing_run_id:
+            session_id = existing_run_id
+            logger.info(f"Reusing existing run ID: {session_id}")
+        else:
+            t0 = time.time()
+            session_id = f"run-{int(t0)}"
+            
         logger.info("=" * 60)
         logger.info("PREDICTIVE REALITY ENGINE PIPELINE — STARTING")
         logger.info("LLM: %s (%s)", self._llm.__class__.__name__, self._llm.model)
@@ -110,8 +133,11 @@ class TSCPipeline:
         try:
             await self._rag_engine.initialize(run_id=session_id)
             
-            # CRITICAL FIX: Clear the persistent Neo4j graph to prevent bleeding state between case studies
-            await self._rag_engine.clear_graph()
+            if not existing_run_id:
+                # CRITICAL FIX: Clear the persistent Neo4j graph to prevent bleeding state between case studies
+                await self._rag_engine.clear_graph()
+            else:
+                logger.info("Skipping graph clear to reuse existing RAG data.")
             
             _set_world_bank_engine(self._rag_engine)   # wire WorldDataBank façade
             logger.info("WorldRAGEngine ready (run_id=%s)", session_id)
@@ -159,7 +185,12 @@ class TSCPipeline:
                             if data.get("type") == "action_response" and data.get("action") == action:
                                 commands_file.unlink() # clear it after reading
                                 return data.get("data", {})
+                            elif data.get("action") == "abort":
+                                commands_file.unlink()
+                                raise asyncio.CancelledError("Pipeline aborted by user")
                         except Exception as e:
+                            if isinstance(e, asyncio.CancelledError):
+                                raise
                             logger.error(f"Error reading commands.json: {e}")
                     await asyncio.sleep(1)
 
@@ -172,71 +203,92 @@ class TSCPipeline:
         logger.info("Input: %d documents", len(documents))
 
         # Layer 1: Ingest (Extract customer data & initial context)
-        self._emit_progress(1, "Contextual Ingest", "running")
-        ingestor = ContextualIngestor(self._llm, session=world_bank)
-        bundle, feature, company = await ingestor.process(documents)
-
-        self._emit_progress(1, "Contextual Ingest", "done", {
-            "chunks": bundle.statistics.total_chunks,
-        })
+        if existing_run_id:
+            logger.info("BOARDROOM ONLY: Bypassing Layer 1 Contextual Ingest. Loading fast-path JSON context.")
+            from tsc.models.inputs import CompanyContext, FeatureProposal
+            from tsc.models.chunks import ProblemContextBundle, GlobalStatistics
+            
+            company = CompanyContext.model_validate_json(Path(context).read_text()) if context else CompanyContext(company_name="Mock", industry="Mock", product_lines=[])
+            feature = FeatureProposal.model_validate_json(Path(proposal).read_text()) if proposal else FeatureProposal(title="Mock", description="Mock")
+            bundle = ProblemContextBundle(statistics=GlobalStatistics(), chunks=[])
+            
+            self._emit_progress(1, "Contextual Ingest", "done", {"skipped": True})
+        else:
+            self._emit_progress(1, "Contextual Ingest", "running")
+            ingestor = ContextualIngestor(self._llm, session=world_bank)
+            bundle, feature, company = await ingestor.process(documents)
+            self._emit_progress(1, "Contextual Ingest", "done", {
+                "chunks": bundle.statistics.total_chunks,
+            })
 
         # ── Emit Layer 1 ingestion nodes (real file names) ─────────────────────
         ingestion_nodes = self._build_ingestion_nodes(documents)
         self._write_jsonl_event({"type": "ingestion_sync", "nodes": ingestion_nodes})
 
-        # ── Emit Live Knowledge Graph from Neo4j ──────────────────────────
+        # ── Emit Live Knowledge Graph from LightRAG (NetworkX) ───────────────
+        # MIGRATED: Neo4j Cypher replaced with LightRAG's local NetworkX graph file.
+        # Original Cypher query (kept as comment):
+        # cypher = "MATCH (n)-[r]->(m) RETURN n.name AS source, type(r) AS rel, m.name AS target ..."
+        # graph_results = await world_bank.query_graph(cypher, {})
         try:
-            # Query Neo4j for the global company knowledge graph
-            cypher = "MATCH (n)-[r]->(m) RETURN n.name AS source, type(r) AS rel, m.name AS target, labels(n) AS src_labels, labels(m) AS tgt_labels LIMIT 300"
-            graph_results = await world_bank.query_graph(cypher, {})
-            
-            kg_nodes = {}
-            kg_edges = []
-            
-            for res in graph_results:
-                rec = res.metadata
-                src_name = rec.get("source", "Unknown")
-                tgt_name = rec.get("target", "Unknown")
-                
-                src_label = rec.get("src_labels", ["Entity"])[0] if rec.get("src_labels") else "Entity"
-                tgt_label = rec.get("tgt_labels", ["Entity"])[0] if rec.get("tgt_labels") else "Entity"
-                
-                if src_name not in kg_nodes:
-                    kg_nodes[src_name] = {"id": src_name, "label": src_name, "entityType": src_label, "mentions": 1}
-                else:
-                    kg_nodes[src_name]["mentions"] += 1
-                    
-                if tgt_name not in kg_nodes:
-                    kg_nodes[tgt_name] = {"id": tgt_name, "label": tgt_name, "entityType": tgt_label, "mentions": 1}
-                else:
-                    kg_nodes[tgt_name]["mentions"] += 1
-                    
-                kg_edges.append({
-                    "source": src_name,
-                    "target": tgt_name,
-                    "relationshipType": rec.get("rel", "RELATED_TO"),
-                    "weight": 1
-                })
-                
-            self._write_jsonl_event({
-                "type": "knowledge_graph_sync",
-                "nodes": list(kg_nodes.values()),
-                "edges": kg_edges
-            })
-        except Exception as e:
-            logger.warning(f"Failed to fetch Neo4j graph for UI: {e}")
+            nx_graph = self._rag_engine.get_networkx_graph()
+            if nx_graph is not None:
+                kg_nodes = {}
+                kg_edges = []
 
+                for node_id, node_data in nx_graph.nodes(data=True):
+                    label = node_data.get("entity_type", node_data.get("label", "Entity"))
+                    kg_nodes[node_id] = {
+                        "id": str(node_id),
+                        "label": node_data.get("entity_name", str(node_id)),
+                        "entityType": str(label),
+                        "mentions": int(node_data.get("source_id", "1").count(",") + 1),
+                    }
+
+                for src, tgt, edge_data in nx_graph.edges(data=True):
+                    kg_edges.append({
+                        "source": str(src),
+                        "target": str(tgt),
+                        "relationshipType": edge_data.get("relation_name", "RELATED_TO"),
+                        "weight": 1,
+                    })
+
+                self._write_jsonl_event({
+                    "type": "knowledge_graph_sync",
+                    "nodes": list(kg_nodes.values()),
+                    "edges": kg_edges,
+                })
+            else:
+                # Graph not yet built (no docs ingested) — emit empty event so UI doesn't hang
+                self._write_jsonl_event({
+                    "type": "knowledge_graph_sync",
+                    "nodes": [],
+                    "edges": [],
+                })
+        except Exception as e:
+            logger.warning("Failed to read LightRAG NetworkX graph for UI: %s", e)
+
+        # Layer 2: Behavioral Simulation (OASIS)
+        behavioral_results = None
+        
         if boardroom_only:
-            logger.info("BOARDROOM ONLY: Skipping Layer 2 and Layer 3")
+            logger.info("BOARDROOM ONLY MODE: Bypassing OASIS simulation and Feature Discovery.")
+            if existing_simulation_id:
+                logger.info(f"Using existing simulation bank: {existing_simulation_id}")
+                # Strip the oasis- prefix if the user included it
+                raw_id = existing_simulation_id.replace("oasis-", "")
+                from tsc.oasis.models import MarketSentimentSeries
+                behavioral_results = MarketSentimentSeries(
+                    simulation_id=raw_id,
+                    feature_proposal_id="manual",
+                    overall_sentiment_score=0.0,
+                    total_events=0,
+                    agent_interactions={},
+                    emergent_behaviors=[],
+                    market_themes=[]
+                )
+            
             self._emit_progress(2, "Behavioral Analysis (OASIS)", "done", {"skipped": True})
-            
-            from tsc.oasis.models import MarketSentimentSeries
-            behavioral_results = MarketSentimentSeries(
-                simulation_id=session_id,
-                feature_proposal_id=getattr(feature, "title", "Skipped"),
-                consensus_verdict="SKIPPED"
-            )
-            
             self._emit_progress(3, "Feature Discovery", "done", {"skipped": True})
         else:
             # Layer 2: OASIS Behavioral Analysis (Social Simulation)
@@ -329,16 +381,34 @@ class TSCPipeline:
             #   - AG2DebateEngine (world_bank=world_bank) can query_simulation() in Layer 5
             # The per-agent turn memory (HindsightOASISManager) remains internal to the
             # simulation engine — it reads HINDSIGHT_URL from env and is NOT affected here.
+            # Provide the Knowledge Graph for agent context grounding via adapter
+            kg_adapter = None
+            nx_graph = self._rag_engine.get_networkx_graph() if self._rag_engine else None
+            if nx_graph:
+                kg_adapter = NXGraphAdapter(nx_graph)
+
             behavioral_results = await RunOASISSimulation(
                 config=sim_config,
                 agent_profiles=profiles,
                 feature=feature if proposal else None,
                 context=company,
                 mode="behavioral",
-                session=world_bank,   # FIXED: was self._session (Hindsight) — caused Data Orphanage
+                session=self._session,   # REVERTED: Using HindsightSession as the sole source of truth
                 llm_client=self._llm,
                 interactive_cb=self._interactive_cb,
+                kg=kg_adapter,        # Ground users with the LightRAG context graph
+                base_dir=str(_LOG_BASE.resolve()), # UNIFIED: ensure engine writes to log/oasis_runs
             )
+            
+            if behavioral_results is None:
+                logger.error("Simulation was aborted. Halting entire pipeline.")
+                self._emit_progress(2, "Behavioral Analysis", "error", {"message": "Pipeline Aborted"})
+                return EvaluationResult(
+                    pipeline_status="aborted",
+                    feature=None,
+                    evaluation=None
+                )
+                
             self._emit_progress(2, "Behavioral Analysis", "done", {
                 "agents": len(profiles),
                 "interactions": len(behavioral_results.agent_interactions),
@@ -411,7 +481,8 @@ class TSCPipeline:
             simulation_results=behavioral_results,
             session=self._session,
             world_bank=world_bank,
-            pipeline_jsonl=self._pipeline_jsonl
+            pipeline_jsonl=self._pipeline_jsonl,
+            skip_research=fast_debate
         )
         self._emit_progress(5, "Stakeholder Debate", "done", {
             "verdict": consensus.overall_verdict,

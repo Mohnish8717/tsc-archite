@@ -34,10 +34,11 @@ Each timestep ≈ 1 simulated hour. Match to a realistic discussion timeline for
 </timestep_calibration>
 
 <interview_probe_rules>
-Every probe MUST:
+You MUST generate exactly 1 consolidated behavioural interview probe that asks the 3 most important questions concisely.
+It MUST:
 1. Be BEHAVIOURAL — anchored to a specific past or future action, not abstract opinion.
 2. Have a MEASURABLE extraction target (a number, a competitor name, a timeline, or a quote).
-3. The set MUST include: one WTP probe, one competitive-exit probe, and one adoption-ladder probe.
+3. Combine a WTP probe, a risk surfacing probe, and an adoption-ladder probe into a single string.
 </interview_probe_rules>
 
 <output_format>
@@ -49,7 +50,7 @@ Return JSON only — no prose:
   "agent_reasoning": "one sentence",
   "num_timesteps": 12,
   "timestep_reasoning": "one sentence",
-  "interview_prompts": ["probe 1", "probe 2", "probe 3", "probe 4", "probe 5"],
+  "interview_prompts": ["single consolidated probe"],
   "estimated_signal_quality": "low|medium|high",
   "known_limitations": ["limitation 1"]
 }
@@ -107,6 +108,6 @@ class SimulationConfigGenerator:
             f"Priorities: {priorities_str}\n"
             f"</company>\n\n"
             "Follow the decision framework in your system prompt to select platform, "
-            "agent count, timesteps, and generate 5 behavioural interview probes. "
+            "agent count, timesteps, and generate 1 consolidated behavioural interview probe. "
             "Include your reasoning and known limitations."
         )

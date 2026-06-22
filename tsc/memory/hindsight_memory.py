@@ -82,20 +82,20 @@ def _run_in_hindsight_loop(coro) -> Any:
 logger = logging.getLogger(__name__)
 
 # ─── Disposition Map: Persona → Hindsight Traits ─────────────────────────
-# skepticism: how much the agent doubts claims (0-100)
-# literalism: how strictly the agent interprets data (0-100)
-# empathy:    how much the agent weighs human/user impact (0-100)
+# skepticism: how much the agent doubts claims (1-5)
+# literalism: how strictly the agent interprets data (1-5)
+# empathy:    how much the agent weighs human/user impact (1-5)
 DISPOSITION_MAP = {
-    "CISO":   {"skepticism": 90, "literalism": 80, "empathy": 30},
-    "CFO":    {"skepticism": 70, "literalism": 90, "empathy": 20},
-    "CEO":    {"skepticism": 30, "literalism": 40, "empathy": 60},
-    "CTO":    {"skepticism": 50, "literalism": 70, "empathy": 40},
-    "Legal":  {"skepticism": 85, "literalism": 95, "empathy": 25},
-    "CPO":    {"skepticism": 40, "literalism": 30, "empathy": 85},
-    "CMO":    {"skepticism": 60, "literalism": 60, "empathy": 75},
-    "CDO":    {"skepticism": 55, "literalism": 80, "empathy": 35},
-    "Sales":  {"skepticism": 35, "literalism": 45, "empathy": 70},
-    "HR":     {"skepticism": 45, "literalism": 50, "empathy": 90},
+    "CISO":   {"skepticism": 5, "literalism": 4, "empathy": 2},
+    "CFO":    {"skepticism": 4, "literalism": 5, "empathy": 1},
+    "CEO":    {"skepticism": 2, "literalism": 2, "empathy": 3},
+    "CTO":    {"skepticism": 3, "literalism": 4, "empathy": 2},
+    "Legal":  {"skepticism": 4, "literalism": 5, "empathy": 1},
+    "CPO":    {"skepticism": 2, "literalism": 2, "empathy": 4},
+    "CMO":    {"skepticism": 3, "literalism": 3, "empathy": 4},
+    "CDO":    {"skepticism": 3, "literalism": 4, "empathy": 2},
+    "Sales":  {"skepticism": 2, "literalism": 2, "empathy": 4},
+    "HR":     {"skepticism": 2, "literalism": 3, "empathy": 5},
 }
 
 # ─── Runtime LLM Provider Resolution ─────────────────────────────────────
@@ -339,9 +339,9 @@ class HindsightBoardroom:
                             f"Domain expertise: {', '.join(getattr(persona, 'domain_expertise', []) or [])}. "
                             f"Currently debating: {feature_title}"
                         ),
-                        disposition_skepticism=disposition.get("skepticism", 50),
-                        disposition_literalism=disposition.get("literalism", 50),
-                        disposition_empathy=disposition.get("empathy", 50),
+                        disposition_skepticism=disposition.get("skepticism", 3),
+                        disposition_literalism=disposition.get("literalism", 3),
+                        disposition_empathy=disposition.get("empathy", 3),
                         retain_mission=(
                             "Extract commitments, concessions, proposals, concerns, "
                             "vetoes, challenges, and relationship signals from boardroom "
@@ -861,16 +861,16 @@ class HindsightOASISManager:
         self._budget = {
             "free":  {"recall_budget": "low", "reflect_budget": "low",
                       "recall_max_tokens": 300, "reflect_max_tokens": 200,
-                      "reflect_every_n": 3, "max_entity_tokens": 100},
+                      "reflect_every_n": 1, "max_entity_tokens": 100},
             "pro":   {"recall_budget": "low", "reflect_budget": "mid",
                       "recall_max_tokens": 500, "reflect_max_tokens": 400,
-                      "reflect_every_n": 2, "max_entity_tokens": 200},
+                      "reflect_every_n": 1, "max_entity_tokens": 200},
             "scale": {"recall_budget": "mid", "reflect_budget": "high",
                       "recall_max_tokens": 800, "reflect_max_tokens": 600,
                       "reflect_every_n": 1, "max_entity_tokens": 300},
         }.get(_tier, {"recall_budget": "low", "reflect_budget": "low",
                       "recall_max_tokens": 300, "reflect_max_tokens": 200,
-                      "reflect_every_n": 3, "max_entity_tokens": 100})
+                      "reflect_every_n": 1, "max_entity_tokens": 100})
         logger.info(f"OASIS: Memory budget tier='{_tier}' → reflect_every={self._budget['reflect_every_n']}")
 
     async def check_connection(self) -> bool:

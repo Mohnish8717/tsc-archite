@@ -552,7 +552,8 @@ async def RunOASISSimulation(
             user_info=user_info,
             channel=channel,
             model=model,
-            available_actions=USEFUL_ACTIONS
+            available_actions=USEFUL_ACTIONS,
+            interview_record=False,  # Hindsight handles interview memory — CAMEL feed stays clean
         )
         logger.info(f"Agent {agent.agent_id} initialized with Hindsight-backed Memory architecture.")
         social_agents.append(agent)
@@ -1217,47 +1218,175 @@ MUST NOT:
     )
 
     # =====================================================================
-    # HELPER: Interview an agent with timeout
+    # HELPER: Native OASIS Interview  (replaces legacy _interview)
+    #
+    # Uses agent.perform_interview() — the official CAMEL-AI OASIS path:
+    #   • Strips "# RESPONSE FORMAT" from system prompt → saves ~200 tokens
+    #   • Calls _aget_model_response() DIRECTLY → zero tool-call overhead
+    #   • platform.interview() writes Q+A to OASIS sqlite trace table
+    #   • interview_record=False → CAMEL memory untouched, Hindsight handles it
+    #
+    # Rate-limit safety: _sem + _limiter guards preserved unchanged.
+    # Deadlock safety:   platform_task alive during Phase 2 (cancelled in finally).
     # =====================================================================
-    async def _interview(agent: SocialAgent, question: str) -> Dict[str, Any]:
+    async def _native_interview(
+        agent: SocialAgent,
+        question: str,
+        hindsight_ctx: str = "",
+        timeout: float = 180.0,
+    ) -> Dict[str, Any]:
+        """
+        Single question → single LLM call via native OASIS perform_interview().
+        Prefixes question with Hindsight recall so agent answers from its
+        actual Phase 1 experience instead of a cold context window.
+        """
         try:
+            # Build context-enriched question (Hindsight recall as prefix)
+            if hindsight_ctx:
+                enriched_q = (
+                    "[YOUR SIMULATION EXPERIENCE — what you remember]\n"
+                    f"{hindsight_ctx.strip()}\n\n"
+                    "---\n"
+                    f"INTERVIEWER QUESTION: {question}"
+                )
+            else:
+                enriched_q = question
+
             async with _sem:
                 async with _limiter:
-                    msg = BaseMessage.make_user_message(
-                        role_name="INTERVIEWER", content=question
+                    result = await asyncio.wait_for(
+                        agent.perform_interview(enriched_q),
+                        timeout=timeout,
                     )
-                    response = await asyncio.wait_for(agent.astep(msg), timeout=3600.0)
-            
-            raw_content = response.msgs[0].content if response.msgs else ""
-            tool_val = None
-            if response and hasattr(response, 'info') and response.info:
-                tool_info = response.info.get('tool_calls', [])
-                for tc in (tool_info if isinstance(tool_info, list) else []):
-                    if hasattr(tc, 'args'):
-                        args = tc.args
-                    elif isinstance(tc, dict):
-                        args = tc.get('arguments', tc.get('args', {}))
-                    else:
-                        args = {}
-                    if isinstance(args, dict):
-                        tool_val = args.get('content') or args.get('quote_content') or args.get('text')
-                        if tool_val:
-                            break
-            
-            selected_content = tool_val if tool_val else raw_content
-            
-            import re
-            cleaned = re.sub(r'<thought>.*?</thought>', '', selected_content, flags=re.DOTALL)
-            cleaned = re.sub(r'<thinking>.*?</thinking>', '', cleaned, flags=re.DOTALL)
-            cleaned = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', cleaned)
-            final_content = cleaned.strip() or "No response"
+
+            content = result.get("content", "") or "No response"
+
+            # Strip model thinking/reasoning tags (Gemini/Gemma emit these)
+            content = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL)
+            content = re.sub(r'(?i)^\s*(thought|thinking|action):\s*', '', content)
+            content = content.strip() or "No response"
 
             return {
-                "content": final_content,
-                "timestamp": datetime.now().isoformat(),
+                "content":      content,
+                "interview_id": result.get("interview_id"),  # from OASIS DB trace
+                "success":      result.get("success", False),
+                "timestamp":    datetime.now().isoformat(),
             }
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[interview] Agent {agent.social_agent_id} timed out "
+                f"({timeout}s) on: {question[:60]}..."
+            )
+            return {
+                "content":      "No response (timeout)",
+                "interview_id": None,
+                "success":      False,
+                "timestamp":    datetime.now().isoformat(),
+            }
+        except Exception as exc:
+            logger.warning(f"[interview] Agent {agent.social_agent_id} error: {exc}")
+            return {
+                "content":      f"Error: {exc}",
+                "interview_id": None,
+                "success":      False,
+                "timestamp":    datetime.now().isoformat(),
+            }
+
+    # =====================================================================
+    # HELPER: Full Hindsight-integrated interview loop for one agent
+    #
+    # Implements the complete Act→Retain→Reflect memory loop for Phase 2:
+    #   ① recall_for_turn()       → agent's evolved Phase 1 beliefs (~300 tokens)
+    #   ② agent.memory.clear()    → drop ~5k token CAMEL social feed
+    #   ③ _native_interview()     → direct LLM call with enriched question
+    #   ④ structured_retain()     → Q+A stored in Hindsight (tag: interview, ts=99)
+    #   ⑤ agent.memory.restore()  → social history intact for future use
+    # =====================================================================
+    async def _interview_agent_with_hindsight(
+        agent: SocialAgent,
+        aid: str,
+        questions: List[str],
+        hindsight_timestep: int = 99,
+    ) -> str:
+        """
+        Interviews one agent across all questions with full memory isolation
+        and Hindsight integration. Returns the complete transcript string.
+        """
+        agent_id_str = str(aid)
+
+        # ── ② Snapshot CAMEL social-feed memory ─────────────────────────────
+        saved_records = []
+        try:
+            saved_records = agent.memory.retrieve()
         except Exception as e:
-            return {"content": f"Error: {e}", "timestamp": datetime.now().isoformat()}
+            logger.debug(f"  Memory snapshot failed for {aid}: {e}")
+
+        transcript = ""
+
+        try:
+            # ── ③ Clear CAMEL memory (token isolation) ──────────────────────
+            # Drops ~5k Phase 1 feed tokens. Hindsight recall (~300 tokens)
+            # is injected directly into the question instead — far more targeted.
+            agent.memory.clear()
+
+            # ── ④ Ask each question sequentially (no same-agent race condition) ─
+            for q in questions:
+                # ── ① Recall Hindsight context TARGETED for this specific question ─
+                hindsight_ctx = ""
+                if HINDSIGHT_AVAILABLE and memory_manager:
+                    try:
+                        hindsight_ctx = await memory_manager.recall_for_turn(agent_id_str, custom_query=q)
+                        if hindsight_ctx:
+                            logger.info(
+                                f"  🧠 Hindsight targeted recall for agent {aid}: "
+                                f"{len(hindsight_ctx)} chars of context"
+                            )
+                    except Exception as e:
+                        logger.warning(f"  ⚠️  Hindsight recall failed for agent {aid}: {e}")
+
+                resp = await _native_interview(
+                    agent=agent,
+                    question=q,
+                    hindsight_ctx=hindsight_ctx,
+                    timeout=getattr(config, 'interview_timeout_seconds', 180.0),
+                )
+                answer = resp["content"]
+                transcript += f"Q: {q}\nA: {answer}\n\n"
+
+                # ── ⑤ Retain interview Q+A into Hindsight memory bank ────────
+                # Tags: ["agent_{id}", "experience", "interview", "timestep_99"]
+                # This closes the Hindsight Act→Retain→Reflect loop for Phase 2.
+                if HINDSIGHT_AVAILABLE and memory_manager and resp["success"]:
+                    try:
+                        await memory_manager.structured_retain(
+                            agent_id=agent_id_str,
+                            agent_name=agent_id_to_name.get(aid, f"Agent_{aid}"),
+                            action_type="INTERVIEW",
+                            content=f"Q: {q}\nA: {answer}",
+                            timestep=hindsight_timestep,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"  ⚠️  Hindsight retain failed for agent {aid}: {e}"
+                        )
+
+        finally:
+            # ── ⑥ ALWAYS restore CAMEL social-feed memory ───────────────────
+            # Even if questions error out, we restore so the agent's
+            # Phase 1 history is not lost for any future pipeline use.
+            try:
+                agent.memory.clear()
+                if saved_records:
+                    agent.memory.write_records(saved_records)
+            except Exception as restore_err:
+                logger.warning(
+                    f"  ⚠️  Memory restore failed for agent {aid}: {restore_err}"
+                )
+
+        return transcript
+
 
     # =====================================================================
     # GAME MASTER RESOLVER — Behavioral Signal Classification
@@ -1706,18 +1835,24 @@ MUST NOT:
             return
 
         logger.info(f"🦅 EAGLE'S EYE: Interviewing Agent {target_id}")
-        for q in questions:
-            resp = await _interview(target_agent, q)
-            logger.info(f"   Q: {q}")
-            logger.info(f"   A: {resp['content']}")
-            local_logger.log_action(
-                agent_id=target_id,
-                agent_name=agent_id_to_name.get(str(target_id), "Unknown"),
-                action_type="INTERVIEW_RESPONSE",
-                content=f"Q: {q}\nA: {resp['content']}",
-                timestep=-1, # Indicates out-of-band
-                metadata={"type": "eagles_eye"}
-            )
+        
+        # _interview_agent_with_hindsight takes a list of questions and returns a combined transcript string
+        transcript = await _interview_agent_with_hindsight(
+            agent=target_agent,
+            aid=str(target_id),
+            questions=questions,
+            hindsight_timestep=-1 # -1 indicates mid-simulation out-of-band interview
+        )
+        
+        logger.info(f"   A: {transcript}")
+        local_logger.log_action(
+            agent_id=target_id,
+            agent_name=agent_id_to_name.get(str(target_id), "Unknown"),
+            action_type="INTERVIEW_RESPONSE",
+            content=transcript,
+            timestep=-1, # Indicates out-of-band
+            metadata={"type": "eagles_eye"}
+        )
 
     # =====================================================================
     # MAIN SIMULATION LOOP (PHASE 1)
@@ -1730,6 +1865,10 @@ MUST NOT:
         for t in range(config.num_timesteps):
             active_interventions = []
             cmd_payload = await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
+            if getattr(command_listener, 'should_abort', False):
+                logger.error("🛑 HARD ABORT command received. Terminating completely without saving state.")
+                return None
+            
             if cmd_payload and cmd_payload.get("action") == "intervention":
                 intervention_event = cmd_payload.get("event")
                 logger.warning(f"FORKING SIMULATION: Intervention injected: {intervention_event}")
@@ -1749,11 +1888,14 @@ MUST NOT:
                     a_name = agent_id_to_name.get(aid, "Unknown")
                     if HINDSIGHT_AVAILABLE and memory_manager:
                         # Forcefully push the override into memory
-                        memory_manager.extract_and_retain(
-                            sender_name=a_name,
+                        # Forcefully push the override into memory using correct signature
+                        asyncio.create_task(memory_manager.extract_and_retain(
+                            agent_id=str(aid),
+                            agent_name=a_name,
+                            action_type="OVERRIDE",
                             content=f"SYSTEM OVERRIDE / GLOBAL EVENT: {intervention_event}. You MUST adapt your reasoning to this new reality.",
-                            all_agent_names=list(agent_id_to_name.values())
-                        )
+                            timestep=t
+                        ))
                 
                 # Note: In a production Zep Cloud architecture, this is where we would call 
                 # zep_client.memory.copy_session(session_id, new_session_id) to truly fork the remote memory state.
@@ -2090,30 +2232,60 @@ MUST NOT:
                         # Step D: Proactively query the SQLite platform database for the clean post/comment content actually saved.
                         # This guarantees that we use the final, clean text registered in the simulation platform.
                         db_entity_id = None
-                        if action_type in ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST"]:
+                        if action_type in ["CREATE_COMMENT", "COMMENT", "CREATE_POST", "POST", "QUOTE_POST", "LIKE", "DISLIKE", "FOLLOW", "MUTE"]:
                             try:
                                 import sqlite3
-                                conn = sqlite3.connect(unique_db)
-                                cursor = conn.cursor()
-                                if "COMMENT" in action_type:
-                                    cursor.execute(
-                                        "SELECT content, comment_id FROM comment WHERE user_id = ? ORDER BY comment_id DESC LIMIT 1",
-                                        (int(agent_id),)
-                                    )
-                                    row = cursor.fetchone()
-                                    if row:
-                                        if row[0]: content = row[0]
-                                        if len(row) > 1: db_entity_id = str(row[1])
-                                elif "POST" in action_type or "REPOST" in action_type:
-                                    cursor.execute(
-                                        "SELECT content, post_id FROM post WHERE user_id = ? ORDER BY post_id DESC LIMIT 1",
-                                        (int(agent_id),)
-                                    )
-                                    row = cursor.fetchone()
-                                    if row:
-                                        if row[0]: content = row[0]
-                                        if len(row) > 1: db_entity_id = str(row[1])
-                                conn.close()
+                                conn = sqlite3.connect(unique_db, timeout=15.0)
+                                try:
+                                    cursor = conn.cursor()
+                                    if "COMMENT" in action_type:
+                                        cursor.execute(
+                                            "SELECT content, comment_id FROM comment WHERE user_id = ? ORDER BY comment_id DESC LIMIT 1",
+                                            (int(agent_id),)
+                                        )
+                                        row = cursor.fetchone()
+                                        if row:
+                                            if row[0]: content = row[0]
+                                            if len(row) > 1: db_entity_id = str(row[1])
+                                    elif "POST" in action_type or "REPOST" in action_type:
+                                        cursor.execute(
+                                            "SELECT content, post_id FROM post WHERE user_id = ? ORDER BY post_id DESC LIMIT 1",
+                                            (int(agent_id),)
+                                        )
+                                        row = cursor.fetchone()
+                                        if row:
+                                            if row[0]: content = row[0]
+                                            if len(row) > 1: db_entity_id = str(row[1])
+                                    elif action_type in ["LIKE", "DISLIKE"]:
+                                        table_name = action_type.lower()
+                                        id_col = f"{table_name}_id"
+                                        cursor.execute(
+                                            f"SELECT p.content FROM {table_name} l JOIN post p ON l.post_id = p.post_id WHERE l.user_id = ? ORDER BY l.{id_col} DESC LIMIT 1",
+                                            (int(agent_id),)
+                                        )
+                                        row = cursor.fetchone()
+                                        if row and row[0]:
+                                            action_prefix = "Liked" if action_type == "LIKE" else "Disliked"
+                                            content = f"[{action_prefix} post: \"{row[0][:150]}\"]"
+                                    elif action_type == "FOLLOW":
+                                        cursor.execute(
+                                            "SELECT u.name FROM follow f JOIN user u ON f.followee_id = u.user_id WHERE f.follower_id = ? ORDER BY f.follow_id DESC LIMIT 1",
+                                            (int(agent_id),)
+                                        )
+                                        row = cursor.fetchone()
+                                        if row and row[0]:
+                                            content = f"[Followed user: {row[0]}]"
+                                    elif action_type == "MUTE":
+                                        cursor.execute(
+                                            "SELECT u.name FROM mute m JOIN user u ON m.mutee_id = u.user_id WHERE m.muter_id = ? ORDER BY m.mute_id DESC LIMIT 1",
+                                            (int(agent_id),)
+                                        )
+                                        row = cursor.fetchone()
+                                        if row and row[0]:
+                                            content = f"[Muted user: {row[0]}]"
+                                finally:
+                                    conn.close()
+
 
                                 # Apply safety sanitization on database content just in case any thought tags were persisted
                                 cleaned_db = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL)
@@ -2215,11 +2387,11 @@ MUST NOT:
                                 action_meta["signal_type"] = sig.get("type", "neutral")
                                 action_meta["raw_intensity"] = sig.get("intensity", 0.0)
                                 
-                            await session.retain(
-                                "simulation", 
-                                f"[Timestep {t}] {agent_name} performed {action_type}: {content[:1000]}", 
-                                metadata=action_meta
-                            )
+                            # await session.retain(
+                            #     "simulation", 
+                            #     f"[Timestep {t}] {agent_name} performed {action_type}: {content[:1000]}", 
+                            #     metadata=action_meta
+                            # )
 
                         if agent_id not in series.agent_interactions:
                             series.agent_interactions[agent_id] = []
@@ -2356,17 +2528,42 @@ MUST NOT:
                 
             logger.info(f"Selected {len(sampled_ids)} agents for Focus Group.")
             
+            interview_prompts_list = getattr(config, 'interview_prompts', [])
+            # Virtual timestep 99: beyond any real simulation timestep — safe sentinel for Hindsight tagging
+            _INTERVIEW_TIMESTEP = getattr(config, 'interview_hindsight_timestep', 99)
+
             interview_transcripts = {}
-            for aid in sampled_ids:
-                # Fix #11: reuse the O(1) dict built at init
+            for idx, aid in enumerate(sampled_ids):
+                # IPC: Check for global STOP or Pause/Interview commands natively!
+                await command_listener.wait_if_paused(interview_callback=eagle_eye_interview_callback)
+                if getattr(command_listener, 'should_abort', False):
+                    logger.error("🛑 HARD ABORT command received mid-interview. Terminating completely.")
+                    return None
+
+                if command_listener.should_stop:
+                    logger.info("🛑 Stop command received. Terminating interview loop early!")
+                    break
+
                 agent = agent_id_to_agent.get(aid)
-                if not agent: continue
-                
-                transcript = ""
-                for q in getattr(config, 'interview_prompts', []):
-                    resp = await _interview(agent, q)
-                    transcript += f"Q: {q}\nA: {resp['content']}\n\n"
-                    
+                if not agent:
+                    continue
+
+                logger.info(
+                    f"[focus_group] Interviewing agent {aid} "
+                    f"({idx + 1}/{len(sampled_ids)}) ..."
+                )
+
+                transcript = await _interview_agent_with_hindsight(
+                    agent=agent,
+                    aid=str(aid),
+                    questions=interview_prompts_list,
+                    hindsight_timestep=_INTERVIEW_TIMESTEP,
+                )
+
+                if not transcript.strip():
+                    logger.warning(f"[focus_group] Agent {aid} produced empty transcript — skipping.")
+                    continue
+
                 interview_transcripts[aid] = transcript
                 local_logger.log_action(
                     agent_id=aid,
@@ -2374,8 +2571,72 @@ MUST NOT:
                     action_type="FOCUS_GROUP",
                     content=transcript,
                     timestep=config.num_timesteps,
-                    metadata={"type": "focus_group"}
+                    metadata={"type": "focus_group", "hindsight_backed": HINDSIGHT_AVAILABLE},
                 )
+
+            local_logger.update_progress(
+                timestep=config.num_timesteps,
+                total=config.num_timesteps,
+                status="GENERATING_REPORT"
+            )
+
+            # ── Post-Interview: Synthesize evolved beliefs from interview answers ──
+            # reflect() on each interviewed agent → stores [EVOLVED BELIEF after round 99]
+            # back into the Hindsight bank, making interview-derived beliefs queryable
+            # by downstream pipeline layers (debate, spec) via recall_for_turn().
+            if HINDSIGHT_AVAILABLE and memory_manager and interview_transcripts:
+                logger.info(
+                    f"🔄 Post-interview Hindsight reflection for "
+                    f"{len(interview_transcripts)} agents..."
+                )
+                try:
+                    await memory_manager.synthesize_post_timestep(timestep=_INTERVIEW_TIMESTEP)
+                    logger.info("✅ Post-interview reflection complete.")
+                except Exception as e:
+                    logger.warning(f"Post-interview reflection failed (non-fatal): {e}")
+
+            # ── Retain full transcripts into HindsightSession (pipeline memory) ──
+            # Makes interview data available to downstream layers:
+            #   session.recall("simulation", "What did users say about pricing?")
+            if interview_transcripts:
+                try:
+                    for aid, transcript in interview_transcripts.items():
+                        agent_name = agent_id_to_name.get(aid, f"Agent_{aid}")
+                        
+                        # Fix: Store Focus Group Interviews into the exact same Hindsight bank
+                        # that the agents are using, ensuring a single unified forensic record.
+                        if memory_manager and memory_manager._hindsight:
+                            try:
+                                await memory_manager._hindsight.aretain_batch(
+                                    bank_id=memory_manager._shared_bank_id,
+                                    items=[{
+                                        "content": f"[FOCUS_GROUP_INTERVIEW] Agent {agent_name} (id={aid}):\n{transcript}",
+                                        "metadata": {
+                                            "type":       "focus_group_interview",
+                                            "agent_id":   str(aid),
+                                            "agent_name": agent_name,
+                                        },
+                                        "tags": ["simulation", "focus_group", "interview"],
+                                    }]
+                                )
+                                logger.info(f"🧠 Retained focus group transcript for {agent_name} into Hindsight unified bank: {memory_manager._shared_bank_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to retain interview transcript to Hindsight unified bank: {e}")
+                        
+                        # Fallback for older sessions or non-hindsight runs
+                        elif session:
+                            await session.retain(
+                                "simulation",
+                                f"[FOCUS_GROUP_INTERVIEW] Agent {agent_name} (id={aid}):\n{transcript}",
+                                metadata={
+                                    "type":       "focus_group_interview",
+                                    "agent_id":   str(aid),
+                                    "agent_name": agent_name,
+                                },
+                            )
+                            logger.info(f"🧠 Retained focus group transcript for {agent_name} into Hindsight pipeline session.")
+                except Exception as e:
+                    logger.warning(f"Failed to process interview transcripts: {e}")
 
             # Process extractions
             all_metrics = []
@@ -2570,32 +2831,123 @@ MUST NOT:
         if memory_manager:
             memory_manager.close()
 
-    # ── Post-Simulation: Retain results into Hindsight session ──────────────
-    if session:
+    # ── Post-Simulation: Retain results into LightRag session ──────────────
+    if False: # session:
         try:
             # 1. Retain interaction traces (internal thoughts)
+            logger.info(f"🧠 Found interaction traces for {len(series.agent_interactions)} agents to retain...")
             for agent_id, interactions in series.agent_interactions.items():
                 agent_name = agent_id_to_name.get(agent_id, "Unknown")
+                logger.info(f"    [Ingest] AGENT TRACE for {agent_name} ({len(interactions)} events)...")
                 await session.retain("simulation", "\n".join(interactions), metadata={
                     "type": "agent_trace", "agent_id": agent_id, "agent_name": agent_name, "mode": mode,
                 })
             
-            # 2. Extract and Retain Actual Social Platform Comments
+            # 2. Extract and Retain Actual Social Platform Interactions
             import sqlite3
             sqlite_db_path = os.path.join(base_dir, config.simulation_name, f"{config.simulation_name}.sqlite")
             if os.path.exists(sqlite_db_path):
-                conn = sqlite3.connect(sqlite_db_path)
+                conn = sqlite3.connect(sqlite_db_path, timeout=15.0)
                 cursor = conn.cursor()
                 try:
-                    cursor.execute("SELECT u.name, c.content, c.created_at FROM comment c JOIN user u ON c.user_id = u.user_id ORDER BY c.created_at DESC")
-                    comments = cursor.fetchall()
-                    for name, content, created_at in comments:
-                        if content:
-                            comment_text = f"User {name} commented on platform:\n\"{content}\""
-                            await session.retain("simulation", comment_text, metadata={"type": "user_comment", "author": name})
-                    logger.info(f"\U0001f9e0 Retained {len(comments)} actual social comments into Hindsight")
-                except sqlite3.OperationalError as e:
-                    logger.warning(f"Could not read comments from sqlite: {e}")
+                    # Extract posts
+                    try:
+                        cursor.execute("SELECT u.name, p.content, p.created_at FROM post p JOIN user u ON p.user_id = u.user_id ORDER BY p.created_at ASC")
+                        posts = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(posts)} posts to retain...")
+                        for name, content, created_at in posts:
+                            if content:
+                                logger.info(f"    [Ingest] POST by {name}: {content[:60]}...")
+                                await session.retain("simulation", f"User {name} created a post on platform:\n\"{content}\"", metadata={"type": "user_post", "author": name})
+                        logger.info(f"🧠 Finished retaining {len(posts)} actual social posts into Hindsight")
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read posts from sqlite: {e}")
+
+                    # Extract comments
+                    try:
+                        cursor.execute("SELECT u.name, c.content, c.created_at FROM comment c JOIN user u ON c.user_id = u.user_id ORDER BY c.created_at ASC")
+                        comments = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(comments)} comments to retain...")
+                        for name, content, created_at in comments:
+                            if content:
+                                logger.info(f"    [Ingest] COMMENT by {name}: {content[:60]}...")
+                                await session.retain("simulation", f"User {name} commented on platform:\n\"{content}\"", metadata={"type": "user_comment", "author": name})
+                        logger.info(f"🧠 Finished retaining {len(comments)} actual social comments into Hindsight")
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read comments from sqlite: {e}")
+
+                    # Extract likes
+                    try:
+                        cursor.execute("SELECT u.name, p.content FROM like l JOIN user u ON l.user_id = u.user_id JOIN post p ON l.post_id = p.post_id")
+                        likes = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(likes)} likes to retain...")
+                        for name, content in likes:
+                            if content:
+                                logger.info(f"    [Ingest] LIKE by {name} on post: {content[:60]}...")
+                                await session.retain("simulation", f"User {name} liked a post:\n\"{content}\"", metadata={"type": "user_like", "author": name})
+                        logger.info(f"🧠 Finished retaining {len(likes)} actual post likes into Hindsight")
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read likes from sqlite: {e}")
+
+                    # Extract group messages
+                    try:
+                        cursor.execute("SELECT u.name, g.name, m.content FROM group_messages m JOIN user u ON m.sender_id = u.agent_id JOIN chat_group g ON m.group_id = g.group_id")
+                        messages = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(messages)} group messages to retain...")
+                        for user_name, group_name, content in messages:
+                            if content:
+                                logger.info(f"    [Ingest] GROUP_MSG ({group_name}) by {user_name}: {content[:60]}...")
+                                await session.retain("simulation", f"User {user_name} said in group '{group_name}':\n\"{content}\"", metadata={"type": "group_message", "author": user_name, "group": group_name})
+                        logger.info(f"🧠 Finished retaining {len(messages)} group messages into Hindsight")
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read group messages from sqlite: {e}")
+
+                    # Extract follows
+                    try:
+                        cursor.execute("SELECT u1.name, u2.name FROM follow f JOIN user u1 ON f.follower_id = u1.user_id JOIN user u2 ON f.followee_id = u2.user_id")
+                        follows = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(follows)} follows to retain...")
+                        for follower, followee in follows:
+                            logger.info(f"    [Ingest] FOLLOW: {follower} followed {followee}...")
+                            await session.retain("simulation", f"User {follower} started following {followee}.", metadata={"type": "user_follow", "follower": follower, "followee": followee})
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read follows from sqlite: {e}")
+
+                    # Extract mutes
+                    try:
+                        cursor.execute("SELECT u1.name, u2.name FROM mute m JOIN user u1 ON m.muter_id = u1.user_id JOIN user u2 ON m.mutee_id = u2.user_id")
+                        mutes = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(mutes)} mutes to retain...")
+                        for muter, mutee in mutes:
+                            logger.info(f"    [Ingest] MUTE: {muter} muted {mutee}...")
+                            await session.retain("simulation", f"User {muter} muted {mutee}.", metadata={"type": "user_mute", "muter": muter, "mutee": mutee})
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read mutes from sqlite: {e}")
+
+                    # Extract dislikes
+                    try:
+                        cursor.execute("SELECT u.name, p.content FROM dislike d JOIN user u ON d.user_id = u.user_id JOIN post p ON d.post_id = p.post_id")
+                        dislikes = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(dislikes)} dislikes to retain...")
+                        for name, content in dislikes:
+                            logger.info(f"    [Ingest] DISLIKE by {name} on post: {content[:60]}...")
+                            await session.retain("simulation", f"User {name} disliked a post:\n\"{content}\"", metadata={"type": "user_dislike", "author": name})
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read dislikes from sqlite: {e}")
+
+                    # Extract reports
+                    try:
+                        cursor.execute("SELECT u.name, p.content, r.report_reason FROM report r JOIN user u ON r.user_id = u.user_id JOIN post p ON r.post_id = p.post_id")
+                        reports = cursor.fetchall()
+                        logger.info(f"🧠 Found {len(reports)} reports to retain...")
+                        for name, content, reason in reports:
+                            logger.info(f"    [Ingest] REPORT by {name} on post: {content[:60]}...")
+                            await session.retain("simulation", f"User {name} reported a post for '{reason}':\n\"{content}\"", metadata={"type": "user_report", "author": name, "reason": reason})
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read reports from sqlite: {e}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error during sqlite interaction extraction: {e}")
                 finally:
                     conn.close()
 
@@ -2606,7 +2958,21 @@ MUST NOT:
                 f"Risk Distribution: {json.dumps(report.risk_distribution)}\n"
                 f"Top Risk Factors: {json.dumps(report.top_risk_factors)}\n"
             )
-            await session.retain("simulation", report_summary, metadata={"type": "prediction_report_summary", "feature": feature_title})
+            if memory_manager and memory_manager._hindsight:
+                try:
+                    await memory_manager._hindsight.aretain_batch(
+                        bank_id=memory_manager._shared_bank_id,
+                        items=[{
+                            "content": report_summary,
+                            "metadata": {"type": "prediction_report_summary", "feature": feature_title},
+                            "tags": ["simulation", "report_summary"]
+                        }]
+                    )
+                    logger.info(f"🧠 Retained prediction report summary into Hindsight unified bank: {memory_manager._shared_bank_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to retain report summary to unified bank: {e}")
+            elif session:
+                await session.retain("simulation", report_summary, metadata={"type": "prediction_report_summary", "feature": feature_title})
             
             logger.info(f"\U0001f9e0 Retained complete simulation traces and metrics into Hindsight")
         except Exception as e:

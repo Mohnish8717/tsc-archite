@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
-import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText, Square } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Layers, Activity, Users, Terminal, MessageSquare, Home, FileText, Square, Brain } from 'lucide-react';
 import OASIS3D from './components/layers/OASIS3D';
 import BoardroomDebate from './components/layers/BoardroomDebate';
 import IngestorGraph from './components/layers/IngestorGraph';
 import AssemblyMatrix from './components/layers/AssemblyMatrix';
 import HandoffTerminal from './components/layers/HandoffTerminal';
 import SeedReviewPage from './components/layers/SeedReviewPage';
+import MemoryQueryPage from './components/layers/MemoryQueryPage';
 import LandingPage from './components/LandingPage';
 import InputSetupPage from './components/InputSetupPage';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -13,10 +14,20 @@ import { usePipelineStore } from './store/usePipelineStore';
 
 function App() {
   const ws = useWebSocket();
+  const evalWsRef = useRef<WebSocket | null>(null);
   const { isConnected, simulationStatus, simulationTitle, simulationProgress, pendingAction, sessionId, simulationReport, isBootstrapped, stopSimulation } = usePipelineStore();
   const [activeLayer, setActiveLayer] = useState(0.5); // 0.5 = Input Setup Page
   const [statusWidth, setStatusWidth] = useState(450);
   const [hasAutoSwitched, setHasAutoSwitched] = useState(false);
+
+  // Clean up evaluation WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      if (evalWsRef.current) {
+        evalWsRef.current.close();
+      }
+    };
+  }, []);
 
   // Auto-switch to Seeds tab when review is needed
   useEffect(() => {
@@ -50,6 +61,7 @@ function App() {
     { id: 5, name: 'OASIS Sim', icon: Activity },
     { id: 6, name: 'Boardroom', icon: MessageSquare },
     { id: 8, name: 'Handoff', icon: Terminal },
+    { id: 9, name: 'Memory', icon: Brain },
   ];
 
   // Landing page gets its own full-screen layout (no dashboard chrome)
@@ -86,16 +98,53 @@ function App() {
   }
 
   // InputSetupPage handles the /api/upload call and passes back server-side file paths.
-  // We just need to switch to layer 1 and forward those paths to the backend via WebSocket.
+  // We switch to Layer 1 (Ingestion) and trigger the backend simulation via FastAPI's ws/evaluate endpoint.
   const handleStartSimulation = async (filePaths: Record<string, string>, boardroomOnly: boolean = false) => {
     // Switch to Ingestion layer immediately
     setActiveLayer(1);
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'config', files: filePaths, boardroom_only: boardroomOnly }));
-    } else {
-      console.warn("WebSocket not open, backend will not start. Dev fallback active.");
+    // Close any previous evaluation socket connection
+    if (evalWsRef.current) {
+      try {
+        evalWsRef.current.close();
+      } catch (e) {}
     }
+
+    const host = window.location.host;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const evalUrl = `${protocol}//${host}/ws/evaluate`;
+
+    console.log(`[FastAPI WS] Connecting to ${evalUrl}...`);
+    const socket = new WebSocket(evalUrl);
+    evalWsRef.current = socket;
+
+    socket.onopen = () => {
+      console.log("[FastAPI WS] Connected! Sending configuration...");
+      socket.send(JSON.stringify({
+        files: filePaths,
+        boardroom_only: boardroomOnly
+      }));
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log("[FastAPI WS] Received event:", data);
+      } catch (e) {
+        console.error("[FastAPI WS] Failed to parse message:", e);
+      }
+    };
+
+    socket.onerror = (err) => {
+      console.error("[FastAPI WS] Error occurred:", err);
+    };
+
+    socket.onclose = (event) => {
+      console.log("[FastAPI WS] Connection closed:", event.code, event.reason);
+      if (evalWsRef.current === socket) {
+        evalWsRef.current = null;
+      }
+    };
   };
 
   // Signal the backend to stop the simulation gracefully.
@@ -103,7 +152,7 @@ function App() {
   // once the final metrics are fully aggregated.
   const handleStopSimulation = async () => {
     try {
-      await fetch('http://localhost:8000/api/simulation/stop', { method: 'POST' });
+      await fetch('/api/simulation/stop', { method: 'POST' });
     } catch (e) {
       console.warn('Stop request failed — backend may already be done:', e);
     }
@@ -232,8 +281,9 @@ function App() {
         {activeLayer === 5 && <OASIS3D />}
         {activeLayer === 6 && <BoardroomDebate />}
         {activeLayer === 8 && <HandoffTerminal />}
+        {activeLayer === 9 && <MemoryQueryPage />}
         {/* Fallback empty state when jumping via Preview */}
-        {![1, 3, 4, 5, 6, 8].includes(activeLayer) && activeLayer !== 0 && activeLayer !== 0.5 && (
+        {![1, 3, 4, 5, 6, 8, 9].includes(activeLayer) && activeLayer !== 0 && activeLayer !== 0.5 && (
           <div className="w-full h-full flex flex-col items-center justify-center gap-6">
             <div className="w-20 h-20 bg-brand border-4 border-black flex items-center justify-center animate-pulse shadow-neo-black">
               <Activity size={36} className="text-black" strokeWidth={3} />

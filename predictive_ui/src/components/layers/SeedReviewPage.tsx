@@ -40,7 +40,7 @@ export const SeedReviewPage = () => {
     if (!instruction.trim()) return;
     setIsRefining(true);
     try {
-      const res = await fetch('http://localhost:8000/api/simulation/refine_seeds', {
+      const res = await fetch('/api/simulation/refine_seeds', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -72,7 +72,7 @@ export const SeedReviewPage = () => {
     setIsSubmitting(true);
     try {
       const activeSessionId = sessionId || simulationConfig?.simulation_id || 'default';
-      const res = await fetch(`http://localhost:8000/api/simulation/${activeSessionId}/command`, {
+      const res = await fetch(`/api/simulation/${activeSessionId}/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

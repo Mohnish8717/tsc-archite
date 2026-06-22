@@ -1232,7 +1232,7 @@ export default function OASIS3D() {
             <button
               onClick={async () => {
                 try {
-                  await fetch('http://localhost:8000/api/simulation/stop', { method: 'POST' });
+                  await fetch('/api/simulation/stop', { method: 'POST' });
                 } catch (err) {
                   console.error("Failed to stop simulation:", err);
                 }

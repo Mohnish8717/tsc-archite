@@ -803,7 +803,7 @@ class AG2DebateEngine:
         def pin_conflict_to_blackboard(key: str, conflict_summary: str, memory_hash: str) -> str:
             """
             Shared Workspace Tool. Pin facts that contradict previous assertions.
-            MUST include the exact memory_hash from the research tool result (e.g., query_simulation or query_customer_data) to prevent Logical Orphanage.
+            MUST include the exact memory_hash from the research tool result (e.g., query_simulation or query_company_database) to prevent Logical Orphanage.
 
             Thread-safety ADR:
             - _fact_verifier_lock guards the lazy init (double-checked locking).
@@ -828,7 +828,7 @@ class AG2DebateEngine:
                         self._fact_verifier = autogen.AssistantAgent(
                             name='FactVerifierAgent',
                             system_message=(
-                                'You receive a CLAIM and a SOURCE_HASH. Use query_customer_data or '
+                                'You receive a CLAIM and a SOURCE_HASH. Use query_company_database or '
                                 'query_simulation with a DIFFERENT query to find a '
                                 'second independent source. '
                                 'Output: VERIFIED:[claim] or REFUTED:[reason] or INCONCLUSIVE:[reason]. '
@@ -850,7 +850,7 @@ class AG2DebateEngine:
                         else:
                             self._register_tools_to_agent(
                                 self._fact_verifier,
-                                {"query_customer_data": query_customer_data, "query_simulation": query_simulation}
+                                {"query_company_database": query_company_database, "query_simulation": query_simulation}
                             )
 
             # --- Serialised LLM call (one at a time to stay within rate budget) ---
@@ -904,8 +904,8 @@ class AG2DebateEngine:
         # v3.0: WorldDataBank-grounded evidence tools for debate agents
         _world_bank_ref = getattr(self, '_world_bank', None)
 
-        def query_customer_data(query: str) -> str:
-            """Query raw customer interviews and usage data from the WorldRAGEngine for evidence-based arguments. Use this to cite specific customer quotes and pain points."""
+        def query_company_database(query: str) -> str:
+            """Query the internal company database for general context, research, and evidence."""
             if _world_bank_ref:
                 try:
                     import asyncio
@@ -913,14 +913,14 @@ class AG2DebateEngine:
                     async def _run_query():
                         raw_res = await _world_bank_ref.recall("world", query)
                         if not raw_res:
-                            return "No customer data found for this query."
+                            return "No company data found for this query."
                         # Return raw retrieval — the calling agent LLM will synthesize.
                         # Removed inner self.llm.analyze() which caused a 60-120s stall.
                         if isinstance(raw_res, list):
                             raw_str = "\n\n---\n\n".join(str(r) for r in raw_res)
                         else:
                             raw_str = str(raw_res)
-                        return f"CUSTOMER DATA RESULT:\n{raw_str[:3000]}"
+                        return f"COMPANY DATABASE RESULT:\n{raw_str[:3000]}"
 
                     try:
                         loop = asyncio.get_running_loop()
@@ -943,10 +943,10 @@ class AG2DebateEngine:
 
                         t = threading.Thread(target=_run_in_thread, daemon=True)
                         t.start()
-                        t.join(timeout=30)  # 30s max — avoids infinite stall
+                        t.join(timeout=120)  # 120s max — avoids infinite stall, accommodates rate limits
                         if exc_holder[0]:
                             raise exc_holder[0]
-                        result = result_holder[0] or "Customer data query timed out."
+                        result = result_holder[0] or "Company database query timed out."
                     else:
                         result = asyncio.run(_run_query())
                     return result
@@ -996,7 +996,7 @@ class AG2DebateEngine:
 
                         t = threading.Thread(target=_run_in_thread, daemon=True)
                         t.start()
-                        t.join(timeout=30)  # 30s max — avoids infinite stall
+                        t.join(timeout=120)  # 120s max — avoids infinite stall, accommodates rate limits
                         if exc_holder[0]:
                             raise exc_holder[0]
                         result = result_holder[0] or "Simulation query timed out."
@@ -1037,7 +1037,7 @@ class AG2DebateEngine:
         tools["executive_veto"] = executive_veto
         tools["request_to_defer"] = request_to_defer
         tools["force_vote"] = force_vote
-        tools["query_customer_data"] = query_customer_data
+        tools["query_company_database"] = query_company_database
         tools["query_simulation"] = query_simulation
         tools["web_search"] = web_search
         return tools
@@ -1088,6 +1088,7 @@ class AG2DebateEngine:
         session: Any = None,  # HindsightSessionManager for cross-layer data access
         world_bank: Any = None,  # WorldDataBank facade for pipeline evidence retrieval
         pipeline_jsonl: Any = None,
+        skip_research: bool = False,
     ) -> ConsensusResult:
         """Run the comprehensive high-reasoning debate."""
         logger.info(f"AG2 Layer 6: Starting debate with {len(personas)} stakeholders.")
@@ -1354,7 +1355,7 @@ class AG2DebateEngine:
                 f"CROSS-EXAMINATION RULE: When another executive makes a factual claim, you MUST ask 'Based on what data?' "
                 f"if they did not cite a source. Accepting unvalidated claims is a failure of your fiduciary duty.\n"
                 f"GROUNDING RULE: Before making any factual assertion about users, markets, or performance, call "
-                f"`query_simulation` or `query_customer_data` first. You have NO internal knowledge of these.\n"
+                f"`query_simulation` or `query_company_database` first. You have NO internal knowledge of these.\n"
                 f"ASSUMPTION TAGGING: If you cannot ground a claim, you MUST prefix it with [ASSUMPTION] and state "
                 f"the specific validation step needed. Example: '[ASSUMPTION — needs pilot data] I estimate 60% deterministic.'\n"
                 f"</evidence_rules>\n\n"
@@ -1422,7 +1423,7 @@ class AG2DebateEngine:
                 f"VOTING: You MUST formalize your conclusion by calling `submit_tension_vector` with your vote.\n"
                 f"  - If your confidence stays below 0.7 after 3 rounds of debate, set `is_high_risk: true`.\n"
                 f"  - If 3 consecutive tool searches fail, set `is_low_information: true` and vote on first-principles.\n"
-                f"TOOLS: You have `query_simulation`, `query_customer_data`" +
+                f"TOOLS: You have `query_simulation`, `query_company_database`" +
                 (", `calculate_financials`, `run_pre_mortem_simulation`, and `run_multi_agent_discovery`" if getattr(self, "enable_mock_tools", False) else "") +
                 ". Use them proactively — do not wait for permission.\n"
                 f"TREE OF THOUGHTS: Before finalizing your stance, internally evaluate 3 alternative consequences.\n"
@@ -2516,6 +2517,24 @@ class AG2DebateEngine:
             agent_expertise = ", ".join(persona.domain_expertise) if isinstance(persona.domain_expertise, list) else str(persona.domain_expertise)
 
             # Step 1: Query Translation & Expansion (Autonomous)
+            if skip_research:
+                logger.info(f"Fast Debate Mode: Skipping RAG pre-fetch for {agent_name}")
+                
+                # Mock a pre-meeting brief to skip straight to the debate
+                brief_content = (
+                    f"<pre_meeting_brief>\n"
+                    f"You are {agent_name}. The board will debate this feature in 10 minutes.\n"
+                    f"FEATURE: {feature.title}\n"
+                    f"BRIEF: RAG research bypassed to avoid API rate limits.\n\n"
+                    f"You have autonomously queried the company databases and retrieved the following evidence:\n"
+                    f"No specific database matching facts found. Fallback to general industry knowledge and domain expertise.\n"
+                    f"</pre_meeting_brief>"
+                )
+                
+                # Skip the entire Step 1, 2, and 3 LLM calls
+                initial_stances[agent_name] = brief_content
+                continue
+
             translation_system_prompt = (
                 "You are a precise Query Translation & Schema Translation Agent for an enterprise multi-agent boardroom system.\n"
                 "Your job is to translate a generic business inquiry ('what are the risks, metrics, and dependencies of this feature?') into highly targeted, domain-specific search parameters for the underlying database stores based on the agent's role and the feature.\n\n"
@@ -2543,18 +2562,18 @@ class AG2DebateEngine:
                 f"Generate:\n"
                 f"1. 'domain_focus_areas': A list of 3-4 specific technical, financial, regulatory, UX, or operational risk areas relevant to this agent and feature.\n"
                 f"2. 'search_queries': A list of 2-3 specific keyword terms for vector search.\n"
-                f"3. 'cypher_query': A Cypher string to fetch risks or regulations related to this feature or role from Neo4j.\n\n"
+                f"3. 'graph_query': A Cypher string to fetch risks or regulations related to this feature or role from Neo4j.\n\n"
                 f"Schema:\n"
                 f"{{\n"
                 f"  \"domain_focus_areas\": [\"string\"],\n"
                 f"  \"search_queries\": [\"string\"],\n"
-                f"  \"cypher_query\": \"string\"\n"
+                f"  \"graph_query\": \"string\"\n"
                 f"}}"
             )
 
             domain_focus_areas = []
             search_queries = []
-            cypher_query = ""
+            graph_query = ""
 
             try:
                 translation_res = await self.llm.analyze(
@@ -2566,15 +2585,15 @@ class AG2DebateEngine:
                         "properties": {
                             "domain_focus_areas": {"type": "array", "items": {"type": "string"}},
                             "search_queries": {"type": "array", "items": {"type": "string"}},
-                            "cypher_query": {"type": "string"}
+                            "graph_query": {"type": "string"}
                         },
-                        "required": ["domain_focus_areas", "search_queries", "cypher_query"]
+                        "required": ["domain_focus_areas", "search_queries", "graph_query"]
                     }
                 )
                 domain_focus_areas = translation_res.get("domain_focus_areas", [])
                 search_queries = translation_res.get("search_queries", [])
-                cypher_query = translation_res.get("cypher_query", "")
-                logger.info(f"Query translation OK for {agent_name}. Focus: {domain_focus_areas}, queries: {search_queries}, Cypher: {cypher_query}")
+                graph_query = translation_res.get("graph_query", "")
+                logger.info(f"Query translation OK for {agent_name}. Focus: {domain_focus_areas}, queries: {search_queries}, Cypher: {graph_query}")
             except Exception as e:
                 logger.warning(f"Query translation failed for {agent_name}: {e}. Falling back.")
                 domain_focus_areas = [
@@ -2583,7 +2602,7 @@ class AG2DebateEngine:
                     "Strategic alignment and resource constraints"
                 ]
                 search_queries = [f"{feature.title} risks {agent_name}", f"{feature.title} {agent_role}"]
-                cypher_query = ""
+                graph_query = ""
 
             # Step 2: Multi-Store Ingest & Retrieval
             retrieved_facts = []
@@ -2596,14 +2615,16 @@ class AG2DebateEngine:
                     except Exception as e:
                         logger.warning(f"Vector search failed for term '{q_term}': {e}")
                 
-                if cypher_query:
+                if graph_query:
                     try:
-                        graph_res = await self._world_bank.query_graph(cypher_query)
+                        # Use unified LightRAG query which auto-routes to hybrid (vector + knowledge graph)
+                        graph_res = await self._world_bank.query(graph_query, run_id="global")
                         if graph_res:
-                            formatted_graph = "\n".join(f"  - {item}" for item in graph_res[:10])
-                            retrieved_facts.append(f"Graph query results:\n{formatted_graph}")
+                            # graph_res is a list of RAGResult objects, extract .text
+                            formatted_graph = "\n".join(f"  - {item.text}" for item in graph_res[:10])
+                            retrieved_facts.append(f"LightRAG Hybrid Knowledge Graph results:\n{formatted_graph}")
                     except Exception as e:
-                        logger.warning(f"Graph search failed for query '{cypher_query}': {e}")
+                        logger.warning(f"LightRAG search failed for query '{graph_query}': {e}")
 
             if retrieved_facts:
                 retrieved_evidence_str = "\n\n---\n\n".join(retrieved_facts)

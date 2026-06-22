@@ -97,7 +97,7 @@ class GeminiClient(LLMClient):
                     contents=contents,
                     config=config,
                 )
-                response = await asyncio.wait_for(leaky.call(coro), timeout=timeout)
+                response = await leaky.call(coro)
                 return response
             except asyncio.TimeoutError:
                 logger.warning(

@@ -97,7 +97,7 @@ When finishing, remember to append your **Completion Status Protocol** from the 
 - **Overall Survival Probability:** [Percentage]
 - **The Fatal Bottlenecks:** [Top 3-4 reasons for failure]
 - **Strategic Recommendations:** [Actionable steps to resolve the tensions, e.g., 'Kill the feature', 'Redesign without X']
-
+lik
 ### 4. Market Fit Matrix (Strict JSON)
 
 Return a JSON object matching this schema inside `<market_analysis>` tags. Do not wrap the JSON in markdown code blocks inside the tags.

@@ -333,15 +333,15 @@ class FeatureDiscoveryEngine:
             proposals.insert(0, enriched)
 
         # 8. Retain discoveries into Hindsight
-        if self._session:
-            for p in proposals:
-                await self._session.retain("discovery", 
-                    f"PROPOSED FEATURE: {p.title}\n"
-                    f"Description: {p.description}\n"
-                    f"Target Users: {p.target_users}\n"
-                    f"Priority: {p.priority or 'unranked'}",
-                    metadata={"type": "feature_proposal", "title": p.title}
-                )
+        # if self._session:
+        #     for p in proposals:
+        #         await self._session.retain("discovery", 
+        #             f"PROPOSED FEATURE: {p.title}\n"
+        #             f"Description: {p.description}\n"
+        #             f"Target Users: {p.target_users}\n"
+        #             f"Priority: {p.priority or 'unranked'}",
+        #             metadata={"type": "feature_proposal", "title": p.title}
+        #         )
 
         logger.info(
             "Layer 2 complete: %d feature(s) proposed (%.1fs)",
