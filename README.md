@@ -1,3 +1,13 @@
+---
+title: tsc-backend
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+app_file: Dockerfile.backend
+---
+
 # Predictive Reality Engine
 ### *Autonomous Social Simulation & Adversarial Boardroom Debate*
 

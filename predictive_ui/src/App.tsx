@@ -113,9 +113,8 @@ function App() {
       } catch (e) {}
     }
 
-    const host = window.location.host;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const evalUrl = `${protocol}//${host}/ws/evaluate`;
+    const wsBaseUrl = import.meta.env.VITE_WS_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const evalUrl = `${wsBaseUrl}/ws/evaluate`;
 
     console.log(`[FastAPI WS] Connecting to ${evalUrl}...`);
     const socket = new WebSocket(evalUrl);
