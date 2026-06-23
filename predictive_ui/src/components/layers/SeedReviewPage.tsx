@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { usePipelineStore } from '../../store/usePipelineStore';
+import { API_BASE_URL } from '../../config';
+import { ChevronRight, ArrowRight, Save, Trash2, Plus, Sparkles, Check } from 'lucide-react';
 
 export const SeedReviewPage = () => {
   const { pendingAction, setPendingAction, simulationConfig, seedPosts, sessionId } = usePipelineStore();
@@ -40,7 +42,7 @@ export const SeedReviewPage = () => {
     if (!instruction.trim()) return;
     setIsRefining(true);
     try {
-      const res = await fetch('/api/simulation/refine_seeds', {
+      const res = await fetch(`${API_BASE_URL}/api/simulation/refine_seeds`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -72,7 +74,7 @@ export const SeedReviewPage = () => {
     setIsSubmitting(true);
     try {
       const activeSessionId = sessionId || simulationConfig?.simulation_id || 'default';
-      const res = await fetch(`/api/simulation/${activeSessionId}/command`, {
+      const res = await fetch(`${API_BASE_URL}/api/simulation/${activeSessionId}/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

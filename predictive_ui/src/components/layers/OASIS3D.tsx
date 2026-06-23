@@ -8,8 +8,11 @@ import { cleanPersonaName } from '../../utils/nameHelper';
 import { Activity, Zap, X, Network, AlertTriangle, FileText, Eye, Maximize2, Minimize2, ThumbsUp, Square } from 'lucide-react';
 import { normalizeBio, parseBioSections } from './AssemblyMatrix';
 import { EagleEyeInterrogationModal } from './EagleEyeInterrogationModal';
+import { BackendTerminal } from '../ui/BackendTerminal';
+import { API_BASE_URL } from '../../config';
 import { InterventionPanel } from './InterventionPanel';
 
+// Main 3D Graph Component for Visualizing the OASIS Simulation
 
 // ─── Stable hash → position ──────────────────────────────────────────────────
 function stablePos(id: string, radius = 20): [number, number, number] {
@@ -59,7 +62,7 @@ function ConnectionEdge({ from, to, active, actionType }: {
     // Shift up to connect perfectly to the glossy spheres
     const fromPos: [number, number, number] = [from[0], from[1] + 0.4, from[2]];
     const toPos: [number, number, number] = [to[0], to[1] + 0.4, to[2]];
-    
+
     const mid: [number, number, number] = [
       (fromPos[0] + toPos[0]) / 2,
       2.5 + Math.abs(fromPos[0] - toPos[0]) * 0.15,
@@ -97,7 +100,7 @@ function TopologyEdge({ from, to }: {
     // Shift up to connect perfectly to the glossy spheres
     const fromPos: [number, number, number] = [from[0], from[1] + 0.4, from[2]];
     const toPos: [number, number, number] = [to[0], to[1] + 0.4, to[2]];
-    
+
     const mid: [number, number, number] = [
       (fromPos[0] + toPos[0]) / 2,
       0.8 + Math.abs(fromPos[0] - toPos[0]) * 0.05,
@@ -148,7 +151,7 @@ function Pulse({ from, to, actionType, onDone }: {
 }) {
   const ref = useRef<THREE.Mesh>(null);
   const t = useRef(0);
-  
+
   const curve = useMemo(() => {
     const fromPos: [number, number, number] = [from[0], from[1] + 0.4, from[2]];
     const toPos: [number, number, number] = [to[0], to[1] + 0.4, to[2]];
@@ -158,7 +161,7 @@ function Pulse({ from, to, actionType, onDone }: {
       new THREE.Vector3(...toPos),
     );
   }, [from, to]);
-  
+
   const color = actionType === 'upvote' ? '#10B981' : actionType === 'downvote' ? '#EF4444' : '#F59E0B';
 
   useFrame((_, delta) => {
@@ -228,15 +231,15 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
   useFrame(({ clock }) => {
     if (!groupRef.current) return;
     const t = clock.getElapsedTime();
-    
+
     // Smooth premium hover/bobbing float animation
     groupRef.current.position.y = Math.sin(t * 1.3 + agent.pos[0]) * 0.12;
-    
+
     if (headRef.current) {
       headRef.current.rotation.y = t * 0.4;
       headRef.current.rotation.x = Math.sin(t * 0.6) * 0.1;
     }
-    
+
     if (ringRef.current && agent.hot) {
       const s = 1 + Math.sin(t * 4.5) * 0.12;
       ringRef.current.scale.set(s, s, 1);
@@ -350,19 +353,19 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
               color: '#000000',
               zIndex: 2147483647,
             }}>
-              {/* Header */}
+            {/* Header */}
             <div style={{ borderBottom: '4px solid #000000', paddingBottom: '12px', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <div style={{ flex: 1, minWidth: 0, marginRight: '16px' }}>
                 <div style={{ fontWeight: 900, fontSize: '16px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{agent.name}</div>
-                <div style={{ 
-                  fontSize: '9px', 
-                  fontWeight: 900, 
-                  background: '#FFFFFF', 
-                  color: '#000000', 
+                <div style={{
+                  fontSize: '9px',
+                  fontWeight: 900,
+                  background: '#FFFFFF',
+                  color: '#000000',
                   padding: '4px 8px',
                   border: '2px solid #000000',
                   boxShadow: '2px 2px 0px #000000',
-                  textTransform: 'uppercase', 
+                  textTransform: 'uppercase',
                   letterSpacing: '0.1em',
                   display: 'inline-block',
                   marginTop: '6px',
@@ -377,14 +380,14 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                 {onInterrogate && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onInterrogate(agent.id); }}
-                    style={{ 
-                      background: '#10B981', 
-                      color: '#000000', 
-                      border: '3px solid #000000', 
+                    style={{
+                      background: '#10B981',
+                      color: '#000000',
+                      border: '3px solid #000000',
                       boxShadow: '2px 2px 0px #000000',
-                      padding: '4px 8px', 
-                      fontWeight: 900, 
-                      cursor: 'pointer', 
+                      padding: '4px 8px',
+                      fontWeight: 900,
+                      cursor: 'pointer',
                       fontSize: '11px',
                       textTransform: 'uppercase'
                     }}
@@ -394,14 +397,14 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                 )}
                 <button
                   onClick={(e) => { e.stopPropagation(); onClick(); }}
-                  style={{ 
-                    background: '#EF4444', 
-                    color: '#FFFFFF', 
-                    border: '3px solid #000000', 
+                  style={{
+                    background: '#EF4444',
+                    color: '#FFFFFF',
+                    border: '3px solid #000000',
                     boxShadow: '2px 2px 0px #000000',
-                    padding: '4px 8px', 
-                    fontWeight: 900, 
-                    cursor: 'pointer', 
+                    padding: '4px 8px',
+                    fontWeight: 900,
+                    cursor: 'pointer',
                     fontSize: '11px',
                     transition: 'transform 0.1s'
                   }}
@@ -428,7 +431,7 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
             {/* Parsed Bio Sections */}
             {(() => {
               const sections = parseBioSections(agent.bio);
-              
+
               const FormatBracketText = ({ text }: { text: string }) => {
                 const parts = text.split(/(\[[A-Z0-9\s_&/-]+\])/g);
                 return (
@@ -515,16 +518,17 @@ function PersonPin({ agent, isSelected, onClick, onInterrogate }: {
                   ].map((trait, i, arr) => {
                     const isMax = trait.val === Math.max(...arr.map(t => t.val));
                     return (
-                    <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 900 }}>
-                        <span>{trait.label}</span>
-                        <span>{trait.val}%</span>
+                      <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 900 }}>
+                          <span>{trait.label}</span>
+                          <span>{trait.val}%</span>
+                        </div>
+                        <div style={{ height: '8px', border: '2px solid #000000', background: '#FFFFFF', overflow: 'hidden', borderRadius: '2px' }}>
+                          <div style={{ height: '100%', width: `${trait.val}%`, background: isMax ? '#F59E0B' : '#000000' }} />
+                        </div>
                       </div>
-                      <div style={{ height: '8px', border: '2px solid #000000', background: '#FFFFFF', overflow: 'hidden', borderRadius: '2px' }}>
-                        <div style={{ height: '100%', width: `${trait.val}%`, background: isMax ? '#F59E0B' : '#000000' }} />
-                      </div>
-                    </div>
-                  )})}
+                    )
+                  })}
                 </div>
               </div>
             )}
@@ -647,13 +651,13 @@ function NetworkScene({ onSelect, showTopologyLines, onInterrogate }: { onSelect
     Object.values(spawnedAgents).forEach((s) => {
       const cleanName = cleanPersonaName(s.agent_name);
       const normId = normalizeId(s.agent_id);
-      map.set(normId, { 
-        id: normId, 
-        name: cleanName, 
-        pos: stablePos(normId), 
-        upvotes: 0, 
-        downvotes: 0, 
-        recent: [], 
+      map.set(normId, {
+        id: normId,
+        name: cleanName,
+        pos: stablePos(normId),
+        upvotes: 0,
+        downvotes: 0,
+        recent: [],
         hot: false,
         role: s.role || 'Lurker',
         bio: s.bio || 'Synthetic agent participating in OASIS swarm analytics.',
@@ -668,13 +672,13 @@ function NetworkScene({ onSelect, showTopologyLines, onInterrogate }: { onSelect
       const normId = normalizeId(a.agent_id);
       if (!map.has(normId)) {
         const storeAgent = usePipelineStore.getState().spawnedAgents[normId];
-        map.set(normId, { 
-          id: normId, 
-          name: cleanName, 
-          pos: stablePos(normId), 
-          upvotes: 0, 
-          downvotes: 0, 
-          recent: [], 
+        map.set(normId, {
+          id: normId,
+          name: cleanName,
+          pos: stablePos(normId),
+          upvotes: 0,
+          downvotes: 0,
+          recent: [],
           hot: false,
           role: storeAgent?.role || 'Lurker',
           bio: storeAgent?.bio || 'A synthetic participant observing the conversation dynamics.',
@@ -790,7 +794,7 @@ export default function OASIS3D() {
   const [isInterrogationModalOpen, setIsInterrogationModalOpen] = useState(false);
   const [isInterventionModalOpen, setIsInterventionModalOpen] = useState(false);
   const [interrogationAgentId, setInterrogationAgentId] = useState<string>('');
-  
+
   // Custom drag reveal width states
   const [panelWidth, setPanelWidth] = useState(400);
   const [isDragging, setIsDragging] = useState(false);
@@ -846,7 +850,7 @@ export default function OASIS3D() {
 
   const combinedFeed = useMemo(() => {
     const items: any[] = [];
-    
+
     // Add Seed Posts
     seedPosts.forEach((s, i) => {
       items.push({
@@ -898,7 +902,7 @@ export default function OASIS3D() {
       if (typeLower === 'post' || typeLower === 'spawn') type = 'post';
       else if (typeLower === 'comment') type = 'comment';
       else if (typeLower === 'upvote' || typeLower === 'downvote' || typeLower === 'like') type = 'interaction';
-      
+
       const rawEntityId = a.metadata?.entity_id ? String(a.metadata.entity_id) : null;
       let namespacedId = `action_${a.agent_id}_${i}_${a.timestamp}`;
       if (rawEntityId) {
@@ -906,7 +910,7 @@ export default function OASIS3D() {
         else if (type === 'comment') namespacedId = `comment_${rawEntityId}`;
         else namespacedId = `interaction_${rawEntityId}`;
       }
-      
+
       items.push({
         id: namespacedId,
         type: type,
@@ -926,7 +930,7 @@ export default function OASIS3D() {
         uniqueItemsMap.set(item.id, item);
       }
     });
-    
+
     const uniqueItems = Array.from(uniqueItemsMap.values());
 
     // Sort by timestamp
@@ -942,9 +946,9 @@ export default function OASIS3D() {
 
   const getPostContent = (targetId?: string) => {
     if (!targetId) return null;
-    const post = combinedFeed.find(item => 
-      String(item.id) === `post_${targetId}` || 
-      String(item.id) === `comment_${targetId}` || 
+    const post = combinedFeed.find(item =>
+      String(item.id) === `post_${targetId}` ||
+      String(item.id) === `comment_${targetId}` ||
       String(item.id) === String(targetId)
     );
     if (post) return post.content;
@@ -977,7 +981,7 @@ export default function OASIS3D() {
 
     return (
       <div className="flex flex-col mb-8 mt-2">
-        <div 
+        <div
           className={`p-5 bg-white border-2 border-black shadow-[4px_4px_0_0_#000] cursor-pointer hover:bg-neutral-50 transition-colors relative z-10`}
           onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
         >
@@ -995,7 +999,7 @@ export default function OASIS3D() {
             </div>
           )}
         </div>
-        
+
         {expanded && cleanA && (
           <div className="p-5 bg-[#F8FAFC] border-2 border-black shadow-[4px_4px_0_0_#000] ml-6 mt-6 relative z-0">
             <div className="absolute -top-3 left-3 text-white text-[9px] font-black uppercase tracking-widest px-2 py-0.5 border-2 border-black bg-[#10B981] shadow-[2px_2px_0_0_#000]">
@@ -1017,7 +1021,7 @@ export default function OASIS3D() {
     }
 
     const parts = content.split(/(?=^Q:|^A:)/m);
-    
+
     const blocks: React.ReactNode[] = [];
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
@@ -1025,7 +1029,7 @@ export default function OASIS3D() {
         let answer = '';
         if (i + 1 < parts.length && parts[i + 1].startsWith('A:')) {
           answer = parts[i + 1];
-          i++; 
+          i++;
         }
         blocks.push(<QAPairBlock key={i} question={part} answer={answer} />);
       } else if (part.startsWith('A:')) {
@@ -1063,7 +1067,7 @@ export default function OASIS3D() {
         const isExpanded = expandedActionIds.has(actionKey);
         // Use current time if timestamp is missing
         const timeStr = r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
-        
+
         return (
           <div
             key={i}
@@ -1082,7 +1086,7 @@ export default function OASIS3D() {
                 </span>
               </div>
             </div>
-            
+
             {isExpanded ? (
               <div className="ml-1.5 pl-4 border-l-[3px] border-[#FF5722]/50">
                 <div className="text-[13px] font-mono font-bold leading-relaxed whitespace-pre-wrap">
@@ -1119,8 +1123,8 @@ export default function OASIS3D() {
           if (item.type === 'post') iconColor = 'bg-blue-500';
           else if (item.type === 'comment') iconColor = 'bg-purple-500';
           else if (item.type === 'interaction') {
-             if (item.original.action_type === 'upvote') iconColor = 'bg-green-500';
-             else if (item.original.action_type === 'downvote') iconColor = 'bg-red-500';
+            if (item.original.action_type === 'upvote') iconColor = 'bg-green-500';
+            else if (item.original.action_type === 'downvote') iconColor = 'bg-red-500';
           }
 
           const upvotes = upvotedItems[actionKey] || 0;
@@ -1133,7 +1137,7 @@ export default function OASIS3D() {
               <div className="flex items-start gap-2.5">
                 <span className={`w-2.5 h-2.5 mt-1 border border-black shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] flex-none ${iconColor}`} />
                 <div className="flex-1 min-w-0">
-                  <div 
+                  <div
                     className={`flex items-center justify-between gap-2 ${hasContent ? 'cursor-pointer' : ''}`}
                     onClick={() => hasContent && toggleActionExpanded(actionKey)}
                   >
@@ -1151,7 +1155,7 @@ export default function OASIS3D() {
                       )}
                     </div>
                   </div>
-                  
+
                   {item.type === 'comment' && item.targetId && (
                     <div className="mt-2 mb-2 p-2 bg-neutral-100 border-l-4 border-black/20 text-[10px] font-bold text-black/60 italic rounded-r line-clamp-2">
                       ↳ Replying to: "{getPostContent(item.targetId)}"
@@ -1159,17 +1163,15 @@ export default function OASIS3D() {
                   )}
 
                   {item.content && (
-                    <div 
+                    <div
                       onClick={() => hasContent && toggleActionExpanded(actionKey)}
-                      className={`mt-2 ${hasContent ? 'cursor-pointer' : ''} ${
-                        isExpanded 
-                          ? `border-l-[3px] pl-3 ${
-                              item.sentiment === 'positive' ? 'border-[#10B981]/50' : 
-                              item.sentiment === 'negative' ? 'border-[#EF4444]/50' : 
-                              'border-[#FF5722]/50'
-                            }` 
-                          : 'ml-0'
-                      }`}
+                      className={`mt-2 ${hasContent ? 'cursor-pointer' : ''} ${isExpanded
+                        ? `border-l-[3px] pl-3 ${item.sentiment === 'positive' ? 'border-[#10B981]/50' :
+                          item.sentiment === 'negative' ? 'border-[#EF4444]/50' :
+                            'border-[#FF5722]/50'
+                        }`
+                        : 'ml-0'
+                        }`}
                     >
                       {isExpanded ? (
                         <div className="text-[13px] font-mono font-bold leading-relaxed whitespace-pre-wrap text-black/80">
@@ -1185,11 +1187,10 @@ export default function OASIS3D() {
 
                   {['post', 'comment'].includes(item.type) && (
                     <div className="mt-2 flex items-center gap-2">
-                      <button 
+                      <button
                         onClick={(e) => { e.stopPropagation(); upvoteItem(actionKey); }}
-                        className={`flex items-center gap-1.5 px-2 py-1 border-2 border-black font-black text-[10px] uppercase transition-colors ${
-                          upvotes > 0 ? 'bg-orange-500 text-white' : 'bg-white text-black hover:bg-orange-100'
-                        }`}
+                        className={`flex items-center gap-1.5 px-2 py-1 border-2 border-black font-black text-[10px] uppercase transition-colors ${upvotes > 0 ? 'bg-orange-500 text-white' : 'bg-white text-black hover:bg-orange-100'
+                          }`}
                       >
                         <ThumbsUp className="w-3 h-3" strokeWidth={3} />
                         {upvotes > 0 ? upvotes : 'Upvote'}
@@ -1232,7 +1233,7 @@ export default function OASIS3D() {
             <button
               onClick={async () => {
                 try {
-                  await fetch('/api/simulation/stop', { method: 'POST' });
+                  await fetch(`${API_BASE_URL}/api/simulation/stop`, { method: 'POST' });
                 } catch (err) {
                   console.error("Failed to stop simulation:", err);
                 }
@@ -1247,11 +1248,10 @@ export default function OASIS3D() {
           {networkTopology && (
             <button
               onClick={() => setShowTopologyLines(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 border-2 font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${
-                showTopologyLines 
-                  ? 'bg-brand border-brand text-black' 
-                  : 'bg-white/10 hover:bg-white/20 border-2 border-white/30 text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 border-2 font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${showTopologyLines
+                ? 'bg-brand border-brand text-black'
+                : 'bg-white/10 hover:bg-white/20 border-2 border-white/30 text-white'
+                }`}
             >
               <Network className="w-3.5 h-3.5" strokeWidth={3} />
               Topology {showTopologyLines ? 'ON' : 'OFF'}
@@ -1260,11 +1260,10 @@ export default function OASIS3D() {
           {/* Monitor Panel toggle */}
           <button
             onClick={() => setShowMonitorPanel(v => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 border-2 font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${
-              showMonitorPanel 
-                ? 'bg-brand border-brand text-black' 
-                : 'bg-white/10 hover:bg-white/20 border-2 border-white/30 text-white'
-            }`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 border-2 font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${showMonitorPanel
+              ? 'bg-brand border-brand text-black'
+              : 'bg-white/10 hover:bg-white/20 border-2 border-white/30 text-white'
+              }`}
           >
             <Activity className="w-3.5 h-3.5" strokeWidth={3} />
             Monitor Panel {showMonitorPanel ? 'ON' : 'OFF'}
@@ -1341,9 +1340,9 @@ export default function OASIS3D() {
             shadow-bias={-0.0005}
           />
           <CamController selectedPos={selectedPos} />
-          <NetworkScene 
-            onSelect={setSelectedPos} 
-            showTopologyLines={showTopologyLines} 
+          <NetworkScene
+            onSelect={setSelectedPos}
+            showTopologyLines={showTopologyLines}
             onInterrogate={(id) => {
               setInterrogationAgentId(id);
               setIsInterrogationModalOpen(true);
@@ -1387,11 +1386,10 @@ export default function OASIS3D() {
               <Network className="w-4 h-4 text-brand" strokeWidth={3} />
               <span className="font-black text-xs uppercase tracking-widest">Network Topology</span>
             </div>
-            <span className={`text-[10px] font-black uppercase px-2 py-0.5 border ${
-              showTopologyLines 
-                ? 'bg-brand text-black border-brand' 
-                : 'bg-transparent text-white/50 border-white/20'
-            }`}>
+            <span className={`text-[10px] font-black uppercase px-2 py-0.5 border ${showTopologyLines
+              ? 'bg-brand text-black border-brand'
+              : 'bg-transparent text-white/50 border-white/20'
+              }`}>
               {showTopologyLines ? 'ON' : 'OFF'}
             </span>
           </button>
@@ -1424,10 +1422,9 @@ export default function OASIS3D() {
 
       {/* ── Consolidated Monitor Sidebar (right) ─── */}
       {showMonitorPanel && (
-        <div 
-          className={`absolute top-14 right-4 bottom-14 bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-sans ${
-            isDragging ? '' : 'transition-all duration-300'
-          }`}
+        <div
+          className={`absolute top-14 right-4 bottom-14 bg-white border-4 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] flex flex-col overflow-hidden font-sans ${isDragging ? '' : 'transition-all duration-300'
+            }`}
           style={{ width: `${panelWidth}px`, zIndex: 2147483646 }}
         >
           {/* Invisible Drag Handle */}
@@ -1457,11 +1454,10 @@ export default function OASIS3D() {
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id as any)}
-                    className={`flex-1 py-1.5 px-1 text-center font-black text-[10px] uppercase tracking-widest border-2 border-black transition-all duration-150 truncate ${
-                      activeTab === tab.id
-                        ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[2px] translate-y-[2px]'
-                        : 'bg-white text-black shadow-[4px_4px_0_0_#000] hover:bg-neutral-50 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[3px_3px_0_0_#000]'
-                    }`}
+                    className={`flex-1 py-1.5 px-1 text-center font-black text-[10px] uppercase tracking-widest border-2 border-black transition-all duration-150 truncate ${activeTab === tab.id
+                      ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[2px] translate-y-[2px]'
+                      : 'bg-white text-black shadow-[4px_4px_0_0_#000] hover:bg-neutral-50 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[3px_3px_0_0_#000]'
+                      }`}
                     title={tab.label}
                   >
                     {tab.label}
@@ -1471,15 +1467,15 @@ export default function OASIS3D() {
             )}
 
             <div className="flex items-center gap-2 flex-none">
-              <button 
-                onClick={() => setPanelWidth(isPanelExpanded ? 400 : 1100)} 
+              <button
+                onClick={() => setPanelWidth(isPanelExpanded ? 400 : 1100)}
                 className="text-black hover:text-brand cursor-pointer transition-transform hover:scale-110 p-1 bg-white border-2 border-transparent hover:border-black hover:shadow-[2px_2px_0_0_#000] rounded-sm"
                 title={isPanelExpanded ? "Collapse panel to side" : "Expand panel to full-width side-by-side"}
               >
                 {isPanelExpanded ? <Minimize2 className="w-5 h-5" strokeWidth={3} /> : <Maximize2 className="w-5 h-5" strokeWidth={3} />}
               </button>
-              <button 
-                onClick={() => setShowMonitorPanel(false)} 
+              <button
+                onClick={() => setShowMonitorPanel(false)}
                 className="text-black hover:text-brand cursor-pointer transition-transform hover:scale-110 p-1 bg-white border-2 border-transparent hover:border-black hover:shadow-[2px_2px_0_0_#000] rounded-sm"
               >
                 <X className="w-5 h-5" strokeWidth={3} />
@@ -1488,17 +1484,16 @@ export default function OASIS3D() {
           </div>
 
           {/* Content Area - Conditional Rendering or Side-by-Side */}
-          <div 
+          <div
             className={`flex-1 flex flex-row bg-white overflow-hidden`}
             onWheel={e => e.stopPropagation()}
           >
             {/* Controversy Seeds Column */}
             {(isPanelExpanded || activeTab === 'seeds') && (
-              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
-                !isPanelExpanded ? 'w-full' : (isSeedsCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
-              }`}>
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${!isPanelExpanded ? 'w-full' : (isSeedsCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
+                }`}>
                 {isSeedsCollapsed && isPanelExpanded ? (
-                  <div 
+                  <div
                     className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
                     onClick={() => setIsSeedsCollapsed(false)}
                     title="Expand Controversy Seeds"
@@ -1515,7 +1510,7 @@ export default function OASIS3D() {
                       <div className="flex items-center gap-2 p-4 font-black text-sm uppercase tracking-wide border-b-4 border-black bg-neutral-100">
                         <FileText className="w-4 h-4 text-brand" strokeWidth={3} />
                         <span className="truncate">Controversy Seeds ({seedPosts.length})</span>
-                        <button 
+                        <button
                           onClick={() => setIsSeedsCollapsed(true)}
                           className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
                           title="Collapse Column"
@@ -1524,21 +1519,20 @@ export default function OASIS3D() {
                         </button>
                       </div>
                     )}
-                <div className="flex-1 overflow-hidden p-4 flex flex-col">
-                  {debateSeedsBody}
-                </div>
-                </>
+                    <div className="flex-1 overflow-hidden p-4 flex flex-col">
+                      {debateSeedsBody}
+                    </div>
+                  </>
                 )}
               </div>
             )}
 
             {/* Eagle's Eye Column */}
             {(isPanelExpanded || activeTab === 'eagle') && (
-              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
-                !isPanelExpanded ? 'w-full' : (isEagleCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
-              }`}>
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${!isPanelExpanded ? 'w-full' : (isEagleCollapsed ? 'w-12 flex-none overflow-hidden border-r-4 border-black' : 'flex-1 min-w-0 border-r-4 border-black')
+                }`}>
                 {isEagleCollapsed && isPanelExpanded ? (
-                  <div 
+                  <div
                     className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
                     onClick={() => setIsEagleCollapsed(false)}
                     title="Expand Eagle's Eye Insights"
@@ -1557,7 +1551,7 @@ export default function OASIS3D() {
                         <span className="truncate">Eagle's Eye Insights ({eagleEyeResults.length})</span>
                       </div>
                       {isPanelExpanded && (
-                        <button 
+                        <button
                           onClick={() => setIsEagleCollapsed(true)}
                           className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
                           title="Collapse Column"
@@ -1570,7 +1564,7 @@ export default function OASIS3D() {
                       {eaglesEyeBody}
                     </div>
                     <div className="p-4 border-t-4 border-black bg-white z-10">
-                      <button 
+                      <button
                         onClick={() => setIsInterrogationModalOpen(true)}
                         className="w-full bg-brand text-black px-6 py-3 font-black text-xs uppercase tracking-widest border-2 border-black shadow-[4px_4px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] transition-all active:translate-x-[4px] active:translate-y-[4px] active:shadow-none"
                       >
@@ -1584,11 +1578,10 @@ export default function OASIS3D() {
 
             {/* Live Swarm Column */}
             {(isPanelExpanded || activeTab === 'swarm') && (
-              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${
-                !isPanelExpanded ? 'w-full' : (isSwarmCollapsed ? 'w-12 flex-none overflow-hidden' : 'flex-1 min-w-0')
-              }`}>
+              <div className={`flex flex-col h-full bg-white transition-[width,flex] duration-300 ease-in-out ${!isPanelExpanded ? 'w-full' : (isSwarmCollapsed ? 'w-12 flex-none overflow-hidden' : 'flex-1 min-w-0')
+                }`}>
                 {isSwarmCollapsed && isPanelExpanded ? (
-                  <div 
+                  <div
                     className="flex-1 flex flex-col items-center py-4 cursor-pointer hover:bg-neutral-100 transition-colors border-b-4 border-transparent"
                     onClick={() => setIsSwarmCollapsed(false)}
                     title="Expand Live Swarm"
@@ -1614,11 +1607,10 @@ export default function OASIS3D() {
                               <button
                                 key={tab}
                                 onClick={() => setActivityFilter(tab)}
-                                className={`px-2 py-1 text-[9px] font-black uppercase tracking-widest border-2 border-black transition-all ${
-                                  activityFilter === tab 
-                                    ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[1px] translate-y-[1px]' 
-                                    : 'bg-white text-black shadow-[3px_3px_0_0_#000] hover:bg-neutral-100 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[2px_2px_0_0_#000]'
-                                }`}
+                                className={`px-2 py-1 text-[9px] font-black uppercase tracking-widest border-2 border-black transition-all ${activityFilter === tab
+                                  ? 'bg-brand text-black shadow-[2px_2px_0_0_#000] translate-x-[1px] translate-y-[1px]'
+                                  : 'bg-white text-black shadow-[3px_3px_0_0_#000] hover:bg-neutral-100 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[2px_2px_0_0_#000]'
+                                  }`}
                               >
                                 {labels[tab]}
                               </button>
@@ -1626,7 +1618,7 @@ export default function OASIS3D() {
                           })}
                         </div>
                         {isPanelExpanded && (
-                          <button 
+                          <button
                             onClick={() => setIsSwarmCollapsed(true)}
                             className="ml-auto px-2 py-0.5 border-2 border-black bg-white hover:bg-neutral-200 text-xs shadow-[2px_2px_0_0_#000] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all flex-none"
                             title="Collapse Column"
@@ -1636,18 +1628,18 @@ export default function OASIS3D() {
                         )}
                       </div>
                     </div>
-                <div className="flex-1 overflow-hidden flex flex-col">
-                  {liveSwarmBody}
-                </div>
-                <div className="p-4 border-t-4 border-black bg-white z-10">
-                  <button 
-                    onClick={() => setIsInterventionModalOpen(true)}
-                    className="w-full bg-red-500 text-white px-6 py-3 font-black text-xs uppercase tracking-widest border-2 border-black shadow-[4px_4px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] transition-all active:translate-x-[4px] active:translate-y-[4px] active:shadow-none"
-                  >
-                    Intervene Manually
-                  </button>
-                </div>
-                </>
+                    <div className="flex-1 overflow-hidden flex flex-col">
+                      {liveSwarmBody}
+                    </div>
+                    <div className="p-4 border-t-4 border-black bg-white z-10">
+                      <button
+                        onClick={() => setIsInterventionModalOpen(true)}
+                        className="w-full bg-red-500 text-white px-6 py-3 font-black text-xs uppercase tracking-widest border-2 border-black shadow-[4px_4px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_#000] transition-all active:translate-x-[4px] active:translate-y-[4px] active:shadow-none"
+                      >
+                        Intervene Manually
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -1684,9 +1676,9 @@ export default function OASIS3D() {
         </div>
       </div>
 
-      <EagleEyeInterrogationModal 
-        isOpen={isInterrogationModalOpen} 
-        onClose={() => setIsInterrogationModalOpen(false)} 
+      <EagleEyeInterrogationModal
+        isOpen={isInterrogationModalOpen}
+        onClose={() => setIsInterrogationModalOpen(false)}
         initialAgentId={interrogationAgentId}
       />
       {sessionId && (

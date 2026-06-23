@@ -10,7 +10,7 @@ const isLocalhost = typeof window !== 'undefined' &&
 const defaultUrl = typeof window !== 'undefined'
   ? (isLocalhost 
       ? `ws://${window.location.hostname}:8080` 
-      : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream`)
+      : import.meta.env.VITE_WS_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream`)
   : 'ws://localhost:8080';
 
 export function useWebSocket(url: string = defaultUrl) {

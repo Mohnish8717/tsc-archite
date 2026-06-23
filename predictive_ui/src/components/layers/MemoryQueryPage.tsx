@@ -15,7 +15,7 @@ interface Bank {
 // ── Bank ID derivation ────────────────────────────────────────────────────
 
 function toBoardroomBankId(personaName: string): string {
-  return `boardroom-${personaName.replace(/ /g, '_').replace(/\\./g, '')}`;
+  return `boardroom-${personaName.replace(/ /g, '_').replace(/\./g, '')}`;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ export default function MemoryQueryPage() {
     setResult(null);
 
     try {
-      const res = await fetch('/api/hindsight/query', {
+      const res = await fetch(`${API_BASE_URL}/api/hindsight/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

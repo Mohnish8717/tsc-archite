@@ -9,7 +9,7 @@ export async function sendEagleEyeCommand(
     questions: [question],
   };
 
-  const response = await fetch(`/api/simulation/${sessionId}/command`, {
+  const response = await fetch(`${API_BASE_URL}/api/simulation/${sessionId}/command`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -34,7 +34,7 @@ export async function sendInterventionCommand(
     event: event,
   };
 
-  const response = await fetch(`/api/simulation/${sessionId}/command`, {
+  const response = await fetch(`${API_BASE_URL}/api/simulation/${sessionId}/command`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

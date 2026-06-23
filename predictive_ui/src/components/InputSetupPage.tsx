@@ -1,6 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { Activity, Play, Plus, X, FileText, Upload, File as FileIcon } from 'lucide-react';
 
+import { API_BASE_URL } from '../config';
+
 interface InputSetupPageProps {
   onStartSimulation: (filePaths: Record<string, string>, boardroomOnly: boolean) => Promise<void>;
   onSkip?: () => void;
@@ -112,7 +114,7 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
         return;
       }
 
-      const response = await fetch('/api/upload', {
+      const response = await fetch(`${API_BASE_URL}/api/upload`, {
         method: 'POST',
         body: form,
       });

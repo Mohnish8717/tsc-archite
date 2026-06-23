@@ -11,6 +11,7 @@ import LandingPage from './components/LandingPage';
 import InputSetupPage from './components/InputSetupPage';
 import { useWebSocket } from './hooks/useWebSocket';
 import { usePipelineStore } from './store/usePipelineStore';
+import { API_BASE_URL } from './config';
 import { BackendTerminal } from './components/ui/BackendTerminal';
 
 function App() {
@@ -154,7 +155,7 @@ function App() {
   // once the final metrics are fully aggregated.
   const handleStopSimulation = async () => {
     try {
-      await fetch('/api/simulation/stop', { method: 'POST' });
+      await fetch(`${API_BASE_URL}/api/simulation/stop`, { method: 'POST' });
     } catch (e) {
       console.warn('Stop request failed — backend may already be done:', e);
     }

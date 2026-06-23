@@ -309,12 +309,20 @@ async def send_simulation_command(run_id: str, payload: CommandPayload):
     """Write an IPC command to the simulation's active directory."""
     from fastapi import HTTPException
     
+    import os
+    
     # Locate the run directory
-    search_paths = [
+    search_paths = []
+    
+    env_dir = os.environ.get("OASIS_RUNS_DIR")
+    if env_dir:
+        search_paths.append(Path(env_dir) / run_id)
+        
+    search_paths.extend([
         Path(f"log/oasis_runs/{run_id}"),
         Path(f"/Users/mohnish/Downloads/tsc architecture/log/oasis_runs/{run_id}"),
         Path(f"/tmp/oasis_runs/{run_id}")
-    ]
+    ])
     
     run_dir = None
     for p in search_paths:
