@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Brain, Loader2, Search, Database, MessageSquare, AlertTriangle, ChevronRight } from 'lucide-react';
 import { usePipelineStore } from '../../store/usePipelineStore';
+import { API_BASE_URL } from '../../config';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

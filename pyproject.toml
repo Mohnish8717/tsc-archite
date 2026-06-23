@@ -57,7 +57,7 @@ dependencies = [
     "asyncpg>=0.29",
 
     # Multi-Agent Debate
-    "ag2>=0.2",
+    "ag2[openai]>=0.2",
     "tavily-python>=0.3",
     "nest-asyncio>=1.5.0",
     "camel-ai",

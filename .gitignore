@@ -198,3 +198,4 @@ tsc/data/optimized_inputs/
 docs/implementation_plan.md
 docs/task.md
 docs/walkthrough.md
+.gstack/
