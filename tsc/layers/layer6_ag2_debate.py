@@ -1,4 +1,16 @@
 import os
+import sys
+from unittest.mock import MagicMock
+
+# --- CRITICAL MACOS DEADLOCK FIX ---
+# autogen eagerly imports google.cloud.aiplatform which initializes gRPC.
+# gRPC background threads violently deadlock with asyncio/uvicorn on macOS.
+# Since we only use OpenAI with autogen, we block vertexai from loading entirely.
+sys.modules['google.cloud.aiplatform'] = MagicMock()
+sys.modules['vertexai'] = MagicMock()
+sys.modules['vertexai.generative_models'] = MagicMock()
+# -----------------------------------
+
 import json
 import logging
 import time

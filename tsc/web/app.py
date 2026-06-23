@@ -5,6 +5,31 @@ import json
 import logging
 import traceback
 import uuid
+import sys
+import multiprocessing
+
+# -- CRITICAL MACOS FIX --
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
+from unittest.mock import MagicMock
+sys.modules['grpc'] = MagicMock()
+sys.modules['grpc.experimental'] = MagicMock()
+sys.modules['grpc.experimental.aio'] = MagicMock()
+sys.modules['grpc_status'] = MagicMock()
+sys.modules['grpc_status.rpc_status'] = MagicMock()
+# ------------------------
+
+# --- PREWARM PYTORCH BEFORE ASYNCIO EVENT LOOP ---
+try:
+    from tsc.memory.world_rag import _get_embedder, _get_reranker
+    _get_embedder()
+    _get_reranker()
+except Exception:
+    pass
+
 from pathlib import Path
 from typing import Any, Optional
 
@@ -286,6 +311,7 @@ async def send_simulation_command(run_id: str, payload: CommandPayload):
     
     # Locate the run directory
     search_paths = [
+        Path(f"log/oasis_runs/{run_id}"),
         Path(f"/Users/mohnish/Downloads/tsc architecture/log/oasis_runs/{run_id}"),
         Path(f"/tmp/oasis_runs/{run_id}")
     ]
@@ -348,6 +374,7 @@ async def ws_evaluate(ws: WebSocket):
         provider = config.get("provider")
         model = config.get("model")
 
+        print("[DEBUG] ws_evaluate: Received config")
         # G11: build a per-request config copy — never mutate global settings
         req_settings = Settings(
             **{k: v for k, v in settings.model_dump().items()}
@@ -357,8 +384,10 @@ async def ws_evaluate(ws: WebSocket):
         if model:
             req_settings.llm_model = model
 
+        print("[DEBUG] ws_evaluate: Initializing TSCPipeline...")
         # Setup pipeline with per-request config
         pipeline = TSCPipeline(cfg=req_settings)
+        print("[DEBUG] ws_evaluate: TSCPipeline initialized successfully!")
 
         async def on_progress(layer, name, status, details):
             await manager.send_json(ws, {
@@ -373,18 +402,8 @@ async def ws_evaluate(ws: WebSocket):
             lambda l, n, s, d: asyncio.ensure_future(on_progress(l, n, s, d))
         )
 
-        async def on_interactive(action: str, payload: dict) -> dict:
-            await manager.send_json(ws, {
-                "type": "action_required",
-                "action": action,
-                "payload": payload
-            })
-            while True:
-                response = await ws.receive_json()
-                if response.get("type") == "action_response" and response.get("action") == action:
-                    return response.get("data", {})
-
-        pipeline.set_interactive_callback(on_interactive)
+        # Rely on orchestrator's default interactive callback which writes to pipeline.jsonl and polls commands.json
+        # pipeline.set_interactive_callback(on_interactive)
 
         # Run — register this task so /api/simulation/stop can cancel it
         _active_pipeline_task = asyncio.current_task()

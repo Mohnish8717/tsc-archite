@@ -1,0 +1,107 @@
+FROM python:3.10-slim
+
+# Install system dependencies, Node.js, Nginx, and Supervisor
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    nginx \
+    supervisor \
+    build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up working directory
+WORKDIR /app
+
+# Copy python dependencies
+COPY pyproject.toml .
+# We use uv for fast installation
+RUN pip install uv && uv pip install --system -e .
+
+# Copy Node.js dependencies for websocket bridge
+COPY predictive_ui/package.json predictive_ui/
+RUN cd predictive_ui && npm install
+
+# Copy application code
+COPY . .
+
+# Create the persistent directory path variable
+ENV OASIS_RUNS_DIR=/data/log/oasis_runs
+
+# Configure Nginx to reverse proxy 8000 and 8080 into 7860
+RUN echo '\n\
+server {\n\
+    listen 7860;\n\
+    location /api/ {\n\
+        proxy_pass http://127.0.0.1:8000;\n\
+        proxy_set_header Host $host;\n\
+        proxy_set_header X-Real-IP $remote_addr;\n\
+    }\n\
+    location /ws/evaluate {\n\
+        proxy_pass http://127.0.0.1:8000;\n\
+        proxy_http_version 1.1;\n\
+        proxy_set_header Upgrade $http_upgrade;\n\
+        proxy_set_header Connection "upgrade";\n\
+        proxy_set_header Host $host;\n\
+        proxy_read_timeout 86400;\n\
+    }\n\
+    location / {\n\
+        proxy_pass http://127.0.0.1:8080;\n\
+        proxy_http_version 1.1;\n\
+        proxy_set_header Upgrade $http_upgrade;\n\
+        proxy_set_header Connection "upgrade";\n\
+        proxy_set_header Host $host;\n\
+        proxy_read_timeout 86400;\n\
+    }\n\
+}' > /etc/nginx/sites-available/default
+
+# Configure Supervisor to run FastAPI, Node.js WS, and Nginx
+RUN echo '\n\
+[supervisord]\n\
+nodaemon=true\n\
+\n\
+[program:fastapi]\n\
+command=python tsc/web/run_server.py\n\
+directory=/app\n\
+autostart=true\n\
+autorestart=true\n\
+stdout_logfile=/dev/stdout\n\
+stdout_logfile_maxbytes=0\n\
+stderr_logfile=/dev/stderr\n\
+stderr_logfile_maxbytes=0\n\
+\n\
+[program:nodejs_ws]\n\
+command=node predictive_ui/server/websocket.js\n\
+directory=/app\n\
+autostart=true\n\
+autorestart=true\n\
+stdout_logfile=/dev/stdout\n\
+stdout_logfile_maxbytes=0\n\
+stderr_logfile=/dev/stderr\n\
+stderr_logfile_maxbytes=0\n\
+\n\
+[program:nginx]\n\
+command=nginx -g "daemon off;"\n\
+autostart=true\n\
+autorestart=true\n\
+stdout_logfile=/dev/stdout\n\
+stdout_logfile_maxbytes=0\n\
+stderr_logfile=/dev/stderr\n\
+stderr_logfile_maxbytes=0\n\
+' > /etc/supervisor/conf.d/supervisord.conf
+
+# Entrypoint script to ensure /data directories exist before starting supervisor
+RUN echo '#!/bin/bash\n\
+mkdir -p /data/log/oasis_runs\n\
+mkdir -p /data/lightrag_workspace\n\
+mkdir -p /data/qdrant_storage\n\
+if [ ! -L /app/log ]; then rm -rf /app/log && ln -s /data/log /app/log; fi\n\
+if [ ! -L /app/lightrag_workspace ]; then rm -rf /app/lightrag_workspace && ln -s /data/lightrag_workspace /app/lightrag_workspace; fi\n\
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
+' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Expose port 7860
+EXPOSE 7860
+
+CMD ["/entrypoint.sh"]

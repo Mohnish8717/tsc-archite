@@ -31,6 +31,10 @@ function buildFlowGraph(ingestionNodes: ReturnType<typeof usePipelineStore>['ing
         fontWeight: 'bold',
         fontFamily: 'monospace',
         boxShadow: '4px 4px 0px 0px rgba(0,0,0,1)',
+        width: 'auto',
+        minWidth: '200px',
+        maxWidth: '300px',
+        wordWrap: 'break-word',
       },
     })),
     ...processNodes.map((n, i) => ({
@@ -48,6 +52,10 @@ function buildFlowGraph(ingestionNodes: ReturnType<typeof usePipelineStore>['ing
         fontWeight: 'bold',
         fontFamily: 'monospace',
         boxShadow: '4px 4px 0px 0px rgba(0,0,0,1)',
+        width: 'auto',
+        minWidth: '150px',
+        maxWidth: '250px',
+        wordWrap: 'break-word',
       },
     })),
     ...outputNodes.map((n, i) => ({
@@ -65,6 +73,10 @@ function buildFlowGraph(ingestionNodes: ReturnType<typeof usePipelineStore>['ing
         fontSize: '11px',
         fontFamily: 'monospace',
         boxShadow: n.status === 'active' ? '4px 4px 0px 0px rgba(255,69,0,1)' : '4px 4px 0px 0px rgba(0,0,0,0.2)',
+        width: 'auto',
+        minWidth: '150px',
+        maxWidth: '250px',
+        wordWrap: 'break-word',
       },
     })),
   ];

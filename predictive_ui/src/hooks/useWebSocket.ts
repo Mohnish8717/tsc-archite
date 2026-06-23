@@ -4,8 +4,13 @@ import { cleanPersonaName } from '../utils/nameHelper';
 
 // Port 8080 = the active OASIS file-watch bridge (websocket.js)
 // Port 8000 = FastAPI orchestrator (not consumed by this hook — see audit)
+const isLocalhost = typeof window !== 'undefined' && 
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
 const defaultUrl = typeof window !== 'undefined'
-  ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080`
+  ? (isLocalhost 
+      ? `ws://${window.location.hostname}:8080` 
+      : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream`)
   : 'ws://localhost:8080';
 
 export function useWebSocket(url: string = defaultUrl) {
@@ -90,6 +95,13 @@ export function useWebSocket(url: string = defaultUrl) {
 
           // ── Route by type ─────────────────────────────────────────────────
           switch (data.type) {
+
+            // System Log Tail
+            case 'system_log':
+              if (data.text) {
+                usePipelineStore.getState().addSystemLog(data.text);
+              }
+              break;
 
             // Action required (HITL)
             case 'action_required':

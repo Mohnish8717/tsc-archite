@@ -106,7 +106,7 @@ class TSCPipeline:
         context: Optional[str] = None,
         proposal: Optional[str] = None,
         num_simulations: Optional[int] = None,
-        sim_timesteps: int = 20,
+        sim_timesteps: int = 2,
         use_legacy_personas: bool = False,
         boardroom_only: bool = False,
         existing_simulation_id: Optional[str] = None,

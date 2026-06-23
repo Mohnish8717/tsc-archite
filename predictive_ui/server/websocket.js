@@ -562,6 +562,58 @@ function watchForNewSimulations() {
 // INGESTION_NODES — now emitted by orchestrator.py after Layer 1 completes
 // PERSONAS        — now emitted by orchestrator.py after Layer 2 persona generation
 
+// ─── Live tailing of global backend logs ────────────────────────────────────
+let backendLogWatcher = null;
+let backendLogSize = 0;
+const BACKEND_LOG_PATH = path.resolve(__dirname, '../../log/backend.log');
+
+function startTailingBackendLogs() {
+  if (backendLogWatcher) return;
+  
+  // Make sure file exists, otherwise retry
+  if (!fs.existsSync(BACKEND_LOG_PATH)) {
+    setTimeout(startTailingBackendLogs, 2000);
+    return;
+  }
+  
+  console.log(`[WS] 📡 LIVE tailing backend logs: ${BACKEND_LOG_PATH}`);
+  backendLogSize = fs.statSync(BACKEND_LOG_PATH).size;
+  let leftoverBuffer = '';
+
+  backendLogWatcher = fs.watch(BACKEND_LOG_PATH, (eventType) => {
+    if (eventType !== 'change') return;
+    try {
+      const stats = fs.statSync(BACKEND_LOG_PATH);
+      if (stats.size <= backendLogSize) return;
+
+      const readStart = backendLogSize;
+      const readEnd = stats.size;
+      backendLogSize = readEnd;
+
+      const stream = fs.createReadStream(BACKEND_LOG_PATH, {
+        start: readStart,
+        end: readEnd,
+        encoding: 'utf-8',
+      });
+
+      let chunkBuffer = leftoverBuffer;
+      stream.on('data', chunk => {
+        chunkBuffer += chunk;
+        const lines = chunkBuffer.split('\n');
+        chunkBuffer = lines.pop();
+        lines.forEach(line => {
+          if (line.trim()) {
+            broadcast({ type: 'system_log', text: line });
+          }
+        });
+      });
+      stream.on('end', () => {
+        leftoverBuffer = chunkBuffer;
+      });
+    } catch {}
+  });
+}
+
 // ─── Startup ──────────────────────────────────────────────────────────────
 const latestRun = getLatestRun();
 if (latestRun) {
@@ -573,6 +625,7 @@ if (latestRun) {
 }
 
 const dirWatchers = watchForNewSimulations();
+startTailingBackendLogs();
 
 // ─── Connection handler ──────────────────────────────────────────────────
 wss.on('connection', (ws) => {

@@ -434,6 +434,10 @@ interface PipelineState {
   sessionId: string | null;
   setSessionId: (id: string | null) => void;
 
+  // System Logs
+  systemLogs: string[];
+  addSystemLog: (log: string) => void;
+
   // Upvoting state
   upvotedItems: Record<string, number>;
   upvoteItem: (id: string) => void;
@@ -668,6 +672,12 @@ export const usePipelineStore = create<PipelineState>((set) => ({
 
   sessionId: null,
   setSessionId: (id) => set({ sessionId: id }),
+
+  // System Logs
+  systemLogs: [],
+  addSystemLog: (log) => set((state) => ({
+    systemLogs: [...state.systemLogs.slice(-999), log]
+  })),
 
   // Upvoting state
   upvotedItems: {},

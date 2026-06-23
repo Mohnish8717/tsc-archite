@@ -18,10 +18,15 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/ws': {
-        target: 'http://localhost:8000',
+      '/ws/evaluate': {
+        target: 'ws://localhost:8000',
         ws: true,
       },
+      '/ws/stream': {
+        target: 'ws://localhost:8080',
+        ws: true,
+        rewrite: (path) => path.replace(/^\/ws\/stream/, '')
+      }
     },
   },
 })

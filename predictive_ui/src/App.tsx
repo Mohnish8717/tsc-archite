@@ -11,6 +11,7 @@ import LandingPage from './components/LandingPage';
 import InputSetupPage from './components/InputSetupPage';
 import { useWebSocket } from './hooks/useWebSocket';
 import { usePipelineStore } from './store/usePipelineStore';
+import { BackendTerminal } from './components/ui/BackendTerminal';
 
 function App() {
   const ws = useWebSocket();
@@ -19,6 +20,7 @@ function App() {
   const [activeLayer, setActiveLayer] = useState(0.5); // 0.5 = Input Setup Page
   const [statusWidth, setStatusWidth] = useState(450);
   const [hasAutoSwitched, setHasAutoSwitched] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
 
   // Clean up evaluation WebSocket on unmount
   useEffect(() => {
@@ -252,6 +254,17 @@ function App() {
             <span className="font-black text-xs uppercase tracking-widest">{isConnected ? 'Live' : 'Offline'}</span>
           </div>
 
+          {/* Terminal Toggle Button */}
+          <button
+            onClick={() => setShowTerminal(!showTerminal)}
+            className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${
+              showTerminal ? 'bg-brand text-black' : 'bg-white text-black hover:bg-black/5'
+            }`}
+          >
+            <Terminal className="w-3 h-3" strokeWidth={3} />
+            LOGS
+          </button>
+
           {/* Stop button — only visible while simulation is running */}
           {simulationStatus === 'running' && (
             <button
@@ -294,6 +307,12 @@ function App() {
             </div>
           </div>
         )}
+        
+        {/* Floating Backend Terminal */}
+        <BackendTerminal 
+          isOpen={showTerminal} 
+          onClose={() => setShowTerminal(false)} 
+        />
       </main>
     </div>
   );
