@@ -14,17 +14,14 @@ RUN apt-get update && apt-get install -y \
 # Set up working directory
 WORKDIR /app
 
-# Copy python dependencies
-COPY pyproject.toml .
-# We use uv for fast installation
-RUN pip install uv && uv pip install --system -e .
-
-# Copy Node.js dependencies for websocket bridge
-COPY predictive_ui/package.json predictive_ui/
-RUN cd predictive_ui && npm install
-
-# Copy application code
+# Copy application code first so pip can build the package
 COPY . .
+
+# Install python dependencies
+RUN pip install --upgrade pip setuptools wheel && pip install .
+
+# Install Node.js dependencies for websocket bridge
+RUN cd predictive_ui && npm install
 
 # Create the persistent directory path variable
 ENV OASIS_RUNS_DIR=/data/log/oasis_runs

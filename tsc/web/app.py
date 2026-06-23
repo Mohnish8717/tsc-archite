@@ -62,7 +62,16 @@ app.add_middleware(
 # G6: mount persona REST API
 app.include_router(persona_router)
 
-DIST_DIR = Path("/Users/mohnish/Downloads/tsc architecture/predictive_ui/dist")
+import os
+_env_dist = os.environ.get("DIST_DIR")
+if _env_dist:
+    DIST_DIR = Path(_env_dist)
+else:
+    # Try local path first, fallback to docker path
+    _local = Path(__file__).parent.parent.parent / "predictive_ui" / "dist"
+    _docker = Path("/app/predictive_ui/dist")
+    DIST_DIR = _local if _local.exists() else _docker
+
 UPLOAD_DIR = Path("/tmp/tsc_uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -132,8 +141,11 @@ async def serve_predictive_dashboard():
     return FileResponse(DIST_DIR / "predictive_dashboard.png")
 
 
-app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
-app.mount("/models", StaticFiles(directory=str(DIST_DIR / "models")), name="models")
+if DIST_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+    app.mount("/models", StaticFiles(directory=str(DIST_DIR / "models")), name="models")
+else:
+    logger.warning(f"Static directory {DIST_DIR} not found. Skipping static file mounts.")
 
 
 # ── REST Endpoints ───────────────────────────────────────────────────
