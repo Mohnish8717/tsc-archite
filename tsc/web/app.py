@@ -147,6 +147,12 @@ if DIST_DIR.exists():
 else:
     logger.warning(f"Static directory {DIST_DIR} not found. Skipping static file mounts.")
 
+# Expose the logs directory so users can download simulation artifacts
+import os
+LOGS_DIR = Path(os.environ.get("OASIS_RUNS_DIR", "log/oasis_runs"))
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/logs", StaticFiles(directory=str(LOGS_DIR)), name="logs")
+
 
 # ── REST Endpoints ───────────────────────────────────────────────────
 
@@ -483,6 +489,9 @@ async def stop_simulation():
     """Gracefully signal the simulation engine to stop and aggregate results."""
     global _active_pipeline_task, _active_pipeline
     
+    status = "idle"
+    message = "No active simulation"
+    
     if _active_pipeline and hasattr(_active_pipeline, '_pipeline_jsonl') and _active_pipeline._pipeline_jsonl:
         run_dir = _active_pipeline._pipeline_jsonl.parent
         commands_file = run_dir / "commands.json"
@@ -491,18 +500,28 @@ async def stop_simulation():
             import json
             with open(commands_file, "w") as f:
                 json.dump({"action": "stop"}, f)
-            return {"status": "stopping", "message": "Stop command sent to OASIS engine"}
+            logger.info("Stop command sent to OASIS engine")
+            status = "stopping"
+            message = "Stop command sent"
         except Exception as e:
             logger.error(f"Failed to write stop command: {e}")
-            return {"status": "error", "message": f"Failed to write stop command: {e}"}
             
-    # Fallback to hard cancel if pipeline is stuck elsewhere
+    return {"status": status, "message": message}
+
+@app.post("/api/simulation/abort")
+async def abort_simulation():
+    """Immediately abort the entire pipeline task at any layer."""
+    global _active_pipeline_task
+    
+    status = "idle"
+    message = "No active simulation"
+    
     if _active_pipeline_task and not _active_pipeline_task.done():
         _active_pipeline_task.cancel()
-        return {"status": "stopping", "message": "Pipeline hard cancellation requested"}
+        status = "cancelled"
+        message = "Pipeline task cancelled"
         
-    return {"status": "idle", "message": "No simulation currently running"}
-
+    return {"status": status, "message": message}
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
     """Start the web server."""

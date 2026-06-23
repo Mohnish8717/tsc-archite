@@ -9,8 +9,9 @@ import asyncio
 from pathlib import Path
 from typing import Any, Optional
 
+import os
 # Directory where OASIS simulation runs (and pipeline.jsonl) are written
-_LOG_BASE = Path("log/oasis_runs")
+_LOG_BASE = Path(os.environ.get("OASIS_RUNS_DIR", "log/oasis_runs"))
 
 from tsc.config import Settings, settings
 from tsc.layers.layer1_ingestor import ContextualIngestor

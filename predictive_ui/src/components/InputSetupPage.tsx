@@ -1,7 +1,8 @@
 import React, { useState, useRef } from 'react';
-import { Activity, Play, Plus, X, FileText, Upload, File as FileIcon } from 'lucide-react';
+import { Activity, Play, Plus, X, FileText, Upload, File as FileIcon, Info, Terminal, Square, ArrowRightCircle, ShieldCheck } from 'lucide-react';
 
 import { API_BASE_URL } from '../config';
+import { AI_FITNESS_CONTEXT, AI_FITNESS_PROPOSAL, AI_FITNESS_TICKETS } from '../data/aiFitnessDefaults';
 
 interface InputSetupPageProps {
   onStartSimulation: (filePaths: Record<string, string>, boardroomOnly: boolean) => Promise<void>;
@@ -50,6 +51,14 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
       return;
     }
     setDocuments(prev => [...prev, { id: Math.random().toString(), title, file: null, text: '' }]);
+  };
+
+  const loadDefaultInputs = () => {
+    setDocuments([
+      { id: Math.random().toString(), title: 'Company Context', file: null, text: AI_FITNESS_CONTEXT },
+      { id: Math.random().toString(), title: 'Feature Proposal', file: null, text: AI_FITNESS_PROPOSAL },
+      { id: Math.random().toString(), title: 'Support Tickets', file: null, text: AI_FITNESS_TICKETS }
+    ]);
   };
 
   const removeDocument = (id: string) => {
@@ -177,6 +186,13 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
             >
               <Plus size={16} strokeWidth={3} /> Custom
             </button>
+            <button
+              type="button"
+              onClick={loadDefaultInputs}
+              className="px-4 py-2 bg-[#FF4500] text-black border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] font-black text-sm uppercase tracking-widest hover:-translate-y-1 hover:translate-x-1 hover:shadow-none transition-all flex items-center gap-2 ml-auto"
+            >
+              <Play size={16} fill="currentColor" /> Use Default Inputs to Test Pipeline
+            </button>
           </div>
         </div>
 
@@ -263,14 +279,15 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
           )}
 
           <div className="flex flex-col gap-4 mt-8">
-            <label className="flex items-center gap-2 font-black uppercase tracking-widest text-sm cursor-pointer mb-2">
+            <label className="flex items-center gap-2 font-black uppercase tracking-widest text-sm mb-2 text-gray-500 opacity-70">
               <input 
                 type="checkbox" 
-                checked={boardroomOnly}
-                onChange={(e) => setBoardroomOnly(e.target.checked)}
-                className="w-5 h-5 accent-black cursor-pointer border-2 border-black"
+                checked={false}
+                disabled={true}
+                onChange={() => {}}
+                className="w-5 h-5 accent-gray-500 cursor-not-allowed border-2 border-gray-400"
               />
-              Skip Social Simulation (Boardroom Only)
+              Skip Social Simulation (Boardroom Only) - Currently disabled, run full pipeline
             </label>
             <button
               type="submit"
@@ -297,6 +314,78 @@ export default function InputSetupPage({ onStartSimulation, onSkip }: InputSetup
             )}
           </div>
         </form>
+
+        {/* UI Usage Tips Section */}
+        <div className="mt-12 mb-8 border-4 border-black p-6 bg-white shadow-neo-black">
+          <div className="flex items-center gap-3 mb-6 pb-4 border-b-4 border-black">
+            <Info size={28} className="text-brand" strokeWidth={3} />
+            <h2 className="font-black text-xl uppercase tracking-widest">Suggestions & Usage Tips</h2>
+          </div>
+          
+          <div className="flex flex-col gap-6">
+            <div className="flex items-start gap-4">
+              <div className="shrink-0 p-2 bg-black text-white mt-1">
+                <Terminal size={20} strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="font-black uppercase tracking-wider text-sm mb-1">Terminal</h3>
+                <p className="text-sm font-bold text-black/70 leading-relaxed">
+                  Located in the top navigation bar. Click this to toggle a drawer that shows the raw, real-time backend execution logs exactly as they appear on the server console. Great for debugging!
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="shrink-0 p-2 bg-red-600 text-white mt-1">
+                <Square size={20} strokeWidth={2.5} fill="white" />
+              </div>
+              <div>
+                <h3 className="font-black uppercase tracking-wider text-sm mb-1">Abort Simulation</h3>
+                <p className="text-sm font-bold text-black/70 leading-relaxed">
+                  Instantly aborts the entire pipeline at any stage. It functions as an emergency hard-stop that halts all background processes immediately without saving data.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="shrink-0 p-2 bg-red-500 text-black border-2 border-black mt-1">
+                <Square size={20} strokeWidth={2.5} fill="black" />
+              </div>
+              <div>
+                <h3 className="font-black uppercase tracking-wider text-sm mb-1">Stop & Proceed</h3>
+                <p className="text-sm font-bold text-black/70 leading-relaxed">
+                  Gracefully stops the current loop. If used during the OASIS Social Simulation (Layer 5), it will save all the social data generated up to that exact moment, conclude the phase, and smoothly transition to the next stage.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="shrink-0 p-2 bg-green-500 text-black border-2 border-black mt-1">
+                <ShieldCheck size={20} strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="font-black uppercase tracking-wider text-sm mb-1">Authorize Simulation</h3>
+                <p className="text-sm font-bold text-black/70 leading-relaxed">
+                  Found in the Seeds review layer (Layer 4). Click this once you are satisfied with the generated agent starting points. It locks in the inputs and officially launches the OASIS Social Simulation.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <div className="shrink-0 p-2 bg-black text-white mt-1">
+                <Play size={20} strokeWidth={2.5} fill="currentColor" />
+              </div>
+              <div>
+                <h3 className="font-black uppercase tracking-wider text-sm mb-1">Start Simulation</h3>
+                <p className="text-sm font-bold text-black/70 leading-relaxed">
+                  Begins the full evaluation pipeline starting from Layer 1 data ingestion. Make sure you've uploaded your documents or clicked "Use Default Inputs" before starting.
+                </p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
       </div>
     </div>
   );

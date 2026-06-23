@@ -14,6 +14,74 @@ import { usePipelineStore } from './store/usePipelineStore';
 import { API_BASE_URL } from './config';
 import { BackendTerminal } from './components/ui/BackendTerminal';
 
+function formatUserFriendlyMessage(rawMessage: string): string | null {
+  if (!rawMessage) return null;
+  const lowerMsg = rawMessage.toLowerCase();
+
+  // Layer 1: Ingestion
+  if (lowerMsg.includes('ingest') || lowerMsg.includes('chunking') || lowerMsg.includes('loading') || lowerMsg.includes('extract') || lowerMsg.includes('normalize')) {
+    const match = rawMessage.match(/([a-zA-Z0-9_\-\s]+\.(?:json|csv|md|txt|pdf|docx))/i) || rawMessage.match(/(?:file|document|chunking)\s+([a-zA-Z0-9_\-\s]+)/i);
+    const filename = match ? match[1].trim() : 'documents';
+    return `Ingesting file ${filename}... Building semantic knowledge graphs in LightRAG.`;
+  }
+
+  // Layer 2: Feature Discovery
+  if (lowerMsg.includes('gap') || lowerMsg.includes('unarticulated') || lowerMsg.includes('feature discovery') || lowerMsg.includes('market')) {
+    return "Analyzing market gaps and uncovering unarticulated user needs...";
+  }
+
+  // Layer 3: Personas
+  if (lowerMsg.includes('persona') || lowerMsg.includes('psychological') || lowerMsg.includes('trait')) {
+    return "Synthesizing psychological profiles... Creating rich user personas (This usually takes ~10-15 minutes depending on LLM latency).";
+  }
+
+  // Layer 5 Post-Simulation (Clustering/Alignment happens after sim)
+  if (lowerMsg.includes('cluster') || lowerMsg.includes('alignment') || lowerMsg.includes('aai')) {
+    return "Clustering semantic beliefs and computing the Agent Alignment Index (AAI)...";
+  }
+
+  // Layer 4 / 5: Simulation
+  if (lowerMsg.includes('simulat') || lowerMsg.includes('agent') || lowerMsg.includes('action') || lowerMsg.includes('step')) {
+    return "Simulation running. Generating autonomous agent interactions and tracking behavioral shifts...";
+  }
+
+  // Layer 6: Memory
+  if (lowerMsg.includes('memor') || lowerMsg.includes('metric') || lowerMsg.includes('store') || lowerMsg.includes('hindsight')) {
+    return "Storing simulation memory and evaluating core metrics...";
+  }
+
+  // Layer 7: Final Synthesis
+  if (lowerMsg.includes('report') || lowerMsg.includes('executive') || lowerMsg.includes('synthesis')) {
+    return "Generating the final Predictive Reality Executive Report...";
+  }
+
+  return null;
+}
+
+const LiveStatusMessage = () => {
+  const [displayMessage, setDisplayMessage] = useState<string>('');
+  const latestLog = usePipelineStore(state =>
+    state.systemLogs.length > 0 ? state.systemLogs[state.systemLogs.length - 1] : ''
+  );
+
+  useEffect(() => {
+    if (latestLog) {
+      const friendlyMsg = formatUserFriendlyMessage(latestLog);
+      if (friendlyMsg) {
+        setDisplayMessage(friendlyMsg);
+      }
+    }
+  }, [latestLog]);
+
+  if (!displayMessage) return null;
+
+  return (
+    <div className="text-[10px] font-bold text-black/70 truncate uppercase tracking-wider">
+      {displayMessage}
+    </div>
+  );
+};
+
 function App() {
   const ws = useWebSocket();
   const evalWsRef = useRef<WebSocket | null>(null);
@@ -110,10 +178,12 @@ function App() {
     if (evalWsRef.current) {
       try {
         evalWsRef.current.close();
-      } catch (e) {}
+      } catch (e) { }
     }
 
-    const wsBaseUrl = import.meta.env.VITE_WS_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const wsBaseUrl = import.meta.env.VITE_WS_URL || (API_BASE_URL
+      ? API_BASE_URL.replace(/^http/, 'ws')
+      : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`);
     const evalUrl = `${wsBaseUrl}/ws/evaluate`;
 
     console.log(`[FastAPI WS] Connecting to ${evalUrl}...`);
@@ -132,7 +202,7 @@ function App() {
       try {
         const data = JSON.parse(event.data);
         console.log("[FastAPI WS] Received event:", data);
-        
+
         // Handle rejection from the backend (e.g., simulation already running)
         if (data.type === 'error') {
           alert(`Simulation Error: ${data.message}`);
@@ -155,7 +225,7 @@ function App() {
     };
   };
 
-  // Signal the backend to stop the simulation gracefully.
+  // Signal the backend to stop the simulation gracefully (proceed to next step).
   // We rely on the backend's WebSocket to update the frontend state to 'idle'
   // once the final metrics are fully aggregated.
   const handleStopSimulation = async () => {
@@ -166,16 +236,25 @@ function App() {
     }
   };
 
+  // Hard abort the simulation entirely at any layer.
+  const handleAbortSimulation = async () => {
+    try {
+      await fetch(`${API_BASE_URL}/api/simulation/abort`, { method: 'POST' });
+    } catch (e) {
+      console.warn('Abort request failed:', e);
+    }
+  };
+
   if (activeLayer === 0.5) {
-    return <InputSetupPage 
-      onStartSimulation={handleStartSimulation} 
+    return <InputSetupPage
+      onStartSimulation={handleStartSimulation}
       onSkip={() => setActiveLayer(1)}
     />;
   }
 
   return (
     <div className="h-screen w-screen bg-white flex flex-col overflow-hidden">
-      
+
       {/* ── Top Nav Bar ─────────────────────────────────── */}
       <header
         className="fixed top-0 left-0 right-0 z-50 bg-white border-b-8 border-black flex items-stretch"
@@ -209,27 +288,27 @@ function App() {
         </nav>
 
         {/* Status bar */}
-        <div 
+        <div
           className="flex items-center gap-4 px-6 border-l-8 border-black shrink-0 relative"
           style={{ width: statusWidth, minWidth: '350px', maxWidth: '80vw' }}
         >
           {/* Custom resize handle over the black border */}
-          <div 
+          <div
             className="absolute -left-2 top-0 bottom-0 w-4 cursor-col-resize z-50"
             onMouseDown={(e) => {
               e.preventDefault();
               const startX = e.clientX;
               const startWidth = statusWidth;
-              
+
               const onMouseMove = (moveEvent: MouseEvent) => {
                 setStatusWidth(Math.max(350, Math.min(window.innerWidth * 0.8, startWidth - (moveEvent.clientX - startX))));
               };
-              
+
               const onMouseUp = () => {
                 document.removeEventListener('mousemove', onMouseMove);
                 document.removeEventListener('mouseup', onMouseUp);
               };
-              
+
               document.addEventListener('mousemove', onMouseMove);
               document.addEventListener('mouseup', onMouseUp);
             }}
@@ -240,10 +319,11 @@ function App() {
               {simulationStatus === 'running' ? (
                 <>
                   <span className="w-2 h-2 bg-brand animate-pulse shrink-0" />
-                  <div 
-                    className="font-black text-xs uppercase tracking-widest text-brand overflow-x-auto whitespace-nowrap scrollbar-hide flex-1 min-w-0"
-                  >
-                    {simulationTitle}
+                  <div className="flex flex-col flex-1 min-w-0 justify-center">
+                    <div className="font-black text-xs uppercase tracking-widest text-brand overflow-x-auto whitespace-nowrap scrollbar-hide">
+                      {simulationTitle}
+                    </div>
+                    <LiveStatusMessage />
                   </div>
                   <span className="font-black text-xs text-black/50 shrink-0">{simulationProgress?.percent ?? 0}%</span>
                 </>
@@ -263,25 +343,25 @@ function App() {
           {/* Terminal Toggle Button */}
           <button
             onClick={() => setShowTerminal(!showTerminal)}
-            className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer transition-colors duration-200 ${
-              showTerminal ? 'bg-brand text-black' : 'bg-white text-black hover:bg-black/5'
-            }`}
+            className={`flex items-center gap-2 px-4 py-2 border-l-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer shrink-0 transition-colors ${showTerminal ? 'bg-black text-white' : 'bg-white text-black hover:bg-black/5'
+              }`}
           >
-            <Terminal className="w-3 h-3" strokeWidth={3} />
-            LOGS
+            <Terminal className="w-4 h-4" strokeWidth={3} />
+            <span className="hidden sm:inline">Terminal</span>
           </button>
 
-          {/* Stop button — only visible while simulation is running */}
-          {simulationStatus === 'running' && (
+          {simulationStatus !== 'idle' && (
             <button
-              id="stop-simulation-btn"
-              onClick={handleStopSimulation}
-              className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 bg-red-500 text-black border-4 border-black font-black text-xs uppercase tracking-widest cursor-pointer hover:bg-red-600 transition-colors duration-200"
+              onClick={handleAbortSimulation}
+              className="flex items-center gap-1.5 px-4 py-2 border-l-4 border-black bg-red-600 text-white font-black text-xs uppercase tracking-widest cursor-pointer hover:bg-red-700 transition-colors shrink-0"
+              title="Immediately abort the pipeline at any stage"
             >
-              <Square className="w-3 h-3 fill-black" strokeWidth={4} />
-              STOP
+              <Square className="w-3 h-3 fill-white" strokeWidth={4} />
+              <span className="hidden sm:inline">Abort Simulation</span>
             </button>
           )}
+
+
 
           <button
             onClick={() => setActiveLayer(0.5)}
@@ -313,11 +393,11 @@ function App() {
             </div>
           </div>
         )}
-        
+
         {/* Floating Backend Terminal */}
-        <BackendTerminal 
-          isOpen={showTerminal} 
-          onClose={() => setShowTerminal(false)} 
+        <BackendTerminal
+          isOpen={showTerminal}
+          onClose={() => setShowTerminal(false)}
         />
       </main>
     </div>

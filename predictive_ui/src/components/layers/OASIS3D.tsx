@@ -1241,7 +1241,7 @@ export default function OASIS3D() {
               className="flex items-center gap-1.5 px-3 py-1.5 border-2 border-red-500 bg-red-500 text-black font-black text-xs uppercase tracking-widest cursor-pointer hover:bg-red-600 hover:border-red-600 transition-colors duration-200"
             >
               <Square className="w-3 h-3 fill-black" strokeWidth={4} />
-              STOP
+              STOP & PROCEED TO NEXT STEP
             </button>
           )}
           {/* Network Topology toggle */}
