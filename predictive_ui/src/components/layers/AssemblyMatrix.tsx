@@ -1103,7 +1103,7 @@ export default function AssemblyMatrix() {
       </div>
 
       {/* ── Persona Generation ─────────────────────────── */}
-      <div className="flex-1 relative">
+      <div className="flex-1 relative overflow-hidden">
         <div className="bg-white px-8 py-5 border-b-4 border-black flex items-center gap-3">
           <Users className="w-5 h-5 text-brand" strokeWidth={3} />
           <h2 className="font-black text-lg uppercase tracking-widest flex-1">Layer 3: Synthetic Persona Generation</h2>
@@ -1114,13 +1114,11 @@ export default function AssemblyMatrix() {
           )}
         </div>
 
-        {/* Pending / Running Overlay */}
         {(isWaiting || isRunning) && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/90" style={{ top: '60px' }}>
-            {/* Main status card */}
-            <div className="border-8 border-black px-12 py-10 flex flex-col items-center gap-4 text-center shadow-neo-black max-w-sm">
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/90 overflow-y-auto p-4" style={{ top: '60px' }}>
+            <div className="border-8 border-black px-8 sm:px-12 py-8 sm:py-10 flex flex-col items-center gap-4 text-center shadow-neo-black max-w-md my-auto shrink-0">
               {isRunning ? (
-                <div className="w-12 h-12 bg-brand border-4 border-black flex items-center justify-center">
+                <div className="w-12 h-12 bg-brand border-4 border-black flex items-center justify-center shrink-0">
                   <Loader2 className="w-6 h-6 text-black animate-spin" strokeWidth={3} />
                 </div>
               ) : (
@@ -1135,16 +1133,15 @@ export default function AssemblyMatrix() {
                 <p className="text-sm font-bold text-black/60">
                   {isRunning ? 'LLM is synthesising behavioural profiles…' : 'Waiting for previous stages to complete.'}
                 </p>
+                <div className="mt-4 pt-4 border-t-4 border-black/20 flex flex-col gap-2">
+                  <p className="text-xs font-black uppercase tracking-widest text-black/40">
+                    ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
+                  </p>
+                  <p className="text-xs font-bold text-black/50">
+                    Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
+                  </p>
+                </div>
               </div>
-            </div>
-            {/* Hint below the card */}
-            <div className="mt-6 flex flex-col items-center gap-1 text-center">
-              <p className="text-xs font-black uppercase tracking-widest text-black/40">
-                ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
-              </p>
-              <p className="text-xs font-bold text-black/50">
-                Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
-              </p>
             </div>
           </div>
         )}
