@@ -115,10 +115,8 @@ function App() {
       } else if (pendingAction?.action === 'review_seeds') {
         setActiveLayer(4); // Seeds
       } else {
-        // If simulation is running (or recently started), show the OASIS Sim layer, 
-        // since the user wants the latest simulation to be shown.
-        // Wait, if it's completely empty we'd show ingestion, but if it has a sessionId it's running!
-        setActiveLayer(5); // OASIS Sim
+        // If simulation is running (or recently started), show the Ingestion layer
+        setActiveLayer(1); // Ingestion
       }
       setHasAutoSwitched(true);
     }
