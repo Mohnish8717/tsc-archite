@@ -386,6 +386,18 @@ _active_pipeline: Optional[TSCPipeline] = None
 async def ws_evaluate(ws: WebSocket):
     """Run evaluation with real-time progress via WebSocket."""
     global _active_pipeline_task, _active_pipeline
+
+    if _active_pipeline_task is not None and not _active_pipeline_task.done():
+        logger.warning("Rejected simulation request: Another simulation is already running")
+        await ws.accept()
+        await ws.send_json({
+            "type": "error",
+            "message": "A simulation is currently running. Please wait for it to finish or stop it before starting a new one.",
+            "traceback": "RATE_LIMIT_PREVENTION"
+        })
+        await ws.close(code=1008)
+        return
+
     await manager.connect(ws)
     try:
         # Receive config
@@ -430,7 +442,13 @@ async def ws_evaluate(ws: WebSocket):
         _active_pipeline = pipeline
         await manager.send_json(ws, {"type": "started"})
         boardroom_only = config.get("boardroom_only", False)
-        result = await pipeline.evaluate(**files, boardroom_only=boardroom_only)
+        
+        # Enforce a 4-hour hard timeout (14400 seconds) 
+        # (Allows long runs due to LLM rate limit backoffs, but prevents permanent zombie processes)
+        result = await asyncio.wait_for(
+            pipeline.evaluate(**files, boardroom_only=boardroom_only),
+            timeout=14400
+        )
 
         await manager.send_json(ws, {
             "type": "complete",

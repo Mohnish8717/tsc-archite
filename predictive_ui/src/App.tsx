@@ -132,6 +132,12 @@ function App() {
       try {
         const data = JSON.parse(event.data);
         console.log("[FastAPI WS] Received event:", data);
+        
+        // Handle rejection from the backend (e.g., simulation already running)
+        if (data.type === 'error') {
+          alert(`Simulation Error: ${data.message}`);
+          setActiveLayer(0.5); // Redirect back to Home
+        }
       } catch (e) {
         console.error("[FastAPI WS] Failed to parse message:", e);
       }
