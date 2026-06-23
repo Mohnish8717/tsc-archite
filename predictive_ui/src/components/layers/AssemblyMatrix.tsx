@@ -1117,6 +1117,7 @@ export default function AssemblyMatrix() {
         {/* Pending / Running Overlay */}
         {(isWaiting || isRunning) && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/90" style={{ top: '60px' }}>
+            {/* Main status card */}
             <div className="border-8 border-black px-12 py-10 flex flex-col items-center gap-4 text-center shadow-neo-black max-w-sm">
               {isRunning ? (
                 <div className="w-12 h-12 bg-brand border-4 border-black flex items-center justify-center">
@@ -1134,15 +1135,16 @@ export default function AssemblyMatrix() {
                 <p className="text-sm font-bold text-black/60">
                   {isRunning ? 'LLM is synthesising behavioural profiles…' : 'Waiting for previous stages to complete.'}
                 </p>
-                <div className="mt-4 pt-4 border-t-4 border-black/20 flex flex-col gap-2">
-                  <p className="text-xs font-black uppercase tracking-widest text-black/40">
-                    ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
-                  </p>
-                  <p className="text-xs font-bold text-black/50">
-                    Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
-                  </p>
-                </div>
               </div>
+            </div>
+            {/* Hint below the card */}
+            <div className="mt-6 flex flex-col items-center gap-1 text-center">
+              <p className="text-xs font-black uppercase tracking-widest text-black/40">
+                ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
+              </p>
+              <p className="text-xs font-bold text-black/50">
+                Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
+              </p>
             </div>
           </div>
         )}
