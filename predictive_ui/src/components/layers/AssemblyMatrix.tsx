@@ -67,7 +67,7 @@ export interface BioSections {
 
 export const normalizeBio = (bio: any): string => {
   if (!bio) return '';
-  
+
   let parsed = bio;
   if (typeof bio === 'string') {
     const trimmed = bio.trim();
@@ -157,7 +157,7 @@ interface Demographics {
 const parseDemographics = (bioText: string = ''): Demographics => {
   const parsed = parseBioSections(bioText);
   const text = parsed.identityAnchor || bioText;
-  
+
   const extract = (pattern: RegExp, defaultVal: string = 'N/A'): string => {
     const match = text.match(pattern);
     return match ? match[1].trim() : defaultVal;
@@ -1012,7 +1012,7 @@ export default function AssemblyMatrix() {
       };
     });
   }, [spawnedAgents]);
-  
+
   const totalAgents = spawnedList.length || enrichedPersonas.length;
 
   const dynamicBoardroom = useMemo(() => {
@@ -1134,16 +1134,14 @@ export default function AssemblyMatrix() {
                 <p className="text-sm font-bold text-black/60">
                   {isRunning ? 'LLM is synthesising behavioural profiles…' : 'Waiting for previous stages to complete.'}
                 </p>
-                {isRunning && (
-                  <div className="mt-4 pt-4 border-t-4 border-black/20 flex flex-col gap-2">
-                    <p className="text-xs font-black uppercase tracking-widest text-black/40">
-                      ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
-                    </p>
-                    <p className="text-xs font-bold text-black/50">
-                      Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
-                    </p>
-                  </div>
-                )}
+                <div className="mt-4 pt-4 border-t-4 border-black/20 flex flex-col gap-2">
+                  <p className="text-xs font-black uppercase tracking-widest text-black/40">
+                    ⏱ Est. ~15 min to generate 25 rich personas — depends on LLM rate limits
+                  </p>
+                  <p className="text-xs font-bold text-black/50">
+                    Open the <span className="font-black text-black uppercase">Terminal</span> in the top bar to track progress in real-time.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -1191,7 +1189,7 @@ export default function AssemblyMatrix() {
                 {/* OCEAN bars — only if data available from spawn event */}
                 <OceanBars scores={persona.ocean_scores} />
 
-                <button 
+                <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleSelectPersona({ ...persona, isBoardroom: false });
@@ -1235,8 +1233,8 @@ export default function AssemblyMatrix() {
                   </div>
                 </div>
                 <OceanBars scores={agent.ocean_scores ?? {}} />
-                
-                <button 
+
+                <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleSelectPersona({ ...agent, isBoardroom: false });
@@ -1260,11 +1258,11 @@ export default function AssemblyMatrix() {
 
       {/* ── Detail Modal ────────────────────────────── */}
       {selectedPersona && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
           onClick={() => setSelectedPersona(null)}
         >
-          <div 
+          <div
             className="bg-white border-8 border-black shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] max-w-2xl w-full flex flex-col max-h-[85vh] overflow-hidden animate-in fade-in zoom-in-95 duration-150"
             onClick={(e) => e.stopPropagation()}
           >
@@ -1280,7 +1278,7 @@ export default function AssemblyMatrix() {
                   {selectedPersona.isBoardroom ? 'Boardroom Executive' : 'Synthetic User Profile'}
                 </h3>
               </div>
-              <button 
+              <button
                 onClick={() => setSelectedPersona(null)}
                 className="w-10 h-10 bg-white text-black border-4 border-black flex items-center justify-center font-black hover:bg-brand hover:translate-x-[2px] hover:translate-y-[2px] transition-all"
               >
@@ -1302,7 +1300,7 @@ export default function AssemblyMatrix() {
                 <div className="flex-1 min-w-0">
                   <h4 className="font-black text-2xl uppercase leading-none mb-1 break-words">{selectedPersona.name}</h4>
                   <p className="text-sm font-black text-brand uppercase tracking-wider mb-3 break-words">{selectedPersona.role}</p>
-                  
+
                   {/* Badges */}
                   <div className="flex flex-wrap gap-2">
                     {selectedPersona.buyer_journey && (
@@ -1354,25 +1352,22 @@ export default function AssemblyMatrix() {
                   <div className="flex border-4 border-black font-mono font-black text-xs uppercase tracking-widest flex-none shadow-neo-black">
                     <button
                       onClick={() => setActiveTab('telemetry')}
-                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${
-                        activeTab === 'telemetry' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
-                      }`}
+                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${activeTab === 'telemetry' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
+                        }`}
                     >
                       Telemetry
                     </button>
                     <button
                       onClick={() => setActiveTab('psychology')}
-                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${
-                        activeTab === 'psychology' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
-                      }`}
+                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${activeTab === 'psychology' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
+                        }`}
                     >
                       Psychology
                     </button>
                     <button
                       onClick={() => setActiveTab('triggers')}
-                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${
-                        activeTab === 'triggers' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
-                      }`}
+                      className={`flex-1 py-3 text-center border-r-4 border-black last:border-r-0 cursor-pointer transition-all ${activeTab === 'triggers' ? 'bg-brand text-black font-black' : 'bg-white hover:bg-brand/10 text-black/60'
+                        }`}
                     >
                       Triggers
                     </button>
@@ -1390,7 +1385,7 @@ export default function AssemblyMatrix() {
 
             {/* Footer */}
             <div className="bg-black/5 p-6 border-t-4 border-black flex justify-end flex-none">
-              <button 
+              <button
                 onClick={() => setSelectedPersona(null)}
                 className="py-3 px-8 bg-brand text-black border-4 border-black font-black uppercase tracking-widest shadow-neo-black hover:translate-x-1 hover:translate-y-1 hover:shadow-none transition-all duration-200"
               >
